@@ -168,4 +168,5 @@ python tests/smoke_scenarios.py
 | [design/tools.md](design/tools.md) | 工具协议：@tool 装饰器 + lookup + 归一化 |
 | [design/model_config.md](design/model_config.md) | 模型配置 + role_model + token API |
 | [design/workspace.md](design/workspace.md) | Workspace 持久化布局 + Event + StepResult |
+| [design/ctx.md](design/ctx.md) | 上下文组装：CtxComponent 基类 + CtxAssembler + 8 组件 + 压缩 |
 | [design/testing.md](design/testing.md) | 测试与 Mock 范围 + 职责边界声明 |
