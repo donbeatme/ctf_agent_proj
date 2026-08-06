@@ -1,0 +1,369 @@
+"""工作记忆:Workspace(本地全量存储 + 索引化历史)+ MockWorkspace(非持久化)。
+
+设计见 design/workspace.md §3/§4。
+- Workspace:每个 run 一个实例,自管 runs/<run_id>/ 目录(state.json / events.jsonl)。
+  全量历史(uuid-keyed 事件流)本地存储,按 agent/step/kind/时间查询;**只存不解析**,
+  语义判断交给各 Agent。压缩只改渲染,不改存储——账本读 events.jsonl/state.json 原文。
+- MockWorkspace:非持久化(不落盘),供测试和引擎默认占位。
+"""
+
+import json
+import time
+import uuid
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+from agent.blueprint import Blueprint
+from agent.ctx import (
+    AgentCommComponent,
+    CtxAssembler,
+    DagComponent,
+    DocsComponent,
+    HistoryComponent,
+    SystemPromptComponent,
+    TaskComponent,
+    ToolComponent,
+    TraceComponent,
+)
+from agent.schema import (
+    EVENT_SCHEMA, EventKind, Role, SOURCE_AGENT, normalize_event_detail,
+)
+
+_RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
+
+
+def _now():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+@dataclass
+class StepResult:
+    """该步的执行产物/观察/verdict(每个 step 一条,存 state.json)。"""
+
+    step_id: str
+    verdict: str = ""
+    observation: str = ""
+    result: dict = field(default_factory=dict)
+    attempts: int = 0
+    is_completed: bool = False  # ee 判定任务是否已完成
+
+
+@dataclass
+class Event:
+    """一条历史记录(审计/上下文投影的原子单元)。uuid 为全局索引。"""
+
+    uuid: str
+    agent: str | None    # 哪个 agent 发的;system = 引擎系统行为(如调度器置 ready)
+    kind: str            # step_record | verdict | replan | use_tool | tool_result | ...
+    step_id: str | None = None
+    verdict: str | None = None
+    detail: dict = field(default_factory=dict)
+    ts: str = ""
+
+
+class Workspace:
+    """每个 run 一份:本地全量存储 + 索引化历史。
+
+    - 状态:meta / blueprint / steps / env_state / docs / events / summaries
+    - events 追加写 events.jsonl(即时落盘,审计流不依赖 sync)
+    - sync() 全量写 state.json(原子替换)
+    - load() 从 state.json + events.jsonl 重建,供引擎断点续跑
+    - 只存不解析:查询只是过滤/拼文本,不做语义判断
+    """
+
+    def __init__(self, run_id, root=None):
+        self.run_id = run_id
+        self.root = Path(root) / run_id if root else _RUNS_DIR / run_id
+        self.meta = {"run_id": run_id, "task": {}, "created_at": _now(), "run_status": "PLANNING"}
+        self.blueprint: Blueprint | None = None
+        self.steps: dict[str, StepResult] = {}
+        self.env_state: dict = {}
+        self.docs: dict[str, str] = {}           # 技能库检索出的参考文档 {doc_id: 文本}
+        self.tools: dict[str, dict] = {}         # executor 工具目录(统一形式 {id: {description, parameters}},run 内静态)
+        self.summaries: dict = {}                # 语义压缩摘要缓存 {f"{role}:{key}": {"text":..., "passes":...}}
+        self.events: list[Event] = []
+        self._persist = True                     # MockWorkspace 关掉,不落盘
+        self.assembler = CtxAssembler(self)
+        # 角色组件表(design/workspace.md §5.1/§7):组件是 workspace 只读投影,引擎只改
+        # workspace;trace/ac 按 replan 边界投影当轮,history 投影全局 step_record。
+        # ep/ex/ee/et 表已注册;engine 已接线:外部 agent 上下文经 assembler.assemble
+        # 组装(前向),返回经 ingest 装回(反向)。
+        # 懒加载:组件类在首次 assemble 时才实例化,避免 Workspace 构造时预创建 28 个实例。
+        self.assembler.register_class(
+            Role.PLANNER,
+            SystemPromptComponent,
+            TaskComponent,
+            AgentCommComponent,
+            DagComponent,
+            HistoryComponent,
+            DocsComponent,
+            ToolComponent,
+            TraceComponent,
+        )
+        self.assembler.register_class(
+            Role.EVALUATOR_PLAN,
+            SystemPromptComponent,
+            TaskComponent,
+            DagComponent,
+            HistoryComponent,
+        )
+        self.assembler.register_class(
+            Role.EXECUTOR,
+            SystemPromptComponent,
+            TaskComponent,
+            AgentCommComponent,
+            DagComponent,
+            DocsComponent,
+            ToolComponent,
+            (TraceComponent, (), {"agent": Role.EXECUTOR}),
+        )
+        self.assembler.register_class(
+            Role.EVALUATOR_STEP,
+            SystemPromptComponent,
+            TaskComponent,
+            AgentCommComponent,
+            DagComponent,
+            HistoryComponent,
+        )
+        self.assembler.register_class(
+            Role.EVALUATOR_TASK,
+            SystemPromptComponent,
+            TaskComponent,
+            AgentCommComponent,
+            DagComponent,
+            HistoryComponent,
+        )
+
+    # ===== 生命周期 =====
+
+    @classmethod
+    def create(cls, run_id, task, meta=None, root=None) -> "Workspace":
+        """引擎启动 run 时新建:初始化 meta 并落初始检查点。"""
+        ws = cls(run_id, root)
+        ws.meta.update({"task": task, "run_status": "PLANNING"})
+        ws.meta.update(meta or {})
+        ws.sync()
+        return ws
+
+    @classmethod
+    def load(cls, run_id, root=None) -> "Workspace":
+        """从 runs/<run_id>/ 重建实例(断点续跑)。"""
+        ws = cls(run_id, root)
+        ws._ensure_dir()
+        st = json.loads(ws._read("state.json"))
+        ws.meta = st.get("meta") or {}
+        ws.blueprint = Blueprint.from_dict(st["blueprint"]) if st.get("blueprint") else None
+        ws.steps = {sid: StepResult(**d) for sid, d in (st.get("steps") or {}).items()}
+        ws.env_state = st.get("env_state") or {}
+        ws.docs = st.get("docs") or {}
+        ws.tools = st.get("tools") or {}
+        ws.summaries = st.get("summaries") or {}
+        raw = []
+        for line in ws._read_lines("events.jsonl"):
+            try:
+                raw.append(Event(**json.loads(line)))
+            except (json.JSONDecodeError, TypeError):
+                pass  # 丢弃损坏行(崩溃残留半行),不阻塞整个 run 的恢复
+        for e in raw:
+            e.detail = normalize_event_detail(e.kind, e.detail)
+        ws.events = raw
+        return ws
+
+    def sync(self):
+        """检查点落盘:state.json(原子替换)。events 已在 add_event 即时落盘。
+        非持久化(MockWorkspace)跳过写盘,仅内存态。"""
+        if not self._persist:
+            return
+        self._ensure_dir()
+        self._atomic_write("state.json", {
+            "meta": self.meta,
+            "blueprint": self.blueprint.to_dict() if self.blueprint else None,
+            "steps": {sid: asdict(sr) for sid, sr in self.steps.items()},
+            "env_state": self.env_state,
+            "docs": self.docs,
+            "tools": self.tools,
+            "summaries": self.summaries,
+        })
+
+    # ===== 状态接口 =====
+
+    def reset(self):
+        """重置 run 级状态(复用同一实例跑新 run 时调用):清 blueprint/events/steps/summaries/env_state。
+        保留 docs/tools 等静态配置与 meta.run_id。持久化实例同步清空 events.jsonl 并写空 state.json。
+        """
+        self.blueprint = None
+        self.steps = {}
+        self.env_state = {}
+        self.summaries = {}
+        self.events = []
+        self.meta["run_status"] = "PLANNING"
+        if self._persist:
+            self._ensure_dir()
+            with (self.root / "events.jsonl").open("w", encoding="utf-8") as fh:
+                fh.write("")
+            self._atomic_write("state.json", {
+                "meta": self.meta,
+                "blueprint": None,
+                "steps": {},
+                "env_state": {},
+                "docs": self.docs,
+                "tools": self.tools,
+                "summaries": {},
+            })
+
+    def set_blueprint(self, bp: Blueprint):
+        """规划产出 / 补丁合并后写入当前 DAG。"""
+        self.blueprint = bp
+
+    def record_step(self, step_id, verdict, observation="", *, result=None, attempts=0,
+                    is_completed=False, agent=Role.EVALUATOR_STEP, **kw) -> StepResult:
+        """每步执行+验收后落账:写 steps + 追加一条 step_record 事件。
+
+        step_record 是 history 唯一投影源(design/workspace.md §7),事件 detail 需携带
+        该步的 observation / result / attempts / is_completed——观察与产物进事件流,历史投影才读得到。
+        StepResult 同步写入,供断点续跑后的结构化查询(ws.steps[sid].verdict 等)。
+        """
+        sr = StepResult(
+            step_id=step_id, verdict=verdict, observation=observation,
+            result=result or {}, attempts=attempts, is_completed=is_completed,
+        )
+        self.steps[step_id] = sr
+        self.add_event(agent, EventKind.STEP_RECORD, step_id=step_id, verdict=verdict,
+                       observation=observation, result=result or {},
+                       attempts=attempts, is_completed=is_completed, **kw)
+        return sr
+
+    def set_env(self, key, val):
+        self.env_state[key] = val
+
+    def get_env(self, key, default=None):
+        return self.env_state.get(key, default)
+
+    def set_doc(self, doc_id, text):
+        self.docs[doc_id] = text
+
+    def get_doc(self, doc_id):
+        return self.docs.get(doc_id)
+
+    def get_tool(self, tool_id):
+        """取统一形式的工具定义 dict({description, parameters});不存在返回 None。"""
+        return self.tools.get(tool_id)
+
+    def get_tool_description(self, tool_id, default=""):
+        """取工具一句话描述(目录投影用)。"""
+        return self.tools.get(tool_id, {}).get("description", default)
+
+    def set_tools(self, tools):
+        """整表注入工具目录(**统一接口**):只接受标准工具定义列表(OpenAI function-calling /
+        MCP),经 ToolComponent.normalize 归一到统一形式后合并。本地 {id: 描述} 映射不在
+        此接口——先把它转成标准格式再传。engine 启动时由调用方注入,run 内静态。
+        """
+        self.tools.update(ToolComponent.normalize(tools))
+
+    def record_tool_call(self, step_id, tool, args=None, agent=Role.EXECUTOR, **kw) -> Event:
+        """工具调用轨迹落账:追加 kind="use_tool" 事件(trace 的 ut 半段,agent 的决定)。"""
+        kw.update(tool=tool, args=args or {})
+        return self.add_event(agent, EventKind.USE_TOOL, step_id=step_id, **kw)
+
+    def record_tool_result(self, step_id, tool, output, *, args=None, agent=Role.EXECUTOR,
+                           **kw) -> Event:
+        """工具调用结果落账:追加 kind="tool_result" 事件(trace 的 tr 半段,世界的响应)。
+
+        工具结果存事件流(非独立存储),TraceComponent 按最近一次 replan 事件
+        之后的 use_tool/tool_result 投影为本轮轨迹。args 缺省为空 dict,输出过长由调用方先剪。
+        """
+        kw.update(tool=tool, args=args or {}, output=output)
+        return self.add_event(agent, EventKind.TOOL_RESULT, step_id=step_id, **kw)
+
+    def record_opinion(self, source, verdict, opinion, observation=None, step_id=None,
+                       **kw) -> Event:
+        """评估意见落账:追加 kind=source.value 的 opinion 事件(agent 通信/审计)。
+
+        意见是"当前对话返回文本",agent_comm 按最近一次 replan 之后的非 pass 意见投影;
+        pass 是闸门(不产出内容),由 engine 在非 pass 时调用。source 为 EvalSource,
+        agent 取对应评估角色(ep/ee/et;SCHEDULING 为引擎结构检测,agent=system)。
+        """
+        agent = SOURCE_AGENT[source]
+        verdict = verdict.value if hasattr(verdict, "value") else verdict
+        return self.add_event(agent, source.value, step_id=step_id, verdict=verdict,
+                              opinion=opinion, observation=observation, **kw)
+
+    # ===== 索引化历史 =====
+
+    def add_event(self, agent, kind, step_id=None, verdict=None, **kw) -> Event:
+        """追加一条历史记录:生成 uuid,内存 + events.jsonl 即时落盘。
+
+        agent="system" 标记引擎系统行为(调度器置 ready 等);ctx 渲染时过滤,
+        审计/断点续跑仍保留原文。非持久化(MockWorkspace)仅内存态,不写 events.jsonl。
+        detail 按 EVENT_SCHEMA 校验:已注册 kind → dataclass(漏字段/类型错当场炸);
+        未注册 kind → 退化 dict 通道(日志警告)。
+        """
+        schema = EVENT_SCHEMA.get(kind)
+        if schema is not None:
+            detail = schema(**kw)
+        else:
+            detail = kw
+        ev = Event(uuid=uuid.uuid4().hex, agent=agent, kind=kind,
+                   step_id=step_id, verdict=verdict, detail=detail, ts=_now())
+        self.events.append(ev)
+        if self._persist:
+            self._ensure_dir()
+            with (self.root / "events.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(asdict(ev), ensure_ascii=False) + "\n")
+                fh.flush()
+        return ev
+
+    def get_record(self, uuid_str) -> Event | None:
+        """按索引取全文(展开压缩投影用);不存在返回 None。"""
+        return next((e for e in self.events if e.uuid == uuid_str), None)
+
+    def query(self, agent=None, step_id=None, kind=None, verdict=None, time_range=None) -> list[Event]:
+        """按 agent / step_id / kind / verdict / 时间窗过滤,返回原序列表。
+
+        time_range=(start, end),闭区间,两端可 None(不限)。
+        ts 为 "%Y-%m-%d %H:%M:%S" 定宽字符串,字典序即时间序。
+        """
+        evs = self.events
+        if agent is not None:
+            evs = [e for e in evs if e.agent == agent]
+        if step_id is not None:
+            evs = [e for e in evs if e.step_id == step_id]
+        if kind is not None:
+            evs = [e for e in evs if e.kind == kind]
+        if verdict is not None:
+            evs = [e for e in evs if e.verdict == verdict]
+        if time_range is not None:
+            start, end = time_range
+            evs = [e for e in evs
+                   if (start is None or e.ts >= start) and (end is None or e.ts <= end)]
+        return evs
+
+    # ===== 持久化内部 =====
+
+    def _ensure_dir(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _read(self, name):
+        f = self.root / name
+        if not f.exists():
+            raise KeyError(f"run {self.run_id} 缺少 {name}")
+        return f.read_text(encoding="utf-8")
+
+    def _read_lines(self, name):
+        f = self.root / name
+        if not f.exists():
+            return []
+        return [ln for ln in f.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    def _atomic_write(self, name, data):
+        tmp = self.root / f".{name}.tmp"
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.root / name)
+
+
+class MockWorkspace(Workspace):
+    """mock 工作记忆:不落盘,供测试和引擎默认占位。"""
+
+    def __init__(self, run_id="mock"):
+        super().__init__(run_id)
+        self._persist = False

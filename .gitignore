@@ -1,0 +1,11 @@
+model_config.json
+.env
+.claude/
+__pycache__/
+*.pyc
+downloads/
+runs/
+tests/_scenario_out/
+tests/_ctx_out/
+tests/_rounds_out/
+.idea/
