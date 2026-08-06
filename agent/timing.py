@@ -1,7 +1,8 @@
 """计时与超时检测:PhaseTimer(上下文管理器 + check 协作式查询)。
 
-不走 threading.Timer 中断——Python 线程中断不可靠。上下文管理器在退出时自动算耗时
-并判断超时;长循环内部用 check() 主动查询,超时由调用方自行决定退出/降级。
+设计见 design/engine.md §10。不走 threading.Timer 中断——Python 线程中断不可靠。
+上下文管理器在退出时自动算耗时并判断超时;长循环内部用 check() 主动查询,超时由
+调用方自行决定退出/降级。
 """
 
 import time

@@ -1,6 +1,6 @@
-"""上下文组装:CtxComponent(组件基类)+ CtxAssembler(组装器)+ planner 组件。
+"""上下文组装:CtxComponent(组件基类)+ CtxAssembler(组装器)+ 8 个组件。
 
-设计见 design/workspace.md §5(CtxAssembler)/§7(planner 组件)。
+设计见 design/ctx.md;状态源与注册表见 design/workspace.md。
 
 **投影模型(关键不变量)**:组件是 workspace 的**只读投影**,不持独立数据副本。
 数据唯一真值在 workspace(ws.blueprint / ws.events / ws.docs 注册表),引擎只改
@@ -21,13 +21,13 @@ Docs 计划评审通过即清),组装器只机械执行。
 压缩元数据:
 - anchor    锚点组件(task/agent通信/系统提示词):永不压——can_advance 恒 False,
   且排除在 LLM 可压与机械候选之外(显式声明,不靠 priority/LEVELS 碰运气)
-- priority  压缩保护顺序,越小越先压(优先级阶梯见 design/workspace.md §6.2)
+- priority  压缩保护顺序,越小越先压(优先级阶梯见 design/ctx.md §4)
 - floor     不可再压的原文量下限(token);at_floor() 判断是否已到下限
 - LEVELS    压缩档位;LEVELS=("raw",) 即单档,can_advance 恒 False → 永不压
 - target    "ctx" 上下文正文(受预算压缩)/ "system" 并入系统提示词(永不压)
 - compress_methods  该组件可用的"按需压缩方式"说明(喂给压缩 LLM 的提示词;空 = 不可压,保留原文)
 
-压缩 API(溢出时,design/workspace.md §5.3):
+压缩 API(溢出时,design/ctx.md §5):
 - 注入 compress 回调 (prompt: str, content: str) -> str(可用更便宜模型)
 - 溢出**优先 LLM 压缩**:组装器把超预算内容 + 压缩提示词(压缩目的 / 优先级 / 占比 /
   当前触发压缩的 agent 目的 / 按需压缩方式)交给 LLM,LLM 决定怎么压、压到多少

@@ -174,9 +174,9 @@ Workspace 在 `_init_assembler()` 中按角色注册 CtxComponent：
 | 角色 | 组件（按拼接序） |
 |---|---|
 | planner | SystemPrompt / Task / AgentComm / Dag / History / Docs / Tool / Trace |
-| executor | SystemPrompt / Task / AgentComm / Dag / Docs / Tool / Trace |
-| evaluator_plan | SystemPrompt / Task / AgentComm / Dag / History |
+| executor | SystemPrompt / Task / AgentComm / Dag / Docs / Tool / Trace（Trace agent=EXECUTOR） |
+| evaluator_plan | SystemPrompt / Task / Dag / History |
 | evaluator_step | SystemPrompt / Task / AgentComm / Dag / History |
 | evaluator_task | SystemPrompt / Task / AgentComm / Dag / History |
 
-每个组件有独立的 level（渲染档位）、priority（压缩优先级）、compress_methods（压缩策略）。详见 `agent/ctx.py`。
+每个组件有独立的 level（渲染档位）、priority（压缩优先级）、compress_methods（压缩策略）。详见 `design/ctx.md`。

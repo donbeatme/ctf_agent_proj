@@ -50,7 +50,7 @@ class MySubscriber:
 | Signal | 参数 |
 |---|---|
 | `CTX_ASSEMBLED` | role, total_tokens, budget, overflow, components, system_tokens |
-| `CTX_OVERFLOW` | role, overflow, method（engine 侧另发 `detail` 文本形式） |
+| `CTX_OVERFLOW` | role, overflow, method |
 | `CTX_COMPRESSED` | role, method, compressed ([{key, from_level, to_level, delta}]), total_after, overflow_after |
 | `CTX_INGEST` | role, detail |
 

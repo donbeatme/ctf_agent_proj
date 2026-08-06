@@ -131,6 +131,8 @@ def resume(cls, run_id: str, planner, executor, evaluator, *, root=None) -> "Eng
 | `context_budget_tokens` | None (不限) | 上下文 token 预算上限，超过触发 CTX_OVERFLOW 信号；可为 `dict[role→int|None]` 按角色配置 |
 | `context_budget_ratio` | 0.9 | 自动计算时 (context_window - max_output) 的占比 |
 | `run_token_budget_tokens` | None (不限) | run 级累计 LLM token 用量上限，超限 → FAILED + TOKEN_BUDGET_EXCEEDED |
+| `run_timeout_ms` | None (不限) | run 全局超时（ms），超时 → FAILED + RUN_TIMEOUT |
+| `phase_timeout_ms` | `{planning:120000, plan_review:60000, executing:180000, step_eval:60000, reflecting:120000}` | 各阶段超时（ms，值可为 None 不限时）；超时 → 阶段降级（见 §10） |
 
 所有 FAILED 终态记录 `fail_reason`，优雅返回不崩进程。run 级累计用量（`engine._run_tokens`）在每次 LLM 调用后累加，随 `_persist_run_state` 落 `ws.meta.run_tokens`，断点续跑续计。
 
@@ -186,3 +188,46 @@ self._tool_registry.set_workspace(self.workspace)
 ```
 
 `get_doc` / `get_record` 是 `ToolRegistry.__init__` 中注册的闭包，捕获 `self` 引用，无需外部注入即可工作。工具规格通过 `tool_registry.openai_tool_specs()` 生成，供 `chat_with_tools` 使用。
+
+---
+
+## 10. 阶段超时机制
+
+实现：`agent/timing.py`（PhaseTimer）。**协作式超时，不走 `threading.Timer` 中断**——Python 线程中断不可靠。上下文管理器退出时自动算耗时并判断超时；长循环内用 `check()` 主动查询，超时由调用方决定退出/降级。
+
+### PhaseTimer API
+
+```python
+t = PhaseTimer("executing", deadline_ms=60_000)   # deadline_ms=None 不限时
+with t:                                           # __enter__ 计时起点;__exit__ 自动算耗时 + 判断超时
+    result = do_work()
+if t.timed_out:
+    handle_timeout(t)                             # 读 timed_out / elapsed_ms(ms) / remaining_ms
+```
+
+| 成员 | 说明 |
+|---|---|
+| `deadline_ms` | 超时上限（ms）；None = 不限时 |
+| `elapsed_ms` | 已耗时（ms，`_stop()` / `check()` 刷新） |
+| `timed_out` | 是否超时 |
+| `check()` | 主动查询：返回 True = 未超时，False = 已超时（并置 `timed_out`） |
+| `remaining_ms` | 剩余毫秒（无 deadline 返回 None） |
+
+### 引擎接线
+
+- **run 级**：`run()` / `resume()` 主循环顶部 `run_timer.check()` 逐轮检查 `run_timeout_ms`；超时 → `RUN_TIMEOUT` 信号 + `_fail("run 全局超时")`
+- **阶段级**：每个非调度状态用 `PhaseTimer(phase, deadline_ms=_phase_deadline(phase))` 包住 agent 调用；`_phase_deadline(phase)` 从 `phase_timeout_ms` 配置读 deadline；超时 → `PHASE_TIMEOUT` 信号（phase / elapsed_ms / step_id）
+
+### 各阶段超时兜底语义
+
+| 阶段 | 超时处置 |
+|---|---|
+| planning | `PHASE_TIMEOUT`；初始规划超时且无 bp 产出 → `_fail("初始规划超时")` |
+| plan_review | 置 `EvalResult(FAIL, "计划评审超时")` → 走 FAIL 分支：标记 revise + replan |
+| executing | 置 `ExecResult(observation="执行超时")` → 正常进 STEP_EVAL（验收看到超时观察，据此判 retry / escalate） |
+| step_eval | 置 `EvalResult(ESCALATE, "步骤校验超时")` → 走 ESCALATE 分支：标记 ESCALATED + replan |
+| reflecting | 置 `EvalResult(REPLAN, "反思超时")` → 走 REPLAN 分支 |
+
+设计意图：**超时不中断进程，而是降级为一条可被下游处理的观察/判语**——每个超时都转成状态机里的一个正常输入，不新增异常路径。执行超时的 observation、验收超时的 ESCALATE 都会落进事件流（history / agent_comm 投影），可审计、可断点续跑。
+
+配置键见 `design/model_config.md`：`run_timeout_ms` / `phase_timeout_ms`；单次 LLM 调用总超时 `llm_total_timeout_ms`（含重试）由 `agent/llm_api.py` 处理，属 LLM 层，不在此。
