@@ -913,6 +913,36 @@ def normalize_tool_specs(specs) -> dict[str, dict]:
     return out
 
 
+class ToolDirectoryComponent(CtxComponent):
+    """工具目录菜单:ws.tool_catalog(清单加载器)的只读投影,planner/executor 共用。
+
+    目录是"可申请清单"——只渲染 id + 一句话描述,**不写进 ws.tools**(申请前工具不可用)。
+    全量展示 catalog.manifest,不做分类过滤也不按 step 绑定门槛——题目需要什么工具由
+    agent 现场判断,漏掉分类只是少个提示,不影响能力(apply_tool 对完整清单全开放)。
+    planner 只读(规划时参考有哪些工具),executor 经 apply_tool/remove_tool 申请删除。
+    档位:raw(全量菜单)→ ref(仅 id)。
+    """
+
+    key = "tool_dir"
+    priority = 4            # 参考目录,与 ToolComponent 同区
+    LEVELS = ("raw", "ref")
+    compress_methods = "菜单里只剩 id(工具描述可再申请时获取),连一句话描述也去掉"
+
+    def render(self):
+        ws = self._ws
+        if ws is None or ws.tool_catalog is None:
+            return ""
+        manifest = ws.tool_catalog.manifest
+        if not manifest:
+            return ""
+        if self.level == 0:
+            lines = ["# 工具目录"]
+            for e in manifest:
+                lines.append(f"- {e['tool_id']}: {e['description']}")
+            return "\n".join(lines)
+        return "# 工具目录(索引)\n" + ", ".join(f"`{e['tool_id']}`" for e in manifest)
+
+
 class ToolComponent(CtxComponent):
     """工具目录:ws.tools 的只读投影(统一形式 {tool_id: {"description", "parameters"}})。
 

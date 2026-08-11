@@ -97,21 +97,25 @@
 agent/
 ├── engine.py         # 主循环：状态机 + run/resume + 调度分发 + budget 管理
 ├── understander.py   # 任务理解层输出 API：TaskUnderstander.understand(raw) → TaskInput
-├── planner.py        # 规划 Agent：LLM 调用 + PlanPatch 解析 + 只读 lookup 工具
+├── planner.py        # 规划 Agent：LLM 调用 + PlanPatch 解析 + 只读 lookup 工具 + DocStore 契约
+├── skills.py         # ctf-skills 技能库加载器：SkillLibrary + CtfSkillsDocStore（关键词路由检索）
+├── ctf_skill_tools.py # ctf-skills 工具/依赖声明：TOOL_MANIFEST(~70 条,手抄自 install_ctf_tools.sh)+ CtfSkillToolCatalog(frontmatter allowed-tools/compatibility + get_tool 查询)；纯声明,不接执行
+├── checks.py          # 环境检查钩子：SkillEnvProbe 只读探测工具(which/find_spec)/分类/沙箱就绪度 + SANDBOX_CATEGORIES；结果经 Signal.ENV_CHECK 写 run.log
 ├── blueprint.py      # 计划 DAG：Step/Blueprint/Patch + 拓扑排序 + 补丁合并
 ├── schema.py         # 类型系统：枚举/事件协议/Pydantic 模型/PlanPatch 契约
-├── workspace.py      # 工作区：状态持久化 + 事件流 + 上下文组装注册
-├── ctx.py            # 上下文组装器：组件注册/渲染/压缩/装填
+├── workspace.py      # 工作区：状态持久化 + 事件流 + 上下文组装注册 + 活动工具集增删
+├── ctx.py            # 上下文组装器：组件注册/渲染/压缩/装填（含 ToolDirectoryComponent 全量工具目录）
 ├── signals.py        # 事件总线：SignalBus pub/sub
 ├── logging.py        # 日志层：run.log 人类可读格式 + 汇总表
 ├── evaluator.py      # 评估 Agent 接口桩（ep/ee/et）
-├── executor.py       # 执行 Agent 接口桩
+├── executor.py       # 执行 Agent 接口桩（run(step, ctx, tool_exec=None)）
 ├── llm_api.py        # LLM 网关：chat/chat_with_tools + token 计算 + role_model
 ├── timing.py         # PhaseTimer 阶段超时
-└── tools.py          # 工具协议：@tool 装饰器/openai_tool_specs/call_tool + lookup 工具
+└── tools.py          # 工具协议：@tool 装饰器/openai_tool_specs/call_tool + lookup 工具 + apply_tool/remove_tool 动态申请
 
-design/               # 设计文档（9 份）
-tests/                # 163 个测试
+skills/ctf-skills/    # vendored ctf-skills 技能库（Agent Skills 格式，11 类 ~114 文档）
+design/               # 设计文档（10 份）
+tests/                # 测试
 ```
 
 ### 外部依赖（其它角色交付）
@@ -119,11 +123,48 @@ tests/                # 163 个测试
 | 接口 | 交付方 | 本仓库状态 |
 |---|---|---|
 | 任务理解层输出 API | ② 任务理解层 | `TaskUnderstander.understand(raw) → TaskInput` 已接线（`MockTaskUnderstander` 消费 `raw["goals"]` → `goal_list`，engine 在 run() 起始调用） |
-| 技能文档（Skill） | 第二组 ① | `ws.docs` 注册表 + `get_doc` 只读查询已接线 |
+| 技能文档（Skill） | —（③ 自持,原第二组 ① 交付） | 已落地：`agent/skills.py` 加载器 + vendored `skills/ctf-skills`（11 类 ~114 文档）。检索经 `DocStore.search(task)→[(doc_id,text)]` + `load_doc(doc_id)`（契约见 design/contracts.md §1）；命中分类只注册 SKILL.md，子文档经 `get_doc` 按需取 |
 | 执行 Agent | 第二组 ② | `Executor.run(step, ctx) → ExecResult` 接口桩 + `MockExecutor`（step 可带 `skill_id`，ctx 含绑定技能文档索引） |
 | 评估 Agent | 第二组 ③ | `Evaluator.review/step_eval/reflect` 接口桩 + `MockEvaluator` |
 | 工具执行 | 第二组 ② | `@tool` 注册 + `call_tool` 已接线，CTF2 工具已实现 |
+| CTF 工具清单(动态申请) | —(③ 自持,原第二组① 交付) | 已落地：`agent/ctf_skill_tools.py` 声明式目录；经 `Engine(tool_catalog=...)` → `ws.tool_catalog` 供 `ToolDirectoryComponent` 渲染**全量菜单**（planner 只读 + executor 申请）+ `apply_tool`/`remove_tool` 动态增删活动集 `ws.tools`（默认空）。纯声明不接执行（executor 调用不在范围）。运行时可经 `agent/checks.py` **只读探测**缺工具/缺沙箱/分类就绪度并写 run.log（apply 时逐工具 + run 起始快照 + 每步按 skill 分类） |
 | 经验沉淀（RAG） | 第二组 ③ | 未接入，接口桩见 [design/contracts.md §6](design/contracts.md) |
+
+> `skills/ctf-skills` vendored 自 [ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills)（MIT License,© 2026 Lukasz Jagiello,LICENSE 见 `skills/ctf-skills/LICENSE`）。其依赖工具（pwntools/angr/ghidra 等）为独立开源项目，遵循各自许可证。
+
+### 依赖与更新
+
+**Python 运行依赖**（3 个，见 `requirements.txt`）：
+
+```bash
+pip install -r requirements.txt
+```
+
+| 包 | 版本下限 | 用途 | 位置 |
+|---|---|---|---|
+| `openai` | >=1 | LLM 网关（新版 client API，兼容任意 OpenAI 兼容 base_url） | `agent/llm_api.py` |
+| `requests` | >=2 | HTTP 调用 | `agent/llm_api.py` |
+| `pydantic` | >=2 | schema 校验（field_validator/model_validator） | `agent/schema.py` |
+
+测试还需 dev 依赖 `pytest`（`pip install pytest`）。LLM/引擎配置见 [design/model_config.md](design/model_config.md)。
+
+**ctf-skills 技能库更新**——上游变更需同步三处接入点，再跑漂移守卫：
+
+| 接入点 | 路径 | 说明 |
+|---|---|---|
+| 技能库目录 | `agent/skills.py` `SKILLS_DIR` | vendored 库根目录 `skills/ctf-skills` |
+| 安装脚本 | `skills/ctf-skills/scripts/install_ctf_tools.sh` | 整库依赖安装/更新入口（执行层② 经 `installer_path` 触发；本仓库只读不执行） |
+| 工具清单 | `agent/ctf_skill_tools.py` `TOOL_MANIFEST` | **手抄**自安装脚本，脚本变更需手动同步 |
+
+更新流程：
+1. 从上游 [ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills) 拉取新版本，覆盖 `skills/ctf-skills/`（变更时核对 `LICENSE`）。
+2. 若 `install_ctf_tools.sh` 变了，同步重抄 `TOOL_MANIFEST`（跨安装方式去重，主方式优先级 `pip > apt > brew > gem > go > manual`，次要方式进 `alt_methods`）。
+3. 跑漂移守卫，清单与脚本脱节会失败：
+   ```bash
+   python -m pytest tests/test_ctf_skill_tools.py -x -q
+   ```
+
+本仓库对 ctf-skills 是**只读声明 + 探测**：目录工具经 `apply_tool` 动态申请进活动集，经 `agent/checks.py` 探测缺工具/缺沙箱/分类就绪度并写 run.log（见 [design/contracts.md §1.6/§1.7](design/contracts.md)）；真正装依赖是执行层/沙箱（第二组②）的职责，经 `installer_path` 触发 `install_ctf_tools.sh` 完成。
 
 ---
 
@@ -131,13 +172,22 @@ tests/                # 163 个测试
 
 ### 配置
 
+**API key 用环境变量设置**（密钥不进配置文件/仓库）：
+
 ```bash
-# model_config.json — LLM 配置
+export DEEPSEEK_API_KEY="sk-..."        # Linux/macOS
+# Windows: set DEEPSEEK_API_KEY=sk-...   （永久生效用 setx）
+```
+
+其余 LLM/引擎配置经 `model_config.json`（可选，缺省用内置默认）；优先级 **环境变量 > model_config.json > 内置默认**：
+
+```json
 {
-  "DEEPSEEK_API_KEY": "sk-...",
+  "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
   "DEEPSEEK_MODEL": "deepseek-v4-flash",
-  "LLM_MODEL_PLANNER": "deepseek-v4-flash",  # 可选：planner 专用模型
-  "LLM_MODEL_EP": "qwen3-235b-a22b"          # 可选：计划评审专用模型
+  "LLM_MODEL_PLANNER": "deepseek-v4-flash",
+  "LLM_MODEL_EP": "qwen3-235b-a22b",
+  "engine": { }
 }
 ```
 

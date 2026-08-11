@@ -8,4 +8,5 @@ runs/
 tests/_scenario_out/
 tests/_ctx_out/
 tests/_rounds_out/
+tmp/
 .idea/

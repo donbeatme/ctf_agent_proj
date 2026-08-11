@@ -46,7 +46,7 @@ FAILED 从所有非终态可达（`_fail()` 不校验迁移表，直接写状态
 | `PLANNING` | `bp is None` → `_do_initial_plan()` 初始规划；`bp is not None` → 跳过规划直接进 PLAN_REVIEW |
 | `PLAN_REVIEW` | 调 ep.review(ctx)，FAIL → 重规划，其他 → `clear_revise` → SCHEDULING |
 | `SCHEDULING` | `bp.next_step()`；无 ready 且任务完成/全部终态 → REFLECTING；死锁 → `_resolve_stuck` |
-| `EXECUTING` | 调 executor.run(step, ctx)，记录结果，→ STEP_EVAL |
+| `EXECUTING` | 若 step 绑 `skill_id`：先发 `ENV_CHECK`（探测分类 + 当前活动集）→ 调 executor.run(step, ctx)，记录结果，→ STEP_EVAL |
 | `STEP_EVAL` | 调 ee.step_eval(ctx)；PASS → goal eval → SCHEDULING / RETRY → EXECUTING / ESCALATE → PLANNING |
 | `REFLECTING` | 调 et.reflect(ctx)；DONE → PLANNING → DONE / REPLAN → PLANNING（终局修订） |
 
@@ -56,6 +56,7 @@ FAILED 从所有非终态可达（`_fail()` 不校验迁移表，直接写状态
 
 ```
 RUN_STARTED
+  │  env_check: probe_manifest → ENV_CHECK(scope=run_start)
   │
   ▼
 _init_run ──understander.understand(raw)──▶ TaskInput(raw_content + goal_list)
@@ -89,6 +90,8 @@ PLAN_REVIEW ──ep.review──▶
 
 RUN_END
 ```
+
+`ENV_CHECK` 打点：run 起始（`RUN_STARTED` 后）发全量快照 `scope=run_start`；每步执行前（`STEP_STARTED` 后、executor.run 前，仅当 step 绑 `skill_id`）发 `scope=step`（探测分类 + 当前活动集 `ws.tools`）。`resume()` 不重复打点——`tool_catalog` 不持久化，load 后 checker 为 None。探测语义/触发时机见 contracts.md §1.7。
 
 `run()`（及 `resume()`）在终态后填充 `engine.run_result`（`RunResult` dataclass）：
 `state`（终态字符串）、`completed`（任务是否达成）、`fail_reason`、`replans`/`stalls`/
@@ -188,6 +191,8 @@ self._tool_registry.set_workspace(self.workspace)
 ```
 
 `get_doc` / `get_record` 是 `ToolRegistry.__init__` 中注册的闭包，捕获 `self` 引用，无需外部注入即可工作。工具规格通过 `tool_registry.openai_tool_specs()` 生成，供 `chat_with_tools` 使用。
+
+**环境检查器**（`agent/checks.py` `SkillEnvProbe`）经 `Engine(checker=...)` 显式注入，或按 `tool_catalog` 自动派生 `SkillEnvProbe(tool_catalog)`；**无 catalog → checker=None 全跳过**（不探测、不发 `ENV_CHECK`）。apply_tool 在申请时对每工具做只读探测并随返回带 `probe`（见 §1.6/§1.7）。
 
 ---
 

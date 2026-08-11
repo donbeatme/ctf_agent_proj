@@ -49,6 +49,9 @@ class EngineLogger:
         self._role_stats: dict[str, dict] = {}  # role → {calls, total_ctx, total_lat, verdicts}
         self._replan_count = 0
 
+        # ── 环境检查累计 ──
+        self._env_missing: dict | None = None  # run_start 快照统计(on_run_end 汇总)
+
     # ═══════════════════════════════════════════════════════════════════
     # 文件管理
     # ═══════════════════════════════════════════════════════════════════
@@ -191,6 +194,11 @@ class EngineLogger:
             self._write(f"  {role:<18} {calls:>5}   {ctx_avg:>8}   {lat_avg:>12}   {tok_str:>26}   {verdicts}")
         self._write("")
         self._write(f"  终态: {state or '?'}  fail_reason={fail_reason or 'None'}")
+        if self._env_missing:
+            m = self._env_missing
+            self._write(f"  环境检查: 缺工具 {m['missing']}/{m['total']}  "
+                        f"manual {m['manual']}  "
+                        f"sandbox={'有' if m['sandbox_available'] else '无'}")
         self.close()
 
     def close(self):
@@ -486,6 +494,65 @@ class EngineLogger:
         role_v = str(role)
         self._to_agent(role_v)
         self._agent_line("ctx_ing", detail)
+
+    # ── 环境检查 ──
+
+    def on_env_check(self, scope="", step_id=None, report=None, **kw):
+        """环境检查(工具/沙箱/分类就绪度)写根级行:run_start 全量快照 + step 分类就绪度。"""
+        if report is None:
+            return
+        if scope == "run_start":
+            self._env_snapshot(report)
+        elif scope == "step":
+            self._env_step(step_id, report)
+
+    def _env_snapshot(self, report):
+        """run 起始全量清单快照:可用/缺失/manual + 沙箱运行时 + 缺失明细(截断前 15)。"""
+        total = report.get("total", 0)
+        avail = report.get("available", 0)
+        missing = report.get("missing", 0)
+        manual = report.get("manual", 0)
+        unknown = report.get("unknown", 0)
+        sb = report.get("sandbox") or {}
+        runtime = "docker/podman(有)" if sb.get("available") else "docker/podman(无)"
+        self._engine(f"check[run_start] 环境快照 工具可用 {avail}/{total} 缺失 {missing} "
+                     f"manual {manual} unknown {unknown}  沙箱运行时: {runtime}")
+        missing_list = report.get("missing_list") or []
+        if missing_list:
+            shown = missing_list[:15]
+            more = f" ...(共 {len(missing_list)} 条)" if len(missing_list) > 15 else ""
+            self._engine(f"check[run_start] 缺工具: {', '.join(shown)}{more}")
+        self._env_missing = {"missing": missing, "manual": manual, "total": total,
+                             "sandbox_available": bool(sb.get("available"))}
+
+    def _env_step(self, step_id, report):
+        """每步执行前按 skill 分类查就绪度 + 当前活动集缺工具。"""
+        parts = []
+        cat = report.get("category") or {}
+        if cat:
+            sb = cat.get("sandbox") or {}
+            cparts = [f"category={cat.get('category', '?')}"]
+            compat = cat.get("compatibility", "")
+            if compat:
+                cparts.append(f"compat=\"{compat[:60]}\"")
+            n_cmds = len(cat.get("install_cmds") or [])
+            if n_cmds:
+                cparts.append(f"install_cmds={n_cmds}")
+            if sb.get("needed"):
+                cparts.append(f"沙箱 needed=True available={bool(sb.get('available'))}")
+            else:
+                cparts.append("沙箱 无需隔离")
+            if not cat.get("exists"):
+                cparts.append("分类不存在")
+            parts.append("  ".join(cparts))
+        missing_tools = [t for t in (report.get("tools") or [])
+                         if t.get("status") == "missing"]
+        if missing_tools:
+            names = ", ".join(
+                f"{t['tool_id']}({t.get('check', '')})" for t in missing_tools)
+            parts.append(f"工具缺失 {len(missing_tools)}: {names}")
+        if parts:
+            self._engine(f"check[step {step_id}] " + "  ".join(parts))
 
     # ── 内部辅助 ──
 

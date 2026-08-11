@@ -12,13 +12,13 @@ class ExecResult:
 
 
 class Executor:
-    def run(self, step, ctx: str) -> ExecResult:
+    def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
         raise NotImplementedError
 
 
 class MockExecutor(Executor):
     """可配置返回内容的执行 mock。
-    传 fn 则用 callable(step, ctx) -> ExecResult;否则固定返回 observation/result/tool_calls。"""
+    传 fn 则用 callable(step, ctx, tool_exec=None) -> ExecResult;否则固定返回 observation/result/tool_calls。"""
 
     def __init__(self, observation: str = "", result: dict | None = None,
                  tool_calls: list[dict] | None = None, fn=None):
@@ -27,8 +27,11 @@ class MockExecutor(Executor):
         self._tool_calls = tool_calls
         self._fn = fn
 
-    def run(self, step, ctx: str) -> ExecResult:
+    def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
         if self._fn is not None:
-            return self._fn(step, ctx)
+            try:
+                return self._fn(step, ctx, tool_exec)
+            except TypeError:
+                return self._fn(step, ctx)  # 兼容旧 2 参 fn(step, ctx)
         return ExecResult(observation=self._observation, result=self._result,
                           tool_calls=self._tool_calls)

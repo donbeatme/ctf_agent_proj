@@ -48,7 +48,7 @@
 ### model_config.py — 通用配置读写
 
 ```python
-def get(name, default=None)    # config 文件 > 环境变量 > default
+def get(name, default=None)    # 环境变量 > config 文件 > default
 def require(name)              # get + 不存在抛 RuntimeError
 def set(name, value)           # 写回文件（原子 tmp + replace）
 def get_engine_config() -> dict  # 返回引擎配置字典，JSON "engine" 段覆盖 Python 默认值
@@ -166,7 +166,7 @@ class ToolResult:
 def resolve_key()
 ```
 
-按 `LLM_API_KEY` → `DEEPSEEK_API_KEY` 顺序从 config 或环境变量取 key。
+按 `LLM_API_KEY` → `DEEPSEEK_API_KEY` 顺序取 key，**环境变量优先**，`config.json` 兜底（12-factor：密钥等敏感项走环境变量，文件只放非敏感配置）。
 
 ---
 

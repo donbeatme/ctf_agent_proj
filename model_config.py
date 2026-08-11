@@ -18,10 +18,11 @@ _config = _load()
 
 
 def get(name, default=None):
-    value = _config.get(name)
+    """环境变量优先,config.json 兜底(12-factor:密钥等敏感项走环境变量,文件只放非敏感配置)。"""
+    value = os.environ.get(name)
     if value:
         return value
-    return os.environ.get(name, default)
+    return _config.get(name, default)
 
 
 def set(name, value):

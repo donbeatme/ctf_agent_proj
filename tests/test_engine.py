@@ -1183,9 +1183,9 @@ def test_engine_wires_external_agent_ctx():
         return wrap
 
     class CaptureExecutor(MockExecutor):
-        def run(self, step, ctx):
+        def run(self, step, ctx, tool_exec=None):
             seen["executor"] = (step.id, ctx)
-            return super().run(step, ctx)
+            return super().run(step, ctx, tool_exec)
 
     engine, _ = make_engine_raw(
         _plan_responses(

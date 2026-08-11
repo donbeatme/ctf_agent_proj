@@ -64,10 +64,17 @@ def _render_state_context(sc) -> str:
 
 
 class DocStore:
-    """技能库文档检索接口桩(上游实现)。③ 只调用,不实现;未接入时传 None 跳过。"""
+    """技能库文档检索接口桩(上游实现)。③ 只调用,不实现;未接入时传 None 跳过。
 
-    def search(self, task: dict) -> list[str]:
+    search 返回 [(doc_id, text)],planner 原样 set_doc(doc_id) 保留可绑定的 id;
+    load_doc 供 get_doc 按需取未注册文档(如子文档),返回 None 表示不存在。
+    """
+
+    def search(self, task: dict) -> list[tuple[str, str]]:
         raise NotImplementedError
+
+    def load_doc(self, doc_id: str) -> str | None:
+        return None
 
 
 class MockPlannerLLM:
@@ -119,6 +126,11 @@ class Planner:
         if name == "get_doc":
             doc_id = (args or {}).get("doc_id")
             doc = ws.get_doc(doc_id) if doc_id else None
+            if doc is None and self.docs is not None:
+                # 未注册子文档按需取:检索命中分类时只灌 SKILL.md,子文档经此兜底
+                doc = self.docs.load_doc(doc_id)
+                if doc is not None:
+                    ws.set_doc(doc_id, doc)   # 取到即入注册表,可绑定 skill_id/持久化
             ws.record_tool_call(None, name, args or {})
             if doc is None:
                 ws.record_tool_result(None, name, f"未知文档: {doc_id}", args=args or {})
@@ -136,10 +148,11 @@ class Planner:
         system = PLAN_SYSTEM
         if pin.feedback and pin.feedback.state_context:
             system += "\n\n" + _render_state_context(pin.feedback.state_context)
-        # 文档注册:检索结果写入 ws.docs 注册表(投影模型),Docs 组件渲染进 ctx
+        # 文档注册:检索结果写入 ws.docs 注册表(投影模型),Docs 组件渲染进 ctx。
+        # 保留检索返回的真实 doc_id,planner 才能把 skill_id 绑到技能文档上。
         if self.docs is not None:
-            for i, doc in enumerate(self.docs.search(raw_content or {})):
-                self.workspace.set_doc(f"doc{i}", doc)
+            for doc_id, doc in self.docs.search(raw_content or {}):
+                self.workspace.set_doc(doc_id, doc)
         turn = list(pin.feedback.turn) if pin.feedback and pin.feedback.turn else []
         ctx, sys_text, _ = self.workspace.assembler.assemble(
             "planner", raw_content=raw_content, goal_list=goal_list,

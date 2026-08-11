@@ -44,6 +44,7 @@ from agent.schema import (
 )
 from agent.executor import ExecResult
 from agent.evaluator import EvalResult, Verdict
+from agent.checks import SkillEnvProbe
 from agent import tools
 from agent.tools import ToolRegistry
 from agent.logging import EngineLogger
@@ -134,7 +135,8 @@ class Engine:
     def __init__(self, planner, executor, evaluator, workspace=None, tools=None,
                  max_cycles=None, max_replans=None, max_stalls=None,
                  max_deadlock_attempts=None, compress=None, context_budget=None,
-                 run_token_budget_tokens=None, understander=None):
+                 run_token_budget_tokens=None, understander=None, tool_catalog=None,
+                 checker=None):
         from model_config import get_engine_config
         cfg = get_engine_config()
         self.workspace = workspace or MockWorkspace()
@@ -143,6 +145,12 @@ class Engine:
             planner.workspace = self.workspace
         if tools:
             self.workspace.set_tools(tools)
+        if tool_catalog is not None:
+            self.workspace.tool_catalog = tool_catalog
+        # 环境检查器:显式传入优先;否则按 tool_catalog 派生(无 catalog → None 全跳过)
+        self._checker = checker if checker is not None else (
+            SkillEnvProbe(self.workspace.tool_catalog)
+            if self.workspace.tool_catalog is not None else None)
         self.executor = executor
         self.evaluator = evaluator
         self.understander = understander or MockTaskUnderstander()
@@ -204,6 +212,9 @@ class Engine:
                           task=raw_content, max_cycles=self.max_cycles,
                           max_replans=self.max_replans, max_stalls=self.max_stalls,
                           max_deadlock_attempts=self.max_deadlock_attempts)
+        if self._checker is not None:
+            rep = self._checker.probe_manifest()
+            self.signals.emit(Signal.ENV_CHECK, scope="run_start", report=rep)
         run_timer = PhaseTimer("run", deadline_ms=self._run_timeout_ms)
         run_timer.__enter__()
         try:
@@ -929,6 +940,14 @@ class Engine:
             self.signals.emit(Signal.STEP_STARTED, step_id=self.current.id,
                               attempt=self.current.attempts,
                               max_attempts=self.current.max_attempts)
+            if self._checker is not None and self.current.skill_id:
+                cat = self.current.skill_id.split(".")[0]
+                rep = {
+                    "tools": self._checker.probe_tools(list(self.workspace.tools)),
+                    "category": self._checker.probe_category(cat),
+                }
+                self.signals.emit(Signal.ENV_CHECK, scope="step",
+                                  step_id=self.current.id, report=rep)
             a = self._assembler()
             if a is not None:
                 a.precompress(Role.PLANNER)
@@ -937,7 +956,9 @@ class Engine:
             with t:
                 res: ExecResult = self._safe_call(
                     lambda: self._llm_wrap(Role.EXECUTOR,
-                        lambda: self.executor.run(self.current, ctx), ctx_size=count_tokens(ctx)),
+                        lambda: self.executor.run(self.current, ctx,
+                                                  tool_exec=self._tool_registry.call_tool),
+                        ctx_size=count_tokens(ctx)),
                     lambda exc: ExecResult(
                         observation=f"执行异常: {type(exc).__name__}: {exc}"),
                 )

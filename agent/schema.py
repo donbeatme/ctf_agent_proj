@@ -337,6 +337,7 @@ class Signal(StrEnum):
     PHASE_TIMEOUT = "phase_timeout"
     RUN_TIMEOUT = "run_timeout"
     TOKEN_BUDGET_EXCEEDED = "token_budget_exceeded"
+    ENV_CHECK = "env_check"  # 环境检查:工具/沙箱/分类就绪度探测结果(run_start/step)
 
 
 class EvalEvent(BaseModel):

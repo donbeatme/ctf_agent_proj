@@ -52,13 +52,14 @@ def run_task(args):
     from agent.engine import Engine
     from agent.executor import MockExecutor
     from agent.planner import Planner
+    from agent.skills import CtfSkillsDocStore
     from agent.workspace import Workspace
 
     task = json.loads(args.task) if args.task else _MOCK_TASK
     run_id = args.run_id or f"run-{time.strftime('%Y%m%d-%H%M%S')}"
     ws = Workspace.create(run_id, task)
     engine = Engine(
-        Planner(workspace=ws),
+        Planner(workspace=ws, docs=CtfSkillsDocStore()),
         MockExecutor(observation="(mock) 执行完成"),
         SmokeEvaluator(ws),
         workspace=ws,

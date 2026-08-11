@@ -77,6 +77,11 @@ class MySubscriber:
 | `RUN_TIMEOUT` | elapsed_ms |
 | `TOKEN_BUDGET_EXCEEDED` | tokens, budget |
 
+### 环境检查
+| Signal | 参数 |
+|---|---|
+| `ENV_CHECK` | scope（run_start / step）, step_id（step 时）, report（探测结果 shape 见 contracts.md §1.7） |
+
 ---
 
 ## 3. EngineLogger — run.log 格式
@@ -105,7 +110,7 @@ class EngineLogger:
 
 | 标签 | 含义 | 缩进 |
 |---|---|---|
-| `[engine]` | 引擎操作（状态迁移、dag 变更、调度决策） | 0 |
+| `[engine]` | 引擎操作（状态迁移、dag 变更、调度决策、环境检查 `check[...]`） | 0 |
 | `[ctx_asm]` | 上下文组装（total_tok/budget/overflow + 组件档位） | 1 |
 | `[llm]` | LLM 调用（#N ctx=S sys=S tok=P+C=T latency=Sms） | 1 |
 | `[tool]` | 执行器工具轨迹（use_tool / tool_result） | 1 |
@@ -136,9 +141,12 @@ LLM response 文本以双缩进子行显示。
   phase 超时 phase=... elapsed=Nms [step=...]
 
   终态: DONE  fail_reason=None
+  环境检查: 缺工具 5/70  manual 4  sandbox=无
 ```
 
-ctx 溢出 / phase 超时行仅在有事件时列出；汇总表 `tokens` 列与每 tick 的 `[llm] tok=` 一起反映 token 用量追踪。
+ctx 溢出 / phase 超时 / 环境检查行仅在有事件时列出；环境检查行来自 run_start 的 `ENV_CHECK` 快照统计。汇总表 `tokens` 列与每 tick 的 `[llm] tok=` 一起反映 token 用量追踪。
+
+`ENV_CHECK` 在 run.log 里写成 `[engine] check[...]` 根级行（run_start 全量快照 / step 分类就绪度 + 活动集缺工具），触发时机与 report shape 见 `contracts.md §1.7`。
 
 ---
 

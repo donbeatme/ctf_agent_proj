@@ -74,7 +74,7 @@ class ToolRegistry:
         self._registry: dict[str, callable] = {}
         self._docs: dict[str, str] = {}
         self._workspace = None
-        self._register_builtins()   # 注册 get_doc / get_record 闭包
+        self._register_builtins()   # 注册 get_doc / get_record / apply_tool / remove_tool
 
     def register(name, fn, description="", parameters=None)
     def call_tool(name, arguments) -> dict
@@ -87,10 +87,12 @@ class ToolRegistry:
 
 ### 内置工具（`_register_builtins`）
 
-`get_doc` 和 `get_record` 在 `__init__` 中注册为闭包，捕获 `self` 引用：
+`get_doc` / `get_record` / `apply_tool` / `remove_tool` 在 `__init__` 中注册为闭包，捕获 `self` 引用：
 
 - `get_doc(doc_id)` — 从 `self._docs` 取文档全文，未找到返回 `{"error": "未知文档: ..."}`
 - `get_record(uuid)` — 从 `self._workspace` 按 uuid 取事件全文（dataclass → asdict），无 workspace 或未找到返回 error
+- `apply_tool(tool_ids)` — 从 `ws.tool_catalog`（`get_tool`）校验并取 description，加入活动集 `ws.tools`；清单外的 id 进 `unknown`。返回附带 `"probe": {tid: {status, check}}`（每申请工具只读环境探测，见 contracts.md §1.7）
+- `remove_tool(tool_ids)` — 从活动集移除，幂等；未激活的 id 进 `missing`（有申请就有删除）
 
 引擎在 `_init_run` / `resume` 时调用 `set_docs()` / `set_workspace()` 注入上下文，内置工具无需额外配置即可工作。
 

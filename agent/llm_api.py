@@ -1,7 +1,7 @@
 """通用 LLM 调用 API(网关)。
 
 - 兼容任意 OpenAI 兼容接口:base_url + model 走 URL 模式,支持按调用覆盖
-- key 从 config.json 或环境变量读取(LLM_API_KEY / DEEPSEEK_API_KEY)
+- key 环境变量优先,config.json 兜底(LLM_API_KEY / DEEPSEEK_API_KEY)
 - 指数退避+jitter 重试,含总超时 budget;重试耗尽抛 LLMError
 - Token bucket 速率限制 + circuit breaker 熔断保护
 - Client 单例复用连接池

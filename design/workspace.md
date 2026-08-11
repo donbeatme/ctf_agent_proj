@@ -61,7 +61,7 @@ runs/<run_id>/
 | `steps` | dict[step_id → StepResult] |
 | `env_state` | 执行环境状态（target_url / container_id 等，Executor 写入） |
 | `docs` | 技能文档注册表 `{doc_id: content}` |
-| `tools` | 工具定义列表 |
+| `tools` | 活动工具集（**动态**：默认空，`apply_tool`/`remove_tool` 增删） |
 | `summaries` | CtxAssembler 压缩缓存 `{key: {text/passes} | {sig}}` |
 
 ### sync — 原子写入
@@ -105,8 +105,12 @@ ws.record_tool_result(step_id, tool, output, args)
 ws.record_opinion(agent, source, kind, verdict, opinion, step_id)
 ws.set_env(key, value) / ws.get_env(key)
 ws.set_doc(doc_id, content) / ws.get_doc(doc_id)
-ws.set_tools(tools)
+ws.set_tools(tools)               # 静态批量注入(兼容旧用法)
+ws.add_tools(specs)               # 按需注入(apply_tool 经此增长活动集):归一后并入,不覆盖已有
+ws.remove_tools(tool_ids)         # 从活动集移除(remove_tool 经此收缩):幂等,不存在的 id 忽略
 ```
+
+`ws.tool_catalog`（运行时静态工具目录加载器，apply_tool 校验用）**不持久化**——`resume()` 恢复后为 None，环境检查全跳过（见 engine.md §9 / contracts.md §1.7）。
 
 ### 查询
 
@@ -173,8 +177,8 @@ Workspace 在 `_init_assembler()` 中按角色注册 CtxComponent：
 
 | 角色 | 组件（按拼接序） |
 |---|---|
-| planner | SystemPrompt / Task / AgentComm / Dag / History / Docs / Tool / Trace |
-| executor | SystemPrompt / Task / AgentComm / Dag / Docs / Tool / Trace（Trace agent=EXECUTOR） |
+| planner | SystemPrompt / Task / AgentComm / Dag / History / Docs / ToolDirectory / Tool / Trace |
+| executor | SystemPrompt / Task / AgentComm / Dag / Docs / ToolDirectory / Tool / Trace（Trace agent=EXECUTOR） |
 | evaluator_plan | SystemPrompt / Task / Dag / History |
 | evaluator_step | SystemPrompt / Task / AgentComm / Dag / History |
 | evaluator_task | SystemPrompt / Task / AgentComm / Dag / History |

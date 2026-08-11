@@ -119,7 +119,7 @@ assembler.ingest(role, **returns)
 
 ---
 
-## 4. 组件清单（8 个）
+## 4. 组件清单（9 个）
 
 | 组件 | key | priority | anchor | LEVELS | 投影源 |
 |---|---|---|---|---|---|
@@ -129,13 +129,14 @@ assembler.ingest(role, **returns)
 | Dag | `dag` | 5 | ✗ | raw / skeleton | `ws.blueprint` |
 | History | `history` | 2 | ✗ | raw / index / summary | STEP_RECORD + REPLAN 事件 |
 | Docs | `docs` | 3 | ✗ | raw / ref | `ws.docs` |
+| ToolDirectory | `tool_dir` | 4 | ✗ | raw / ref | `ws.tool_catalog` |
 | Tool | `tools` | 4 | ✗ | raw / ref | `ws.tools` |
 | Trace | `trace` | 1 | ✗ | raw / index / summary | 最近 replan 之后的 USE_TOOL / TOOL_RESULT 事件 |
 
 ### 压缩优先级阶梯
 
 ```
-trace=1  >  history=2  >  docs=3  >  tools=4  >  dag=5
+trace=1  >  history=2  >  docs=3  >  tools/tool_dir=4  >  dag=5
 (先压)                                          (最后压)
 agent_comm=98 / task=99 / system_prompt=99  — 锚点，永不压
 ```
@@ -178,9 +179,13 @@ agent_comm=98 / task=99 / system_prompt=99  — 锚点，永不压
 
 生命周期：planning ↔ plan_review 循环内不清空；`on_plan_review_pass` 清掉**未绑定到步骤**的参考文档（计划用毕释放 ctx），绑定 `skill_id` 的保留供 executor 执行时查阅。
 
+### ToolDirectoryComponent
+
+工具目录菜单（`ws.tool_catalog` 只读投影）。渲染 TOOL_MANIFEST 全量清单（id + 一句话描述）——是"可申请清单"，**不写进 `ws.tools`**（申请前工具不可用）。不做分类过滤、不按 step 绑定门槛：题目需要什么工具由 agent 现场判断，apply_tool 对完整清单全开放（消费语义见 contracts.md §1.6）。planner 只读参考；executor 经 apply_tool/remove_tool 申请删除。档位：raw（全量菜单）→ ref（仅 id）。
+
 ### ToolComponent
 
-工具目录（`ws.tools` 只读投影）。executor 的常备能力集，run 内静态——planning ↔ review 循环里不清空。与本地协议解耦：`normalize` 接收标准工具格式（OpenAI function-calling / MCP），`ws.tools` 只存归一结果，本地 `@tool` 结构不泄漏进来。档位：raw（全目录）→ ref（仅 id）。
+活动工具集（`ws.tools` 只读投影）。**动态**：默认空，`apply_tool` 申请后经 `ws.add_tools` 并入、`remove_tool` 经 `ws.remove_tools` 收缩——有申请就有删除。与本地协议解耦：`normalize` 接收标准工具格式（OpenAI function-calling / MCP），`ws.tools` 只存归一结果，本地 `@tool` 结构不泄漏进来。档位：raw（全目录）→ ref（仅 id）。
 
 ### TraceComponent
 
@@ -227,8 +232,8 @@ Workspace 在 `_init_assembler()` 中按角色注册（懒加载）：
 
 | 角色 | 组件（按拼接序） |
 |---|---|
-| planner | SystemPrompt / Task / AgentComm / Dag / History / Docs / Tool / Trace |
-| executor | SystemPrompt / Task / AgentComm / Dag / Docs / Tool / Trace（agent=EXECUTOR） |
+| planner | SystemPrompt / Task / AgentComm / Dag / History / Docs / ToolDirectory / Tool / Trace |
+| executor | SystemPrompt / Task / AgentComm / Dag / Docs / ToolDirectory / Tool / Trace（agent=EXECUTOR） |
 | evaluator_plan | SystemPrompt / Task / Dag / History |
 | evaluator_step | SystemPrompt / Task / AgentComm / Dag / History |
 | evaluator_task | SystemPrompt / Task / AgentComm / Dag / History |

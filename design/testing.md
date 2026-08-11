@@ -30,7 +30,7 @@ class MockExecutor:
 - `observation` — 固定返回的观察文本
 - `result` — 固定返回的产物 dict
 - `tool_calls` — 固定返回的工具调用轨迹 `[{tool, args, result}]`（喂 trace 通道）
-- `fn` — 自定义函数 `(step, ctx) -> ExecResult`，覆盖前两者
+- `fn` — 自定义函数 `(step, ctx, tool_exec=None) -> ExecResult`，覆盖前两者（兼容旧 2 参 `(step, ctx)`）
 
 ### 2.2 MockEvaluator（`agent/evaluator.py`）
 
@@ -91,6 +91,9 @@ class MockWorkspace:
 | `tests/test_compress.py` | 机械压缩策略 |
 | `tests/test_llm_api.py` | Token 计算、模型匹配、消息计数 |
 | `tests/test_tool_components.py` | 工具组件渲染 |
+| `tests/test_skills.py` | 技能库加载器 / DocStore 检索（CtfSkillsDocStore） |
+| `tests/test_ctf_skill_tools.py` | 工具/依赖声明包装：CtfSkillToolCatalog / TOOL_MANIFEST / apply_tool 动态申请 |
+| `tests/test_checks.py` | 环境检查：SkillEnvProbe 探测 + ENV_CHECK 打点 + run.log 输出 |
 | `tests/test_timing.py` | PhaseTimer 阶段超时 |
 | `tests/smoke_scenarios.py` | 端到端场景（revise/escalate/deadlock/reflect），真实 Planner + mock 其他 |
 | `tests/test_history_ctx.py` | History 组件渲染导出（需真实 LLM） |
@@ -100,7 +103,7 @@ class MockWorkspace:
 ## 4. 测试运行
 
 ```bash
-python -m pytest tests/ -x -q          # 全量（163 个）
+python -m pytest tests/ -x -q          # 全量（213 个）
 python -m pytest tests/test_engine.py  # 仅引擎测试
 ```
 

@@ -30,6 +30,50 @@ GET_DOC_SPEC = {
 }
 
 
+APPLY_TOOL_SPEC = {
+    "type": "function",
+    "function": {
+        "name": "apply_tool",
+        "description": (
+            "工具目录在上下文中只列菜单;决策后按 tool_id 申请激活工具,申请成功的工具"
+            "加入可用工具集(经 get_doc 之外的工具需先申请)。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tool_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "要申请的清单 tool_id 列表",
+                },
+            },
+            "required": ["tool_ids"],
+        },
+    },
+}
+
+REMOVE_TOOL_SPEC = {
+    "type": "function",
+    "function": {
+        "name": "remove_tool",
+        "description": (
+            "从可用工具集移除先前申请的工具(有申请就有删除);未激活的 id 忽略(幂等)。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tool_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "要移除的 tool_id 列表",
+                },
+            },
+            "required": ["tool_ids"],
+        },
+    },
+}
+
+
 def tool(name, description, parameters):
     """装饰器:注册到模块级 _REGISTRY(向后兼容)。"""
 
@@ -112,6 +156,42 @@ class ToolRegistry:
             from dataclasses import asdict
             return asdict(ev)
 
+        def apply_tool(tool_ids):
+            ws = _self._workspace
+            catalog = ws.tool_catalog if ws else None
+            if catalog is None:
+                return {"error": "工具目录未初始化(Engine 未注入 tool_catalog)"}
+            from agent.checks import SkillEnvProbe
+            probe = SkillEnvProbe(catalog)
+            added, unknown, probe_map = [], [], {}
+            for tid in tool_ids:
+                meta = catalog.get_tool(tid)
+                if meta is None:
+                    unknown.append(tid)
+                    continue
+                ws.add_tools([{"name": tid, "description": meta["description"],
+                               "parameters": {"type": "object", "properties": {}}}])
+                added.append(tid)
+                try:
+                    probe_map[tid] = probe.probe_tool(tid)
+                except Exception:
+                    probe_map[tid] = {"tool_id": tid, "status": "unknown", "check": ""}
+            # 返回追加 probe:每工具可用性探测(只读),向后兼容(只增 key)
+            return {"added": added, "unknown": unknown, "probe": probe_map}
+
+        def remove_tool(tool_ids):
+            ws = _self._workspace
+            if ws is None:
+                return {"error": "工具上下文未初始化(无 workspace 引用)"}
+            removed, missing = [], []
+            for tid in tool_ids:
+                if tid in ws.tools:
+                    ws.remove_tools([tid])
+                    removed.append(tid)
+                else:
+                    missing.append(tid)
+            return {"removed": removed, "missing": missing}
+
         self.register(
             "get_doc", get_doc,
             GET_DOC_SPEC["function"]["description"],
@@ -126,6 +206,16 @@ class ToolRegistry:
                 "properties": {"uuid": {"type": "string", "description": "历史事件的 uuid 索引"}},
                 "required": ["uuid"],
             },
+        )
+        self.register(
+            "apply_tool", apply_tool,
+            APPLY_TOOL_SPEC["function"]["description"],
+            APPLY_TOOL_SPEC["function"]["parameters"],
+        )
+        self.register(
+            "remove_tool", remove_tool,
+            REMOVE_TOOL_SPEC["function"]["description"],
+            REMOVE_TOOL_SPEC["function"]["parameters"],
         )
 
     def register(self, name: str, fn, description="", parameters=None):

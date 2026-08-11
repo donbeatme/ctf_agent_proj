@@ -80,6 +80,20 @@ class Feedback(BaseModel):
 - `bp.meta["_response"]` — 原始 LLM 返回文本（日志用）
 - `Step.skill_id`（可选）— 绑定技能库文档 id，由 planner 检索后填入（add/update 的 `skill_id` 字段）；executor 执行时经此查阅技能文档
 
+#### 技能检索（DocStore）契约
+
+`Planner(docs=...)` 注入技能库检索器。接口桩 + 参考实现见 `agent/planner.py` / `agent/skills.py`：
+
+```python
+class DocStore:
+    def search(self, task: dict) -> list[tuple[str, str]]: ...
+    def load_doc(self, doc_id: str) -> str | None: ...
+```
+
+- **search** — 按题面检索，返回 `[(doc_id, 全文)]`；planner 原样 `set_doc(doc_id, text)`，**保留真实 doc_id** 才能把 `skill_id` 绑到技能文档上（勿用 `doc{i}` 重命名）。
+- **load_doc** — 按 doc_id 取未注册文档全文（如子文档），`None` 表示不存在；planner 的 `get_doc` 工具在 `ws.docs` 未命中时兜底调用它。
+- **参考实现** `CtfSkillsDocStore`（`agent/skills.py`）：扫 vendored `skills/ctf-skills`（Agent Skills 库，11 类 ~114 文档），按分类关键词路由，**只注册命中分类的 SKILL.md**（含 quick reference）；子文档正文不预灌，经 `load_doc`/`get_doc` 按需取。doc_id 拍平目录层级且受 `ID_PATTERN` 约束（如 `ctf-crypto`、`ctf-crypto.rsa-attacks`）；SKILL.md 内相对链接改写为可 `get_doc` 的引用。
+
 ### 内部 LLM 调用
 
 `Planner._default_llm()` 生成闭包，签名 `(*, system=None, prompt=None, messages=None, **kw) -> str`：
@@ -90,11 +104,106 @@ class Feedback(BaseModel):
 
 ---
 
+## 1.5 CTF 工具目录（声明式）— ctf-skills 工具与依赖包装
+
+把 ctf-skills 的工具/依赖声明包装进现有体系，供执行层/沙箱与规划层消费。**纯声明，不接执行**——目录工具不可调用、不注册执行函数；executor 怎么调工具属于第二组② 的交付。实现：`agent/ctf_skill_tools.py`。
+
+**来源与许可**：skill 库 vendored 自 [ljagiello/ctf-skills](https://github.com/ljagiello/ctf-skills)（MIT © 2026 Lukasz Jagiello，LICENSE 见 `skills/ctf-skills/LICENSE`）；`TOOL_MANIFEST` 手抄自 `scripts/install_ctf_tools.sh`。依赖工具（pwntools/angr/ghidra 等）为独立开源项目，遵循各自许可证。
+
+**依赖更新**：技能库 re-vendor 与 `TOOL_MANIFEST` 同步流程（含漂移守卫测试）见 README「依赖与更新」。
+
+### TOOL_MANIFEST schema
+
+`list[dict]`，每工具一条（~70 条，跨安装方式去重，主方式优先级 `pip > apt > brew > gem > go > manual`，次要方式记入 `alt_methods` 不进 ws.tools）：
+
+```python
+{"tool_id": str,         # 目录 id = openai spec name;受 ID_PATTERN 约束
+ "name": str,            # 显示名/包名
+ "install_method": str,  # pip|apt|brew|gem|go|manual
+ "install_command": str, # 单行安装命令(已编码下载)
+ "verify_check": str,    # CLI 命令名 或 "import <模块>"(manual 为空)
+ "description": str}     # 一行描述
+```
+
+### 查询 API（CtfSkillToolCatalog）
+
+| 方法 | 说明 |
+|---|---|
+| `as_tools_list()` | ws.tools 可注入列表（OpenAI function-calling 形状），`Engine(tools=...)` 直接用 |
+| `allowed_tools(category)` | frontmatter allowed-tools（agent 原生工具白名单） |
+| `compatibility(category)` | frontmatter compatibility（运行时要求） |
+| `verify_checks()` | 全清单校验项（CLI 名 + import 模块） |
+| `install_commands(category)` | 该分类 SKILL.md `## Prerequisites` 安装命令行（含脚本外的额外依赖，如 torch） |
+| `installer_path` | vendored `scripts/install_ctf_tools.sh` 路径（整库依赖下载/更新入口引用） |
+
+### 消费路径
+
+1. **引擎注入（声明式）**：`Engine(tools=CtfSkillToolCatalog().as_tools_list())` → `set_tools` → `ws.tools` → `ToolRegistry.openai_tool_specs` 合成 function-calling 规格；ToolComponent 渲染为 planner/executor 上下文"可用工具"列表。工具**可见但不可调用**。
+2. **执行层/沙箱（第二组②）**：读 `ws.tools`（`get_tool(tool_id)`/`get_tool_description`）按 id 挑工具；环境准备用 `install_commands(category)`/`verify_checks()`/`installer_path` 触发下载更新（`bash install_ctf_tools.sh all` / `--verify` / `--force`）。**调用工具的执行体不属于本模块**。
+3. **规划层参考**：`allowed_tools(category)`/`compatibility(category)` 供 planner 判断分类所需 agent 原生能力/运行时前提。
+
+---
+
+## 1.6 工具目录（动态申请）— apply_tool / remove_tool + 活动集
+
+把 §1.5 的声明式目录从"静态全量注入"改为**动态按需注入**，镜像 docs 的"索引 + 按需取"模式。实现：`agent/ctx.py`（ToolDirectoryComponent）、`agent/tools.py`（apply_tool/remove_tool）、`agent/workspace.py`（活动集）。
+
+- **目录（菜单）**：`ToolDirectoryComponent`（`agent/ctx.py`）按 `ws.tool_catalog` 渲染完整 TOOL_MANIFEST（id + 一句话描述），**只读投影不进活动集**；planner 与 executor 都接收全量目录，**不做分类过滤、不按 skill 绑定门槛**——题目需要什么工具由 agent 现场判断，apply_tool 对完整清单全开放。
+- **活动集 `ws.tools`**：**默认空**；agent 经 `apply_tool(tool_ids)` 申请后组件把对应工具加进活动集（ToolComponent 渲染），`remove_tool(tool_ids)` 移除（有申请就有删除）。
+- **内置工具**（`agent/tools.py` 注册到 ToolRegistry）：
+
+  ```python
+  apply_tool(tool_ids: list[str]) -> {"added": [...], "unknown": [...], "probe": {...}}
+  remove_tool(tool_ids: list[str]) -> {"removed": [...], "missing": [...]}
+  ```
+
+  - `apply_tool`：从 `ws.tool_catalog`（`get_tool`）校验并取 description，逐 id 加入活动集；清单里没有的 id 进 `unknown`。返回附带 `"probe": {tid: {status, check}}`——每申请工具做**只读环境探测**（见 §1.7），只增 key 向后兼容。
+  - `remove_tool`：从活动集移除，幂等；未激活的 id 进 `missing`。
+  - catalog **单一来源**为 `ws.tool_catalog`（经 `Engine(tool_catalog=...)` 注入），**不持久化**（state.json 不含）。
+- **通用接口**：`Executor.run(step, ctx, tool_exec=None)` —— `tool_exec: (name, args) -> dict` 为引擎注入的工具执行回调（`ToolRegistry.call_tool`），apply_tool/remove_tool/get_doc/get_record 经此可调；MockExecutor 忽略该参。
+- **消费路径**：planner 只读目录（规划时参考可用能力，不调用 apply_tool）；executor（第二组②）在 ctx 里读目录 → 调 `apply_tool` 申请 → 从 `ws.tools`（ToolComponent 渲染的"可用工具"）取活动集执行。工具仍是声明式（无执行体），调用实现归第二组②。
+
+## 1.7 环境检查（只读探测）— SkillEnvProbe → ENV_CHECK 写 run.log
+
+工具动态分配（apply_tool）了，但**工具要求的资源（二进制/沙箱/依赖）未必配得了**——
+有的环境就是没有 gdb、没有 docker。为此加**只读环境检查钩子**：真实探测工具可用性、
+分类就绪度、沙箱运行时，把"缺工具/缺沙箱/分类配不了"写进 run.log 供审计。实现：
+`agent/checks.py`（`SkillEnvProbe` + `SANDBOX_CATEGORIES` + `default_sandbox_probe`）。
+
+- **③ 只读边界**：探测器**只做只读环境探测**——CLI 用 `shutil.which`，模块用
+  `importlib.util.find_spec`（不真正 import，快且安全）；**不装依赖、不建沙箱、不执行任务**。
+  真正安装依赖/建沙箱/执行仍是第二组②职责。
+- **探测语义**（`probe_tool`）：读 manifest 的 `verify_check`——
+  空（manual）→ `manual`；`import X` → `find_spec`；否则 CLI 名 → `which`。
+  结果 `status ∈ available|missing|manual|unknown`。探测异常一律归 `unknown`，不崩调用方。
+- **沙箱判定是"探测"不是"创建"**（`probe_sandbox`）：`{category, needed, available}`——
+  `needed = category ∈ SANDBOX_CATEGORIES`（默认 `{ctf-pwn, ctf-reverse, ctf-malware}`）；
+  `available = sandbox_probe(category)`（默认探测 docker/podman CLI 是否存在）；
+  不需要沙箱的分类 `available=None`。`需要但不可用` 即记录为"沙箱缺失"。
+- **分类就绪度**（`probe_category`）：`{category, exists, compatibility, allowed_tools, install_cmds(前3), sandbox}`，
+  复用 `CtfSkillToolCatalog.compatibility/allowed_tools/install_commands`。
+- **全量快照**（`probe_manifest`）：`{total, available, missing, manual, unknown, missing_list(tool_id+check), sandbox}`，
+  遍历 `catalog.manifest`，sandbox 以任一需隔离分类（ctf-pwn）代表容器运行时在不在。
+- **触发时机**：
+  1. `apply_tool` 逐工具探测：返回追加 `"probe": {tid: {status, check}}`（只增 key，向后兼容）。
+  2. **run 起始**：`Engine.run()` 发 `RUN_STARTED` 后，`probe_manifest()` → `Signal.ENV_CHECK scope="run_start"`。
+  3. **每步执行前**：EXECUTING 分支 `STEP_STARTED` 后、executor.run 前，若 step 绑了 `skill_id`，
+     取 `cat = skill_id.split(".")[0]`，探测**当前活动集**（`ws.tools`）+ 该分类 →
+     `Signal.ENV_CHECK scope="step", step_id=...`（覆盖"缺工具"——申请了但环境没有）。
+- **接线**：`Engine(checker=...)`——显式传入优先；否则按 `tool_catalog` 派生
+  `SkillEnvProbe(tool_catalog)`；**无 catalog → checker=None 全跳过**（现有测试不受影响）。
+- **落日志**：`EngineLogger.on_env_check` 写 `[engine] check[...]` 根级行——`run_start` 全量快照
+  （可用 X/70、缺失 Y、manual Z、沙箱运行时 docker/podman 有/无、缺失明细截断前 15 条）；
+  `step` 该步分类 compat/install_cmds 数/沙箱 needed+available + 活动集缺工具清单。
+  run-end 汇总区加一行 `环境检查: 缺工具 Y/70  manual Z  sandbox=有|无`。
+
+---
+
 ## 2. Executor — 执行 Agent
 
 ```python
 class Executor:
-    def run(self, step: Step, ctx: str) -> ExecResult
+    def run(self, step: Step, ctx: str, tool_exec=None) -> ExecResult
 
 @dataclass
 class ExecResult:
@@ -104,6 +213,9 @@ class ExecResult:
 ```
 
 - `ctx` — Engine 通过 `assembler.assemble("executor", step_id=..., ...)` 组装的上下文文本
+- `tool_exec` — **可选**工具执行回调 `(name: str, args: dict) -> dict`，由引擎注入
+  （`ToolRegistry.call_tool`）；经此可调 `apply_tool`/`remove_tool`/`get_doc`/`get_record` 等内置工具。
+  向后兼容：缺省 `None`，MockExecutor 忽略该参
 - `result` — 写入 `step.result`，供后续步骤和评估使用
 - `tool_calls` — 喂入 TraceComponent 的 trace 通道，投影执行决策链
 - `step.skill_id` — 可选绑定技能文档 id；executor 上下文含 Docs 组件（绑定文档的索引，id + 一句话），全文按需经 `get_doc` 取
@@ -131,7 +243,7 @@ class MockExecutor:
     def __init__(self, observation="(mock)", result=None, fn=None)
 ```
 
-`fn` 为 `(step, ctx) -> ExecResult`，优先级高于 observation/result。
+`fn` 为 `(step, ctx, tool_exec=None) -> ExecResult`，优先级高于 observation/result；兼容旧 2 参 `(step, ctx)`。
 
 ---
 
@@ -217,9 +329,9 @@ Engine 通过 `_safe_call(fn, fallback)` 包裹所有外部 Agent 调用：
 当前仓库中 ep/ee/et/ex 的实际实现均为 mock/桩。真实 Agent 接入时只需实现上述接口，替换 Mock 即可，引擎代码无需改动。
 
 **已知外部依赖缺口（对接口，非引擎侧 bug）**：
-- **executor 无工具执行入参**：`Executor.run(step, ctx)` 只收 ctx 文本，不注入 `tool_exec`。
-  第二组② 写真实 executor 时需在接口层加可选入参 `run(step, ctx, tool_exec=None)`，引擎调用处随之注入；
-  当前 MockExecutor 不调用工具，契约暂未收口。
+- **executor 工具执行入参已接线**：`Executor.run(step, ctx, tool_exec=None)` 已收口（§2），引擎在 EXECUTING
+  分支注入 `tool_exec=ToolRegistry.call_tool`（apply_tool/remove_tool/get_doc/get_record 经此可调）；
+  工具仍为声明式（ws.tools 无执行体），调用实现归第二组②。
 - **RAG 经验沉淀未接入**：评估/反思仅收 ctx 文本，无查询与写回通道，见 §6 接口桩。
 
 ---

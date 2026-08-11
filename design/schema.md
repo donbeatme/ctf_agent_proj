@@ -54,9 +54,9 @@ class Trigger(StrEnum):
     STALL = "stall"
 ```
 
-### Signal — 信号枚举（~25 个）
+### Signal — 信号枚举（~23 个）
 
-用于 SignalBus pub/sub，覆盖完整引擎生命周期：`RUN_STARTED`、`STATE_TRANSITION`、`LLM_CALL_START/END/RESPONSE`、`CTX_ASSEMBLED/OVERFLOW/COMPRESSED/INGEST`、`STEP_STARTED/ENDED`、`PLAN_REVIEW_PASS`、`FAILED`、`RUN_END` 等。
+用于 SignalBus pub/sub，覆盖完整引擎生命周期：`RUN_STARTED`、`STATE_TRANSITION`、`LLM_CALL_START/END/RESPONSE`、`CTX_ASSEMBLED/OVERFLOW/COMPRESSED/INGEST`、`STEP_STARTED/ENDED`、`PLAN_REVIEW_PASS`、`FAILED`、`RUN_END`、`ENV_CHECK`（环境检查：工具/沙箱/分类就绪度，run_start/step 打点）等。
 
 ### PlannerMode
 

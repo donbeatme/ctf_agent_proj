@@ -23,6 +23,7 @@ from agent.ctx import (
     SystemPromptComponent,
     TaskComponent,
     ToolComponent,
+    ToolDirectoryComponent,
     TraceComponent,
 )
 from agent.schema import (
@@ -79,7 +80,8 @@ class Workspace:
         self.steps: dict[str, StepResult] = {}
         self.env_state: dict = {}
         self.docs: dict[str, str] = {}           # 技能库检索出的参考文档 {doc_id: 文本}
-        self.tools: dict[str, dict] = {}         # executor 工具目录(统一形式 {id: {description, parameters}},run 内静态)
+        self.tools: dict[str, dict] = {}         # 活动工具集(统一形式 {id: {description, parameters}};动态按需注入,默认空)
+        self.tool_catalog = None                 # 运行时静态工具目录加载器引用(apply_tool 校验用;**不持久化**)
         self.summaries: dict = {}                # 语义压缩摘要缓存 {f"{role}:{key}": {"text":..., "passes":...}}
         self.events: list[Event] = []
         self._persist = True                     # MockWorkspace 关掉,不落盘
@@ -97,6 +99,7 @@ class Workspace:
             DagComponent,
             HistoryComponent,
             DocsComponent,
+            ToolDirectoryComponent,
             ToolComponent,
             TraceComponent,
         )
@@ -114,6 +117,7 @@ class Workspace:
             AgentCommComponent,
             DagComponent,
             DocsComponent,
+            ToolDirectoryComponent,
             ToolComponent,
             (TraceComponent, (), {"agent": Role.EXECUTOR}),
         )
@@ -259,6 +263,21 @@ class Workspace:
         此接口——先把它转成标准格式再传。engine 启动时由调用方注入,run 内静态。
         """
         self.tools.update(ToolComponent.normalize(tools))
+
+    def add_tools(self, specs) -> dict[str, dict]:
+        """按需注入工具到活动集(**apply_tool 经此增长 ws.tools**):标准工具定义列表归一并
+        并入,不覆盖已有条目。返回新增的归一映射。"""
+        added = ToolComponent.normalize(specs)
+        for tid, td in added.items():
+            self.tools.setdefault(tid, td)
+        return added
+
+    def remove_tools(self, tool_ids) -> list[str]:
+        """从活动集移除工具(**remove_tool 经此收缩 ws.tools**):幂等,不存在的 id 忽略。"""
+        removed = [tid for tid in tool_ids if tid in self.tools]
+        for tid in removed:
+            self.tools.pop(tid, None)
+        return removed
 
     def record_tool_call(self, step_id, tool, args=None, agent=Role.EXECUTOR, **kw) -> Event:
         """工具调用轨迹落账:追加 kind="use_tool" 事件(trace 的 ut 半段,agent 的决定)。"""
