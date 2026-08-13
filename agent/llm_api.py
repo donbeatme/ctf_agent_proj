@@ -24,10 +24,17 @@ import requests
 from model_config import get, require, get_engine_config
 from agent.tools import call_tool
 
-DEFAULT_BASE_URL = get(
-    "LLM_BASE_URL", get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-)
-DEFAULT_MODEL = get("LLM_MODEL", get("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+def current_base_url():
+    """每次调用现读配置,前端改 model_config 后无需重启进程。"""
+    return get("LLM_BASE_URL", get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
+
+
+def current_model():
+    return get("LLM_MODEL", get("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+
+
+DEFAULT_BASE_URL = current_base_url()
+DEFAULT_MODEL = current_model()
 DEFAULT_MAX_RETRIES = int(get("LLM_MAX_RETRIES", 3))
 DEFAULT_TIMEOUT = float(get("LLM_TIMEOUT", 60))
 DEFAULT_MAX_DOCS_CHARS = int(get("LLM_MAX_DOCS_CHARS", 4000))
@@ -230,7 +237,7 @@ _DEFAULT_SPEC = ModelSpec()
 
 def _match_model(model: str) -> ModelSpec:
     """模型名小写后按最长前缀匹配 MODELS;无匹配返回默认规格。"""
-    m = (model or DEFAULT_MODEL).lower().strip()
+    m = (model or current_model()).lower().strip()
     for key in _MODEL_KEYS_BY_LEN:
         if key in m:
             return MODELS[key]
@@ -305,7 +312,7 @@ def count_message_tokens(messages: list[dict], *, model: str | None = None) -> i
     """
     if not messages:
         return 0
-    model = model or DEFAULT_MODEL
+    model = model or current_model()
     enc_name = _get_encoding_name(model)
     tok = _load_tokenizer(enc_name)
     overhead = _MESSAGE_OVERHEAD.get(enc_name, 3)
@@ -347,7 +354,7 @@ def model_info(model: str | None = None) -> dict:
     """返回模型的 token 相关信息汇总。"""
     spec = _match_model(model)
     return {
-        "model": model or DEFAULT_MODEL,
+        "model": model or current_model(),
         "encoding": spec.encoding,
         "context_window": spec.context_window,
         "max_output": spec.max_output,
@@ -377,7 +384,7 @@ def role_model(role: str | None = None) -> str:
             val = get(key)
             if val:
                 return val
-    return DEFAULT_MODEL
+    return current_model()
 
 
 class LLMError(RuntimeError):
@@ -640,8 +647,8 @@ def chat(prompt=None, system=None, *, messages=None, model=None, base_url=None, 
     """
     if stream is None:
         stream = _llm_config().get("llm_stream", False)
-    model = model or DEFAULT_MODEL
-    base_url = base_url or DEFAULT_BASE_URL
+    model = model or current_model()
+    base_url = base_url or current_base_url()
     api_key = api_key or resolve_key()
     max_retries = max(1, max_retries)
 
@@ -706,8 +713,8 @@ def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools
         usage = _sum_usage(usage_log) if usage_log else None
         return ToolResult(content=content, trace=[], rounds=0, total_usage=usage)
 
-    model = model or DEFAULT_MODEL
-    base_url = base_url or DEFAULT_BASE_URL
+    model = model or current_model()
+    base_url = base_url or current_base_url()
     api_key = api_key or resolve_key()
     max_retries = max(1, max_retries)
 

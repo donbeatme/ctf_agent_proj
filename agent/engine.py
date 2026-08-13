@@ -136,7 +136,7 @@ class Engine:
                  max_cycles=None, max_replans=None, max_stalls=None,
                  max_deadlock_attempts=None, compress=None, context_budget=None,
                  run_token_budget_tokens=None, understander=None, tool_catalog=None,
-                 checker=None):
+                 checker=None, subscribers=None):
         from model_config import get_engine_config
         cfg = get_engine_config()
         self.workspace = workspace or MockWorkspace()
@@ -205,6 +205,22 @@ class Engine:
             log_dir = None
         self._log = EngineLogger(log_dir)
         self.signals.subscribe(self._log)
+        self._stop_requested = False
+        self._stop_reason = None
+        for sub in subscribers or []:
+            self.signals.subscribe(sub)
+
+    def request_stop(self, reason="用户停止"):
+        """协作式停跑:主循环下一拍检查后转 FAILED。前端/CLI 预留接口。"""
+        self._stop_requested = True
+        self._stop_reason = reason
+
+    def _check_stop(self) -> bool:
+        """若已 request_stop,转 FAILED 并返回 False。"""
+        if not self._stop_requested:
+            return True
+        self._fail(self._stop_reason or "用户停止")
+        return False
 
     def run(self, raw_content: dict):
         self._init_run(raw_content)
@@ -222,6 +238,8 @@ class Engine:
             # (Scheduler 初始态即 PLANNING,无需 _go 自迁移)
             for self._cycle in range(self.max_cycles):
                 if self.scheduler.state in (EngineState.DONE, EngineState.FAILED):
+                    break
+                if not self._check_stop():
                     break
                 if not run_timer.check():
                     self.signals.emit(Signal.RUN_TIMEOUT,
@@ -285,7 +303,7 @@ class Engine:
     def resume(cls, run_id, planner, executor, evaluator,
                root=None, max_cycles=None, max_replans=None,
                max_stalls=None, max_deadlock_attempts=None,
-               compress=None, context_budget=None) -> "Engine":
+               compress=None, context_budget=None, subscribers=None) -> "Engine":
         """从 Workspace.load 恢复引擎并继续 _dispatch 循环。
 
         恢复内容:
@@ -304,7 +322,8 @@ class Engine:
                      max_cycles=max_cycles, max_replans=max_replans,
                      max_stalls=max_stalls,
                      max_deadlock_attempts=max_deadlock_attempts,
-                     compress=compress, context_budget=context_budget)
+                     compress=compress, context_budget=context_budget,
+                     subscribers=subscribers)
         engine.raw_content = ws.meta.get("task", {})
         engine.task_input = TaskInput(
             raw_content=engine.raw_content,
@@ -351,6 +370,8 @@ class Engine:
         try:
             for engine._cycle in range(engine.max_cycles):
                 if engine.scheduler.state in (EngineState.DONE, EngineState.FAILED):
+                    break
+                if not engine._check_stop():
                     break
                 if not run_timer.check():
                     engine.signals.emit(Signal.RUN_TIMEOUT,

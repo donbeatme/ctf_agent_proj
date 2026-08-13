@@ -119,6 +119,8 @@ def resume(cls, run_id: str, planner, executor, evaluator, *, root=None) -> "Eng
 - PLANNING 状态可恢复：`_dispatch` PLANNING 分支；`bp is None` 时执行初始规划，`bp is not None` 时跳过规划直接进入评审
 - 未接入 CLI
 
+`Engine.__init__(..., subscribers=None)` 可额外挂 SignalBus 订阅者（前端 LiveBridge）。`request_stop(reason)` 在 `run()`/`resume()` 主循环下一拍协作式转 FAILED。
+
 ---
 
 ## 5. Robustness Budgets

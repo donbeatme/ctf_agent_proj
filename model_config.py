@@ -17,12 +17,23 @@ def _load():
 _config = _load()
 
 
+def reload():
+    """重新从 model_config.json 读入(前端保存后刷新进程内缓存)。"""
+    global _config
+    _config = _load()
+
+
 def get(name, default=None):
-    """环境变量优先,config.json 兜底(12-factor:密钥等敏感项走环境变量,文件只放非敏感配置)。"""
+    """环境变量优先,config.json 兜底(12-factor:密钥等敏感项走环境变量,文件只放非敏感配置)。
+
+    JSON 里的 false/0 必须可读(不能用 truthiness 判断,否则 LLM_ENABLE_TOOLS=false 会丢)。
+    """
     value = os.environ.get(name)
     if value:
         return value
-    return _config.get(name, default)
+    if name in _config and _config[name] is not None:
+        return _config[name]
+    return default
 
 
 def set(name, value):

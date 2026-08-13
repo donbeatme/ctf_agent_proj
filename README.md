@@ -122,7 +122,7 @@ tests/                # 测试
 
 | 接口 | 交付方 | 本仓库状态 |
 |---|---|---|
-| 任务理解层输出 API | ② 任务理解层 | `TaskUnderstander.understand(raw) → TaskInput` 已接线（`MockTaskUnderstander` 消费 `raw["goals"]` → `goal_list`，engine 在 run() 起始调用） |
+| 任务理解层输出 API | ② 任务理解层 | `TaskUnderstander.understand(raw) → TaskInput` 已接线；本仓提供 `ChallengeUnderstander`（`agent/challenge_intake.py`）：多源摄入 + `CATEGORY_KEYWORDS` 题型判定 → `challenge_type` / `goal_list`；默认 Mock 仍可用 |
 | 技能文档（Skill） | —（③ 自持,原第二组 ① 交付） | 已落地：`agent/skills.py` 加载器 + vendored `skills/ctf-skills`（11 类 ~114 文档）。检索经 `DocStore.search(task)→[(doc_id,text)]` + `load_doc(doc_id)`（契约见 design/contracts.md §1）；命中分类只注册 SKILL.md，子文档经 `get_doc` 按需取 |
 | 执行 Agent | 第二组 ② | `Executor.run(step, ctx) → ExecResult` 接口桩 + `MockExecutor`（step 可带 `skill_id`，ctx 含绑定技能文档索引） |
 | 评估 Agent | 第二组 ③ | `Evaluator.review/step_eval/reflect` 接口桩 + `MockEvaluator` |
@@ -197,6 +197,12 @@ export DEEPSEEK_API_KEY="sk-..."        # Linux/macOS
 # 冒烟测试（真实 Planner + mock 执行/评估）
 python main.py run-task
 
+# 指令台前端（模型/技能沙箱/Agent 地图/经验 RAG/任务/审计交付/历史）
+python main.py serve --port 8765
+# 浏览器打开 http://127.0.0.1:8765
+# 操作手册与模块说明见 web/README.md
+# 能力地图 GET /api/capabilities；未接线接口返回 reserved 占位
+
 # 全量测试
 python -m pytest tests/ -x -q
 
@@ -210,6 +216,7 @@ python tests/smoke_scenarios.py
 
 | 文档 | 内容 |
 |---|---|
+| [web/README.md](web/README.md) | 解题指令台：启动、七模块操作、子功能说明、API 速查 |
 | [design/dag.md](design/dag.md) | DAG 数据结构：Step/Blueprint/Patch + 状态机 + 补丁合并 |
 | [design/contracts.md](design/contracts.md) | Agent 接口契约：Planner/Executor/Evaluator |
 | [design/schema.md](design/schema.md) | 类型系统：枚举、事件协议、Pydantic 模型 |

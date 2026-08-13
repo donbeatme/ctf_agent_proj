@@ -224,6 +224,13 @@ class CtfSkillsDocStore(SkillLibrary):
             hits = sum(1 for kw in kws if kw in text)
             if hits and cat in self._catalog:
                 scored.append((hits, cat))
+        # 任务理解层已判定的 challenge_type 置顶(与 challenge_intake 对接)
+        if isinstance(task, dict):
+            primary = task.get("challenge_type") or task.get("category")
+            if isinstance(primary, str) and primary in self._catalog:
+                scored = [(h + (1000 if c == primary else 0), c) for h, c in scored]
+                if not any(c == primary for _, c in scored):
+                    scored.append((1000, primary))
         scored.sort(key=lambda t: (-t[0], t[1]))
         top = [cat for _, cat in scored[: self.top_n]]
         return [(cat, self.load_doc(cat)) for cat in top]

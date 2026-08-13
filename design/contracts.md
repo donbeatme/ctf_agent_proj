@@ -7,6 +7,17 @@
 ## 0. 任务理解层 — 输出 API
 
 任务理解层（外部 ②）向引擎交付结构化任务的输出 API。实现：`agent/understander.py`。
+本仓库另提供可替换实现 `agent/challenge_intake.py`：
+
+```python
+class ChallengeUnderstander(TaskUnderstander):
+    # 多源 raw → classify(CATEGORY_KEYWORDS+附件启发) → raw_content 含 challenge_type
+    # + goal_list(find_flag / solve_<type> / …)
+    def understand(self, raw: dict) -> TaskInput: ...
+
+def parse_challenge(raw: dict) -> dict:
+    # 前端「题型判定」预览：{task, classification, goals_preview}
+```
 
 ```python
 class TaskUnderstander:

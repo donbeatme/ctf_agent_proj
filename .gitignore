@@ -10,3 +10,4 @@ tests/_ctx_out/
 tests/_rounds_out/
 tmp/
 .idea/
+.venv/

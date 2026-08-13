@@ -126,6 +126,34 @@ def test_happy_path_all_pass_done():
     assert engine.task_completed is False  # 未打 is_completed,靠全部终态收尾
 
 
+def test_request_stop_fails_run():
+    """前端停跑接口:request_stop 在主循环下一拍转 FAILED。"""
+
+    class StopOnStart:
+        def __init__(self):
+            self.engine = None
+
+        def on_run_started(self, **kw):
+            self.engine.request_stop("用户停止")
+
+    stopper = StopOnStart()
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"读题","criterion":"拿到文本","depends_on":[]}]',
+            "{}",
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=MockExecutor(observation="执行完成"),
+        subscribers=[stopper],
+    )
+    stopper.engine = engine
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.FAILED
+    assert engine.fail_reason == "用户停止"
+
+
 # ===== 2. ee 打 is_completed:残留未完成节点不触发死锁 =====
 
 def test_is_completed_skips_deadlock():

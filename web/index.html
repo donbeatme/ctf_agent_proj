@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CTF Agent 指令台</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="page page-wizard">
+      <header class="hero hero-compact">
+        <p class="eyebrow">CTF2 Agent</p>
+        <h1>解题指令台</h1>
+        <p class="lede">对接本仓库主循环：规划 → 评审 → 调度 → 执行 → 验收 → 反思。执行/评估当前为接口桩（Mock），规划走真实 LLM。</p>
+      </header>
+
+      <div class="wizard">
+        <nav class="wizard-nav" aria-label="功能模块导航">
+          <button type="button" class="wizard-nav-item active" data-step="model">
+            <span class="wizard-nav-index">1</span>
+            <span class="wizard-nav-label">模型与预算</span>
+          </button>
+          <button type="button" class="wizard-nav-item" data-step="skills">
+            <span class="wizard-nav-index">2</span>
+            <span class="wizard-nav-label">技能·工具·沙箱</span>
+          </button>
+          <button type="button" class="wizard-nav-item" data-step="agents">
+            <span class="wizard-nav-index">3</span>
+            <span class="wizard-nav-label">Agent 接口</span>
+          </button>
+          <button type="button" class="wizard-nav-item" data-step="experience">
+            <span class="wizard-nav-index">4</span>
+            <span class="wizard-nav-label">经验 RAG</span>
+          </button>
+          <button type="button" class="wizard-nav-item" data-step="run">
+            <span class="wizard-nav-index">5</span>
+            <span class="wizard-nav-label">任务运行</span>
+          </button>
+          <button type="button" class="wizard-nav-item" data-step="audit">
+            <span class="wizard-nav-index">6</span>
+            <span class="wizard-nav-label">审计与交付</span>
+          </button>
+          <button type="button" class="wizard-nav-item" data-step="history">
+            <span class="wizard-nav-index">7</span>
+            <span class="wizard-nav-label">历史记录</span>
+          </button>
+        </nav>
+
+        <div class="wizard-main">
+          <div class="wizard-stage">
+            <div class="wizard-step active" data-step="model" id="step-model">
+              <div class="step-heading">
+                <h2 class="step-title">模型配置</h2>
+                <p class="step-desc">写入 <code>model_config.json</code>（gitignored）。环境变量优先于文件。密钥只显示是否已设置。</p>
+              </div>
+              <section class="panel">
+                <h2>LLM 网关</h2>
+                <p class="panel-desc">OpenAI 兼容 <code>/v1</code>。Planner 默认走 <code>chat_with_tools</code>；网关不支持 auto tool choice 时关闭工具调用。</p>
+                <label>BASE URL<input id="model-base-url" type="url" placeholder="http://host:port/v1" autocomplete="off"></label>
+                <label>模型名称<input id="model-name" type="text" placeholder="DS_R1_32b" autocomplete="off"></label>
+                <label>API Key<input id="model-api-key" type="password" placeholder="留空表示沿用已保存的 Key" autocomplete="off"></label>
+                <label class="checkbox">
+                  <input id="model-enable-tools" type="checkbox">
+                  启用 Planner 工具调用（get_doc）
+                </label>
+                <div class="row">
+                  <button type="button" id="btn-save-model" class="primary">保存配置</button>
+                  <button type="button" id="btn-reload-model">重新加载</button>
+                </div>
+                <p class="hint" id="model-status">正在读取配置…</p>
+                <div class="status-grid">
+                  <div><span>密钥</span><strong id="model-key-set">-</strong></div>
+                  <div><span>当前模型</span><strong id="model-current">-</strong></div>
+                  <div><span>工具调用</span><strong id="model-tools-label">-</strong></div>
+                </div>
+              </section>
+              <section class="panel">
+                <h2>引擎预算（只读预览）</h2>
+                <p class="panel-desc">来自 <code>model_config.get_engine_config()</code>。改写请编辑 JSON 的 <code>engine</code> 段后保存模型配置。</p>
+                <pre id="engine-budget" class="doc muted">加载中…</pre>
+              </section>
+              <section class="panel">
+                <h2>环境探测</h2>
+                <p class="panel-desc">只读：<code>SkillEnvProbe.probe_manifest()</code>。不安装依赖，结果与 run 起始 <code>ENV_CHECK</code> 同源。</p>
+                <div class="row">
+                  <button type="button" id="btn-env-check" class="primary">探测本机工具</button>
+                </div>
+                <p class="hint" id="env-status">尚未探测。</p>
+                <pre id="env-report" class="doc muted">等待探测…</pre>
+              </section>
+            </div>
+
+            <div class="wizard-step" data-step="skills" id="step-skills">
+              <div class="step-heading">
+                <h2 class="step-title">技能与工具</h2>
+                <p class="step-desc">vendored <code>skills/ctf-skills</code>。Planner 按题面关键词检索分类 SKILL.md，子文档经 <code>get_doc</code> 按需拉取。工具清单为声明，不接执行。</p>
+              </div>
+              <section class="panel">
+                <h2>技能库</h2>
+                <div class="row">
+                  <label>分类
+                    <select id="skill-category"><option value="">全部分类</option></select>
+                  </label>
+                  <label>搜索
+                    <input id="skill-search" type="search" placeholder="doc_id / 描述" autocomplete="off">
+                  </label>
+                </div>
+                <p class="hint" id="skill-status">正在加载技能库…</p>
+                <ul id="skill-list" class="history-list scroll-list"></ul>
+                <div id="skill-detail" class="doc-viewer hidden">
+                  <div class="doc-viewer-header">
+                    <h3 id="skill-detail-title">文档</h3>
+                    <button type="button" id="btn-skill-close">关闭</button>
+                  </div>
+                  <pre id="skill-detail-body" class="doc"></pre>
+                </div>
+              </section>
+              <section class="panel">
+                <h2>工具清单</h2>
+                <p class="panel-desc" id="tool-installer">安装脚本路径将显示在此。</p>
+                <ul id="tool-list" class="history-list scroll-list"></ul>
+              </section>
+              <section class="panel">
+                <h2>沙箱探测</h2>
+                <p class="panel-desc">对接 <code>SkillEnvProbe.probe_sandbox</code> / <code>SANDBOX_CATEGORIES</code>。只读检测 docker/podman；<strong>创建沙箱属执行层②，未接线</strong>。</p>
+                <div class="row">
+                  <button type="button" id="btn-sandbox" class="primary">探测沙箱运行时</button>
+                </div>
+                <p class="hint" id="sandbox-status">尚未探测。</p>
+                <pre id="sandbox-report" class="doc muted">等待探测…</pre>
+              </section>
+            </div>
+
+            <div class="wizard-step" data-step="agents" id="step-agents">
+              <div class="step-heading">
+                <h2 class="step-title">Agent 接口地图</h2>
+                <p class="step-desc">对照 <code>design/contracts.md</code>：已接线 / 接口桩 / 前端预留。执行与评估当前为 Mock。</p>
+              </div>
+              <section class="panel">
+                <h2>能力状态</h2>
+                <div class="row">
+                  <button type="button" id="btn-capabilities" class="primary">刷新能力地图</button>
+                </div>
+                <p class="hint" id="cap-status">打开本页自动加载。</p>
+                <ul id="cap-list" class="cap-list"></ul>
+              </section>
+              <section class="panel">
+                <h2>角色契约速查</h2>
+                <div class="status-grid">
+                  <div><span>Understander</span><strong>ChallengeUnderstander</strong></div>
+                  <div><span>Planner</span><strong>真 LLM</strong></div>
+                  <div><span>Executor</span><strong>MockExecutor 桩</strong></div>
+                  <div><span>Evaluator</span><strong>SmokeEvaluator 桩</strong></div>
+                </div>
+                <p class="panel-desc">真实 <code>Executor.run</code> / <code>Evaluator.review|step_eval|reflect|eval_goals</code> 由外部组交付后替换，引擎无需改主循环。</p>
+              </section>
+            </div>
+
+            <div class="wizard-step" data-step="experience" id="step-experience">
+              <div class="step-heading">
+                <h2 class="step-title">经验沉淀 RAG</h2>
+                <p class="step-desc">契约见 <code>design/contracts.md §6 ExperienceStore</code>。<span class="badge reserved">前端预留</span> 引擎尚未接 <code>experience_store</code>。</p>
+              </div>
+              <section class="panel reserved-panel">
+                <h2>查询经验 <span class="badge reserved">未接线</span></h2>
+                <p class="panel-desc">预留 <code>POST /api/experience/query</code> → <code>ExperienceStore.query(topics, role)</code>。</p>
+                <label>topics（逗号分隔）
+                  <input id="exp-topics" type="text" placeholder="SQL注入, 文件上传" autocomplete="off">
+                </label>
+                <label>role
+                  <select id="exp-role">
+                    <option value="evaluator_plan">ep 计划评审</option>
+                    <option value="evaluator_step">ee 步骤验收</option>
+                    <option value="evaluator_task">et 任务反思</option>
+                  </select>
+                </label>
+                <div class="row">
+                  <button type="button" id="btn-exp-query" class="primary">试查（返回预留响应）</button>
+                </div>
+                <pre id="exp-query-out" class="doc muted">尚未查询。</pre>
+              </section>
+              <section class="panel reserved-panel">
+                <h2>写回经验 <span class="badge reserved">未接线</span></h2>
+                <p class="panel-desc">预留 <code>POST /api/experience/record</code>。设计写回时机：replan / ESCALATED / FAILED。</p>
+                <label>topic<input id="exp-rec-topic" type="text" placeholder="base64" autocomplete="off"></label>
+                <label>outcome
+                  <select id="exp-rec-outcome">
+                    <option value="success">success</option>
+                    <option value="failure">failure</option>
+                  </select>
+                </label>
+                <label>summary<textarea id="exp-rec-summary" rows="3" placeholder="可执行结论摘要"></textarea></label>
+                <div class="row">
+                  <button type="button" id="btn-exp-record">试写（返回预留响应）</button>
+                </div>
+                <pre id="exp-record-out" class="doc muted">尚未写入。</pre>
+              </section>
+            </div>
+
+            <div class="wizard-step" data-step="run" id="step-run">
+              <div class="step-heading">
+                <h2 class="step-title">任务运行</h2>
+                <p class="step-desc">多源题目 → <code>challenge_intake.parse_challenge</code> 题型判定（与 <code>CATEGORY_KEYWORDS</code> 同源）→ <code>ChallengeUnderstander</code> 产出 <code>goal_list</code> → <code>Engine.run</code>。</p>
+              </div>
+              <section class="panel">
+                <h2>发布题目</h2>
+                <p class="panel-desc">支持题面文本、CTFd/通用 JSON、目标 URL、附件（pcap/elf/zip/图/代码等）。先「解析题型」，确认后再启动解题。</p>
+                <div class="source-tabs" role="tablist" aria-label="题目来源">
+                  <button type="button" class="source-tab active" data-src="text">题面文本</button>
+                  <button type="button" class="source-tab" data-src="json">JSON 导入</button>
+                  <button type="button" class="source-tab" data-src="url">目标 URL</button>
+                  <button type="button" class="source-tab" data-src="files">附件上传</button>
+                </div>
+
+                <div class="source-pane active" data-src="text">
+                  <label>标题<input id="task-title" type="text" value="base64 编码" autocomplete="off"></label>
+                  <label>题面
+                    <textarea id="task-desc" rows="5">给定一段文本,base64 编码后作为 flag 提交。</textarea>
+                  </label>
+                  <label>challenge_id<input id="task-cid" type="text" value="c-ui" autocomplete="off"></label>
+                  <label>额外目标 ID（可选，逗号分隔）
+                    <input id="task-goals" type="text" placeholder="默认自动生成 find_flag / solve_*" autocomplete="off">
+                  </label>
+                </div>
+
+                <div class="source-pane" data-src="json">
+                  <label>粘贴 CTFd / 平台导出 JSON
+                    <textarea id="task-json" rows="8" placeholder='{"name":"Easy RSA","category":"crypto","description":"...","files":[]}'></textarea>
+                  </label>
+                  <p class="hint">识别 name/title、description、category、files 等字段。</p>
+                </div>
+
+                <div class="source-pane" data-src="url">
+                  <label>目标地址（Web / 远程服务）
+                    <input id="task-url" type="url" placeholder="http://challenge.example:8080" autocomplete="off">
+                  </label>
+                  <label>补充说明（可选）
+                    <textarea id="task-url-desc" rows="3" placeholder="登录框存在 SQL 注入…"></textarea>
+                  </label>
+                </div>
+
+                <div class="source-pane" data-src="files">
+                  <label>选择附件（可多选；单文件建议 &lt; 20MB）
+                    <input id="task-files" type="file" multiple>
+                  </label>
+                  <ul id="task-file-list" class="attachment-list"></ul>
+                  <p class="hint" id="upload-status">扩展名会参与题型启发（如 .pcap→Forensics，.elf→Pwn）。</p>
+                  <label>附件题目标题（可选）<input id="task-file-title" type="text" placeholder="附件题" autocomplete="off"></label>
+                  <label>附件说明（可选）<textarea id="task-file-desc" rows="3" placeholder="从比赛平台下载的附件包"></textarea></label>
+                </div>
+
+                <label>手动覆盖题型（可选，覆盖自动判定）
+                  <select id="task-type-override">
+                    <option value="">自动判定</option>
+                    <option value="ctf-web">Web</option>
+                    <option value="ctf-pwn">Pwn</option>
+                    <option value="ctf-crypto">Crypto</option>
+                    <option value="ctf-reverse">Reverse</option>
+                    <option value="ctf-forensics">Forensics</option>
+                    <option value="ctf-osint">OSINT</option>
+                    <option value="ctf-malware">Malware</option>
+                    <option value="ctf-misc">Misc</option>
+                    <option value="ctf-ai-ml">AI/ML</option>
+                  </select>
+                </label>
+
+                <div class="row">
+                  <button type="button" id="btn-parse" class="primary">① 解析题型</button>
+                  <button type="button" id="btn-start" disabled>② 确认并启动 Engine.run</button>
+                </div>
+                <p class="hint" id="start-hint">请先解析题型；判定结果会写入 raw.challenge_type，供 Planner 检索技能库。</p>
+
+                <div id="type-box" class="type-box hidden">
+                  <h3>题型判定</h3>
+                  <div class="status-grid">
+                    <div><span>主类型</span><strong id="type-primary">-</strong></div>
+                    <div><span>置信度</span><strong id="type-confidence">-</strong></div>
+                    <div><span>goal_list</span><strong id="type-goals">-</strong></div>
+                  </div>
+                  <ol id="type-ranked" class="timeline"></ol>
+                  <pre id="type-preview" class="doc muted"></pre>
+                </div>
+              </section>
+              <section class="panel">
+                <h2>运行状态</h2>
+                <div class="run-switcher-block">
+                  <div class="row between">
+                    <h3>进行中 / 最近</h3>
+                    <button type="button" id="btn-active-reload">刷新</button>
+                  </div>
+                  <div id="active-runs" class="run-switcher"></div>
+                </div>
+                <div class="status-grid">
+                  <div><span>run_id</span><strong id="run-id">-</strong></div>
+                  <div><span>状态</span><strong id="run-status">-</strong></div>
+                  <div><span>当前步骤</span><strong id="run-step">-</strong></div>
+                  <div><span>tokens</span><strong id="run-tokens">0</strong></div>
+                </div>
+                <ol id="state-pills" class="state-pills" aria-label="引擎状态机"></ol>
+                <p class="hint" id="run-message">尚未启动。</p>
+                <div class="row hidden" id="run-controls">
+                  <button type="button" id="btn-stop" class="danger">停止（request_stop）</button>
+                </div>
+                <p class="fail" id="run-fail"></p>
+                <h3>计划 DAG</h3>
+                <ul id="dag-list" class="dag-list"></ul>
+                <h3>SignalBus</h3>
+                <pre id="signal-log" class="doc muted">等待信号…</pre>
+                <h3>events.jsonl</h3>
+                <ol id="event-timeline" class="timeline"></ol>
+                <h3>run.log</h3>
+                <pre id="run-log" class="doc muted">暂无日志。</pre>
+              </section>
+            </div>
+
+            <div class="wizard-step" data-step="audit" id="step-audit">
+              <div class="step-heading">
+                <h2 class="step-title">审计报告与交付</h2>
+                <p class="step-desc">对接技术路线「审计交付」：事件流组装报告；Flag 校验 / HITL 审批通道前端预留。</p>
+              </div>
+              <section class="panel">
+                <h2>审计报告 <span class="badge wired">已接线</span></h2>
+                <p class="panel-desc"><code>GET /api/runs/:id/report</code> 由 state + events.jsonl 组装 Markdown；<code>/product</code> 抽取 PASS 步骤产物。</p>
+                <label>run_id
+                  <input id="audit-run-id" type="text" placeholder="选择任务页当前 run 或粘贴" autocomplete="off">
+                </label>
+                <div class="row">
+                  <button type="button" id="btn-audit-report" class="primary">生成报告</button>
+                  <button type="button" id="btn-audit-product">查看 product</button>
+                  <button type="button" id="btn-audit-use-current">用当前 run</button>
+                </div>
+                <p class="hint" id="audit-status">尚未生成。</p>
+                <pre id="audit-report" class="doc muted">等待报告…</pre>
+                <pre id="audit-product" class="doc muted hidden"></pre>
+              </section>
+              <section class="panel reserved-panel">
+                <h2>Flag 验证 <span class="badge reserved">前端预留</span></h2>
+                <p class="panel-desc">预留 <code>POST /api/flag/verify</code>。仓库未声明独立 Flag 契约；真实校验属 Evaluator ee。</p>
+                <label>flag<input id="flag-value" type="text" placeholder="flag{...}" autocomplete="off"></label>
+                <label>关联 run_id（可选）<input id="flag-run-id" type="text" autocomplete="off"></label>
+                <div class="row">
+                  <button type="button" id="btn-flag-verify">试验证（返回预留响应）</button>
+                </div>
+                <pre id="flag-out" class="doc muted">尚未验证。</pre>
+              </section>
+              <section class="panel reserved-panel">
+                <h2>人机协同 HITL <span class="badge reserved">前端预留</span></h2>
+                <p class="panel-desc">引擎仅有 ee escalate 判定，无人工审批闸门。预留 <code>GET /api/hitl/pending</code>、<code>POST /api/hitl/decide</code>。</p>
+                <div class="row">
+                  <button type="button" id="btn-hitl-pending">拉取待审（预留）</button>
+                </div>
+                <label>run_id<input id="hitl-run-id" type="text" autocomplete="off"></label>
+                <label>decision
+                  <select id="hitl-decision">
+                    <option value="approve">approve 继续</option>
+                    <option value="reject">reject 失败</option>
+                    <option value="replan">replan</option>
+                    <option value="manual">manual 接管</option>
+                  </select>
+                </label>
+                <div class="row">
+                  <button type="button" id="btn-hitl-decide" class="primary">提交决策（预留）</button>
+                </div>
+                <pre id="hitl-out" class="doc muted">尚未操作。</pre>
+              </section>
+            </div>
+
+            <div class="wizard-step" data-step="history" id="step-history">
+              <div class="step-heading">
+                <h2 class="step-title">历史记录</h2>
+                <p class="step-desc">扫描 <code>runs/</code>。未终态可 <code>Engine.resume</code>；运行中不可删。</p>
+              </div>
+              <section class="panel">
+                <h2>运行历史</h2>
+                <div class="row">
+                  <button type="button" id="btn-history-reload">刷新历史</button>
+                </div>
+                <ul id="history-list" class="history-list scroll-list"></ul>
+                <p class="hint" id="history-status">尚未加载。</p>
+                <div id="history-detail" class="history-detail hidden">
+                  <h3 id="history-title">详情</h3>
+                  <div class="status-grid">
+                    <div><span>run_id</span><strong id="hist-id">-</strong></div>
+                    <div><span>状态</span><strong id="hist-status">-</strong></div>
+                    <div><span>tokens</span><strong id="hist-tokens">0</strong></div>
+                    <div><span>步骤数</span><strong id="hist-steps">0</strong></div>
+                  </div>
+                  <pre id="hist-meta" class="doc muted"></pre>
+                  <ul id="hist-dag" class="dag-list"></ul>
+                  <ol id="hist-events" class="timeline"></ol>
+                  <pre id="hist-log" class="doc muted"></pre>
+                  <div class="row">
+                    <button type="button" id="btn-hist-focus" class="primary">在任务页关注</button>
+                    <button type="button" id="btn-hist-resume">续跑 resume</button>
+                    <button type="button" id="btn-hist-delete" class="danger">删除此记录</button>
+                    <button type="button" id="btn-hist-close">关闭</button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
+
+          <div class="wizard-footer">
+            <button type="button" id="btn-step-prev" class="wizard-step-btn" disabled>上一步</button>
+            <p class="wizard-step-indicator" id="wizard-step-indicator">第 1 / 7 步</p>
+            <button type="button" id="btn-step-next" class="wizard-step-btn primary">下一步</button>
+          </div>
+        </div>
+      </div>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

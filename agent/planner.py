@@ -12,6 +12,7 @@ from agent import llm_api, tools
 from agent.blueprint import Blueprint
 from agent.schema import PlanError, PlannerInput, PlannerMode, Trigger, parse_plan
 from agent.workspace import MockWorkspace
+from model_config import get
 
 PLAN_SYSTEM = (
     "你是 CTF 解题规划 Agent。根据任务、当前计划与评估意见,输出一份 JSON 修改计划,只输出 JSON。"
@@ -107,13 +108,18 @@ class Planner:
 
         lookup 读 ③ 自己的 ws.docs 注册表(上游已灌入),不碰执行工具层。
         签名 (system=, prompt=) -> str,plan() 不变;测试注入 mock 即绕过。
+        LLM_ENABLE_TOOLS=false 时退化为纯 chat(兼容未开 auto tool choice 的网关)。
         """
         model = llm_api.role_model("planner")
+        enable_tools = str(get("LLM_ENABLE_TOOLS", "true")).lower() not in (
+            "0", "false", "no", ""
+        )
+        planner_tools = PLANNER_TOOLS if enable_tools else []
 
         def call(*, system=None, prompt=None, messages=None, **kw) -> str:
             tr = llm_api.chat_with_tools(
                 system=system, prompt=prompt, messages=messages,
-                tools=PLANNER_TOOLS, tool_exec=self._lookup, model=model, **kw)
+                tools=planner_tools, tool_exec=self._lookup, model=model, **kw)
             self._last_usage = tr.total_usage  # token 用量供 plan() 写入 bp.meta
             return tr.content
 

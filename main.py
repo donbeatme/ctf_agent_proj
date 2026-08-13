@@ -74,6 +74,9 @@ def run_task(args):
     if engine.fail_reason:
         print(f"失败原因: {engine.fail_reason}")
     print("\n最终计划:")
+    if engine.bp is None:
+        print("  (无计划)")
+        return
     for sid, s in engine.bp.steps.items():
         print(f"  {sid}\t{s.status.value}\tattempts={s.attempts}\t依赖={s.depends_on}")
         print(f"       instruction: {s.instruction}")
@@ -88,10 +91,17 @@ def main():
     p.add_argument("--task", help="任务 dict(JSON);缺省用内置示例题")
     p.add_argument("--run-id", help="run 目录名(缺省按时间生成)")
 
+    s = sub.add_parser("serve", help="启动指令台前端 (web_server)")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=8765)
+
     args = parser.parse_args()
 
     if args.cmd == "run-task":
         run_task(args)
+    elif args.cmd == "serve":
+        from web_server import serve
+        serve(args.host, args.port)
 
 
 if __name__ == "__main__":
