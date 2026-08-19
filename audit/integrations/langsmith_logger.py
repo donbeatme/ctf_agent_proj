@@ -78,4 +78,3 @@ class AuditLogger:
             if remote_tree is not None:
                 remote_tree.end(outputs={"ok": True})
                 remote_tree.patch()
-

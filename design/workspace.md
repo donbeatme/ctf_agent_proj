@@ -45,6 +45,7 @@ runs/<run_id>/
   "env_state": {},
   "docs": {},
   "tools": [],
+  "experience": [],
   "summaries": {
     "planner:dag": {"text": "...", "passes": 3},
     "evaluator_step:s2": {"sig": "abc123"}
@@ -62,6 +63,7 @@ runs/<run_id>/
 | `env_state` | 执行环境状态（target_url / container_id 等，Executor 写入） |
 | `docs` | 技能文档注册表 `{doc_id: content}` |
 | `tools` | 活动工具集（**动态**：默认空，`apply_tool`/`remove_tool` 增删） |
+| `experience` | 已验证解题经验（procedure 记录列表；engine 启动时经 `adapter.match_procedures` 精确匹配装填，ExperienceComponent 投影源，见 `design/verification.md`） |
 | `summaries` | CtxAssembler 压缩缓存 `{key: {text/passes} | {sig}}` |
 
 ### sync — 原子写入
@@ -178,9 +180,9 @@ Workspace 在 `_init_assembler()` 中按角色注册 CtxComponent：
 | 角色 | 组件（按拼接序） |
 |---|---|
 | planner | SystemPrompt / Task / AgentComm / Dag / History / Docs / ToolDirectory / Tool / Trace |
-| executor | SystemPrompt / Task / AgentComm / Dag / Docs / ToolDirectory / Tool / Trace（Trace agent=EXECUTOR） |
+| executor | SystemPrompt / Task / AgentComm / Dag / Docs / ToolDirectory / Tool / Experience / Trace（Trace agent=EXECUTOR） |
 | evaluator_plan | SystemPrompt / Task / Dag / History |
-| evaluator_step | SystemPrompt / Task / AgentComm / Dag / History |
-| evaluator_task | SystemPrompt / Task / AgentComm / Dag / History |
+| evaluator_step | SystemPrompt / Task / Submission / AgentComm / Dag / History |
+| evaluator_task | SystemPrompt / Task / Submission / AgentComm / Dag / History |
 
 每个组件有独立的 level（渲染档位）、priority（压缩优先级）、compress_methods（压缩策略）。详见 `design/ctx.md`。

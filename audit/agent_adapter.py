@@ -7,21 +7,28 @@ does not patch or mutate the agent package.
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from agent.blueprint import Blueprint, Step
 from agent.evaluator import EvalResult, Evaluator, Verdict
 from agent.planner import DocStore
+from agent.schema import Role
 
 from .evaluators import PlanEvaluator, StepAcceptanceEvaluator, TaskReflectionEvaluator
+from .evaluators.plan import PLAN_REVIEW_SYSTEM
+from .evaluators.step import STEP_PROMPT
+from .evaluators.task import REFLEXION_SYSTEM
 from .flag_verifier import FlagVerifier
-from .integrations.deepseek import DeepSeekChat
+from .integrations.llm_chat import LlmChatClient
 from .metrics import calculate_attempt_metrics
 from .schemas import (
     AuditRecord,
     CTFAttempt,
+    FlagResult,
     PlanEvaluation,
     PlanStep,
     StepEvaluationItem,
@@ -103,7 +110,7 @@ class AuditExperienceDocStore(DocStore):
             or task.get("task_id")
             or json.dumps(task, ensure_ascii=False)
         )
-        category = str(task.get("category") or "unknown")
+        category = str(task.get("challenge_type") or task.get("category") or "unknown")
         query = (
             "查找可复用的 CTF 规划和执行经验；类别：%s；任务：%s；"
             "重点关注 instruction、criterion、失败恢复和最终验证。"
@@ -146,6 +153,9 @@ class AgentRuntimeBindings:
     goal_evaluator: Optional[
         Callable[[str, list[dict], str], list]
     ] = None
+    submission_result: Optional[
+        Callable[[], Optional[dict]]
+    ] = lambda: None  # 返回 ws.meta["submission"] {flag, ok, correct, message}:正确性权威=平台/_local_verify
 
 
 class AgentAuditEvaluator(Evaluator):
@@ -159,6 +169,8 @@ class AgentAuditEvaluator(Evaluator):
         run_id: str,
         agent_id: str,
         bindings: AgentRuntimeBindings,
+        event_sink: Optional[Callable[[str, dict], None]] = None,
+        audit_output: Optional[Path] = None,
     ):
         self.settings = settings
         self.verifier = verifier
@@ -166,10 +178,13 @@ class AgentAuditEvaluator(Evaluator):
         self.run_id = run_id
         self.agent_id = agent_id
         self.bindings = bindings
-        self.llm = DeepSeekChat(settings)
-        self.plan_evaluator = PlanEvaluator(self.llm)
+        self.event_sink = event_sink
+        self.audit_output = audit_output
+        self.plan_llm = LlmChatClient(settings, role="evaluator_plan")
+        self.task_llm = LlmChatClient(settings, role="evaluator_task")
+        self.plan_evaluator = PlanEvaluator(self.plan_llm)
         self.step_evaluator = StepAcceptanceEvaluator(settings)
-        self.task_evaluator = TaskReflectionEvaluator(self.llm)
+        self.task_evaluator = TaskReflectionEvaluator(self.task_llm)
         self.step_evaluator.begin_attempt(run_id)
         self.attempt: Optional[CTFAttempt] = None
         self.plan_evaluation: Optional[PlanEvaluation] = None
@@ -177,18 +192,37 @@ class AgentAuditEvaluator(Evaluator):
         self.seen_calls = set()
         self.last_record: Optional[AuditRecord] = None
         self.store_error: Optional[str] = None
+        self.audit_written: Optional[Path] = None
+
+    def system_for(self, role) -> str:
+        """该评估器在指定角色下使用的系统提示词(engine 装配 SystemPromptComponent 用)。"""
+        return {
+            Role.EVALUATOR_PLAN: PLAN_REVIEW_SYSTEM,
+            Role.EVALUATOR_STEP: STEP_PROMPT,
+            Role.EVALUATOR_TASK: REFLEXION_SYSTEM,
+        }.get(role, "")
 
     def review(self, ctx: str) -> EvalResult:
         attempt = self._ensure_attempt()
         attempt.plan = blueprint_to_plan(self.bindings.blueprint())
-        self.plan_evaluation = self.plan_evaluator.evaluate(attempt)
+        self.plan_evaluation = self.plan_evaluator.evaluate(attempt, ctx=ctx)
         verdict = (
             Verdict.PASS
             if self.plan_evaluation.decision == "pass"
             else Verdict.FAIL
         )
         opinion = self._plan_opinion(self.plan_evaluation)
-        return EvalResult(verdict, opinion)
+        self._emit("audit_plan_review", {
+            "decision": self.plan_evaluation.decision,
+            "score": self.plan_evaluation.score,
+            "issues": self.plan_evaluation.issues,
+            "suggestions": self.plan_evaluation.suggestions,
+        })
+        return EvalResult(
+            verdict,
+            opinion,
+            total_usage=self.plan_evaluator.last_usage,
+        )
 
     def step_eval(self, ctx: str) -> EvalResult:
         attempt = self._ensure_attempt()
@@ -221,13 +255,21 @@ class AgentAuditEvaluator(Evaluator):
             step.id,
             repeated=repeated,
             position=len(self.step_items),
+            ctx=ctx,
         )
         self.step_items.append(item)
+        self._emit("audit_step_eval", {
+            "step_id": step.id,
+            "decision": item.decision,
+            "score": item.score,
+            "reasoning": item.reasoning,
+        })
         return EvalResult(
             Verdict(item.decision),
             item.reasoning,
             observation=observation,
             is_completed=bool(self.bindings.completed()),
+            total_usage=self.step_evaluator.last_usage,
         )
 
     def reflect(self, ctx: str) -> EvalResult:
@@ -238,10 +280,7 @@ class AgentAuditEvaluator(Evaluator):
         attempt.ended_at = utc_now()
         attempt.submitted_flag = self.bindings.submitted_flag()
         steps = self.step_evaluator.summarize(self.step_items)
-        flag = self.verifier.verify(
-            attempt.task_id,
-            attempt.submitted_flag,
-        )
+        flag = self._effective_flag(attempt)
         metrics = calculate_attempt_metrics(
             attempt,
             flag.valid,
@@ -253,6 +292,7 @@ class AgentAuditEvaluator(Evaluator):
             steps,
             flag,
             metrics,
+            ctx=ctx,
         )
         self.last_record = AuditRecord(
             attempt=attempt,
@@ -271,7 +311,17 @@ class AgentAuditEvaluator(Evaluator):
         opinion = task.reason
         if task.reflection is not None:
             opinion += "；" + task.reflection.diagnosis
-        return EvalResult(verdict, opinion)
+        self._emit("audit_reflect", {
+            "decision": task.decision,
+            "reason": task.reason,
+            "flag_valid": flag.valid,
+            "store_error": self.store_error,
+        })
+        return EvalResult(
+            verdict,
+            opinion,
+            total_usage=self.task_evaluator.last_usage,
+        )
 
     def eval_goals(
         self,
@@ -283,8 +333,48 @@ class AgentAuditEvaluator(Evaluator):
             return self.bindings.goal_evaluator(ctx, goals, dag_summary)
         return []
 
+    def _emit(self, kind: str, detail: dict) -> None:
+        if self.event_sink is not None:
+            try:
+                self.event_sink(kind, detail)
+            except Exception:
+                pass
+
     def close(self) -> None:
+        try:
+            self._dump_audit()
+        except Exception as exc:  # noqa: BLE001 — 落盘失败不阻塞 close
+            self.store_error = "audit_dump:%s" % type(exc).__name__
         self.step_evaluator.end_attempt(self.run_id)
+
+    def _dump_audit(self) -> Optional[Path]:
+        """把最终 AuditRecord 的派生字段原子写 audit.json(不含原始轨迹,轨迹真源是 events.jsonl)。
+
+        只落 evaluation/metrics(plan/step/flag/task),不落 attempt.steps —— 避免与 history 双写。
+        """
+        if self.audit_output is None or self.last_record is None:
+            return None
+        record = self.last_record
+        payload = {
+            "run_id": self.run_id,
+            "agent_id": self.agent_id,
+            "task_id": record.attempt.task_id,
+            "submitted_flag": record.attempt.submitted_flag,
+            "plan_evaluation": asdict(record.plan_evaluation),
+            "step_evaluation": asdict(record.step_evaluation),
+            "flag": asdict(record.flag),
+            "metrics": asdict(record.metrics),
+            "task_evaluation": asdict(record.task_evaluation),
+        }
+        path = Path(self.audit_output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(tmp, path)
+        self.audit_written = path
+        return path
 
     def _new_attempt(self) -> CTFAttempt:
         task = self.bindings.task()
@@ -293,7 +383,7 @@ class AgentAuditEvaluator(Evaluator):
             attempt_id=self.run_id,
             task_id=task_id,
             agent_id=self.agent_id,
-            category=str(task.get("category") or "unknown"),
+            category=str(task.get("challenge_type") or task.get("category") or "unknown"),
             started_at=utc_now(),
             ended_at=utc_now(),
             steps=[],
@@ -314,6 +404,34 @@ class AgentAuditEvaluator(Evaluator):
         if self.attempt is None:
             self.attempt = self._new_attempt()
         return self.attempt
+
+    def _effective_flag(self, attempt: CTFAttempt) -> FlagResult:
+        """合并三层判定,正确性权威 = 平台/本地(_local_verify)提交判定,静态规则只兜底。
+
+        1. submission.correct is True/False → 平台或 _local_verify 已判对/错(动态题 T1/T2 亦如此);
+        2. correct is None → 回退静态 FlagVerifier(静态题有规则即用);
+        3. 规则也 missing → valid=None(unknown,不回环,杜绝 Hack World 动态 flag REPLAN 死循环);
+           submitted 标记该 run 是否真提交过(决定 None 时 pass 还是 fail)。
+        """
+        sub = self.bindings.submission_result() or {}
+        correct = sub.get("correct")
+        submitted = bool(sub.get("flag")) or bool(attempt.submitted_flag)
+        if correct is True:
+            return FlagResult(attempt.task_id, True, "platform",
+                              "平台/本地判定:提交正确", submitted=submitted)
+        if correct is False:
+            return FlagResult(attempt.task_id, False, "platform",
+                              "平台/本地判定:提交错误", submitted=submitted)
+        flag = self.verifier.verify(attempt.task_id, attempt.submitted_flag)
+        if flag.mode == "missing":
+            reason = "动态 flag/未配置规则:无本地判定来源"
+            if sub.get("ok") is True:
+                reason += "，提交已受理(ok=True)"
+            else:
+                reason += "，且无有效提交"
+            return FlagResult(attempt.task_id, None, "missing", reason, submitted=submitted)
+        return FlagResult(attempt.task_id, flag.valid, flag.mode, flag.reason,
+                          submitted=submitted)
 
     @staticmethod
     def _infer_success(observation: str) -> bool:

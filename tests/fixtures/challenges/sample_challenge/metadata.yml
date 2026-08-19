@@ -1,0 +1,9 @@
+name: Sample Web Challenge
+category: web
+description: |
+  This is a local sample challenge used to test
+  the CTF task-understanding pipeline.
+target: http://127.0.0.1:8080
+flag_format: "flag{...}"
+hints:
+  - Inspect the provided challenge materials.

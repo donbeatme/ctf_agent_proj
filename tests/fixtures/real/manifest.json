@@ -1,0 +1,163 @@
+[
+  {
+    "file": "ctf2_web_PCHAL-2026-0024.json",
+    "name": "[0CTF 2016]piapiapia",
+    "category": "WEB",
+    "challenge_id": "2fbda4a3-89fc-4c16-b9d1-e90673efde39",
+    "friendly_id": "PCHAL-2026-0024",
+    "difficulty": "Easy",
+    "has_files": false,
+    "file_count": 0
+  },
+  {
+    "file": "ctf2_web_PCHAL-2026-0025.json",
+    "name": "[34C3CTF 2017]urlstorage",
+    "category": "WEB",
+    "challenge_id": "46342d6e-5498-4b62-966f-77f36b8f5779",
+    "friendly_id": "PCHAL-2026-0025",
+    "difficulty": "Easy",
+    "has_files": false,
+    "file_count": 0
+  },
+  {
+    "file": "ctf2_web_PCHAL-2026-0026.json",
+    "name": "[ASIS 2019]Unicorn shop",
+    "category": "WEB",
+    "challenge_id": "917ccde8-1a89-4c6f-8472-4888abf3528e",
+    "friendly_id": "PCHAL-2026-0026",
+    "difficulty": "Easy",
+    "has_files": false,
+    "file_count": 0
+  },
+  {
+    "file": "ctf2_pwn_PCHAL-2026-0062.json",
+    "name": "test_your_nc",
+    "category": "PWN",
+    "challenge_id": "54fd6f56-4458-4b07-8729-ea429c289cd1",
+    "friendly_id": "PCHAL-2026-0062",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_pwn_PCHAL-2026-0063.json",
+    "name": "rip",
+    "category": "PWN",
+    "challenge_id": "250f010a-fbfc-462a-aee0-4ab862ae735d",
+    "friendly_id": "PCHAL-2026-0063",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_pwn_PCHAL-2026-0064.json",
+    "name": "warmup",
+    "category": "PWN",
+    "challenge_id": "859fb8d8-ee9f-43be-a6e1-db9a25519e5b",
+    "friendly_id": "PCHAL-2026-0064",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_crypto_PCHAL-2026-0016.json",
+    "name": "看我回旋踢",
+    "category": "CRYPTO",
+    "challenge_id": "b99a83ec-2b5a-4978-bfc4-81d4e2c26289",
+    "friendly_id": "PCHAL-2026-0016",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_crypto_PCHAL-2026-0017.json",
+    "name": "变异凯撒",
+    "category": "CRYPTO",
+    "challenge_id": "afb6516e-0648-4087-962f-f420396d2e06",
+    "friendly_id": "PCHAL-2026-0017",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_crypto_PCHAL-2026-0018.json",
+    "name": "Url编码",
+    "category": "CRYPTO",
+    "challenge_id": "6e36fd97-d3c5-4602-9089-b0f3ee1b9222",
+    "friendly_id": "PCHAL-2026-0018",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_misc_PCHAL-2026-0005.json",
+    "name": "snake",
+    "category": "MISC",
+    "challenge_id": "1dff1955-496b-40be-81f7-c37ccae980c3",
+    "friendly_id": "PCHAL-2026-0005",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_misc_PCHAL-2026-0006.json",
+    "name": "荷兰宽带数据泄露",
+    "category": "MISC",
+    "challenge_id": "0079dc66-7e55-409c-b258-988a14f5ddff",
+    "friendly_id": "PCHAL-2026-0006",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_misc_PCHAL-2026-0007.json",
+    "name": "二维码",
+    "category": "MISC",
+    "challenge_id": "7a44e5a1-beea-4663-9b23-ebe1baf38765",
+    "friendly_id": "PCHAL-2026-0007",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_reverse_PCHAL-2026-0013.json",
+    "name": "easyre",
+    "category": "REVERSE",
+    "challenge_id": "13858171-f3fc-46d3-940e-1682b5cdfc71",
+    "friendly_id": "PCHAL-2026-0013",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_reverse_PCHAL-2026-0014.json",
+    "name": "CrackMe",
+    "category": "REVERSE",
+    "challenge_id": "cca98df5-5420-4944-8be9-2ad1b3de9661",
+    "friendly_id": "PCHAL-2026-0014",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_reverse_PCHAL-2026-0015.json",
+    "name": "brichfire",
+    "category": "REVERSE",
+    "challenge_id": "e3a1b528-8008-4268-b072-9b4bcd8b36c1",
+    "friendly_id": "PCHAL-2026-0015",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1
+  },
+  {
+    "file": "ctf2_misc_PCHAL-2026-0462.json",
+    "name": "被嗅探的流量",
+    "category": "MISC",
+    "challenge_id": "d5968593-d7f8-4634-a204-af543c08b472",
+    "friendly_id": "PCHAL-2026-0462",
+    "difficulty": "Easy",
+    "has_files": true,
+    "file_count": 1,
+    "expected_type": "ctf-forensics"
+  }
+]

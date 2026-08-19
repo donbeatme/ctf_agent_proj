@@ -8,29 +8,44 @@ import json
 from dataclasses import asdict
 from typing import Any, Dict, List, Set
 
-from ..integrations.deepseek import DeepSeekChat
+from ..integrations.llm_chat import LlmChatClient, LlmChatResult
 from ..schemas import CTFAttempt, PlanEvaluation, PlanStep
 
 
-PLAN_REVIEW_SYSTEM = """You review an authorized CTF agent plan before execution.
-Check goal coverage, dependency ordering, evidence collection, fallback strategy, and final answer
-verification. Do not solve the CTF or invent a flag. Return strict JSON with decision (pass/revise),
-score (0..1), issues (array), and suggestions (array)."""
+PLAN_REVIEW_SYSTEM = """你是计划评审 Agent。在执行前评审规划 Agent 产出的计划 DAG，检查结构是否完整、可执行。
+
+【可用的上下文】
+- 任务：题面原文与目标列表（Task）
+- 计划 DAG：全部步骤（instruction/criterion/status/attempts/depends_on/skill_id）
+- 执行历史：已完成的步骤轨迹（如有，判断与计划的偏差）
+
+【评审要点】
+- 目标覆盖：步骤是否覆盖任务目标
+- 依赖顺序：depends_on 是否合理、无环、无悬空引用
+- 验收标准：每步 criterion 是否可检验、可自动化判定
+- 回退策略：失败时是否有可执行的修复路径
+- 工具/技能绑定：skill_id 是否与步骤内容匹配
+
+【输出】
+- pass / revise 判定 + 问题列表 issues + 修改建议 suggestions
+- 不解题、不猜 flag；只评审计划结构合理性"""
 
 
 class PlanEvaluator:
-    def __init__(self, llm: DeepSeekChat):
+    def __init__(self, llm: LlmChatClient):
         self.llm = llm
+        self.last_usage: dict | None = None
 
-    def evaluate(self, attempt: CTFAttempt) -> PlanEvaluation:
+    def evaluate(self, attempt: CTFAttempt, ctx: str = "") -> PlanEvaluation:
         structural = self._structural_review(attempt.plan)
         if not self.llm.available:
             return structural
 
         try:
-            raw = self.llm.complete([
+            result: LlmChatResult = self.llm.complete([
                 {"role": "system", "content": PLAN_REVIEW_SYSTEM},
                 {"role": "user", "content": json.dumps({
+                "engine_context": ctx,
                 "objective": attempt.metadata.get("problem_statement", ""),
                 "retrieved_memory": attempt.metadata.get(
                     "planning_memory_context", ""
@@ -38,6 +53,8 @@ class PlanEvaluator:
                 "plan": [asdict(step) for step in attempt.plan],
                 }, ensure_ascii=False)},
             ])
+            raw = result.content
+            self.last_usage = result.usage
         except Exception as exc:
             # 在线模型不可用不能阻塞规划器；保留结构评审，并显式标记降级。
             structural.evaluator = (
@@ -45,7 +62,7 @@ class PlanEvaluator:
                 % type(exc).__name__
             )
             structural.suggestions = self._unique(structural.suggestions + [
-                "DeepSeek 计划语义评审失败，当前结果来自本地结构规则",
+                "LLM 计划语义评审失败，当前结果来自本地结构规则",
             ])
             return structural
         parsed = self._parse_json(raw)
@@ -63,7 +80,7 @@ class PlanEvaluator:
             score=round(min(structural.score, semantic_score), 4),
             issues=self._unique(issues),
             suggestions=self._unique(suggestions),
-            evaluator="PlanEvaluator/DeepSeek",
+            evaluator="PlanEvaluator/LlmApi",
         )
 
     @staticmethod

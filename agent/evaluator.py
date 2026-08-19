@@ -4,10 +4,14 @@
 未接入前用 MockEvaluator:构造时按角色传入要返回的内容,方便测试不同场景。
 """
 
+import json
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
+from agent import llm_api
 from agent.schema import GoalEvalDetail, Role
+from model_config import get as cfg_get
 
 
 class Verdict(StrEnum):
@@ -51,6 +55,10 @@ class Evaluator:
         """评估 goal list 中未完成的 goal 是否已达成(引用 DAG 节点作证据)。"""
         raise NotImplementedError
 
+    def system_for(self, role) -> str:
+        """该评估器在指定角色下使用的系统提示词(engine 装配 SystemPromptComponent 用)。"""
+        return ""
+
 
 class MockEvaluator(Evaluator):
     """可配置返回内容的评估 mock。responses: {角色名: EvalResult 或 callable(ctx)->EvalResult}。
@@ -81,3 +89,236 @@ class MockEvaluator(Evaluator):
         if callable(self._goal_responses):
             return self._goal_responses(ctx, goals, dag_summary)
         return list(self._goal_responses)
+
+
+class SmokeEvaluator(Evaluator):
+    """端到端冒烟的 mock 评估:ep 按真实 blueprint 判空(空计划要重规划),
+    ee/et 固定放行——主循环用真实 planner 跑通,其余 agent 全部 mock。"""
+
+    def __init__(self, ws):
+        self._ws = ws
+
+    def review(self, ctx):
+        bp = self._ws.blueprint
+        if bp is None or not bp.steps:
+            return EvalResult(Verdict.FAIL, "计划为空,请重新规划")
+        return EvalResult(Verdict.PASS, "计划可执行(mock)")
+
+    def step_eval(self, ctx):
+        return EvalResult(Verdict.PASS, "步骤验收通过(mock)")
+
+    def reflect(self, ctx):
+        return EvalResult(Verdict.DONE, "反思: 无问题(mock)")
+
+    def system_for(self, role):
+        return ""
+
+    def eval_goals(self, ctx, goals, dag_summary):
+        """mock:全部 PASSED 步骤作为证据,认为 goal 已达成(冒烟只验证链路不验证判定)。"""
+        steps = self._ws.blueprint.steps if self._ws.blueprint else {}
+        evidence = [sid for sid, s in steps.items() if s.status.value == "PASSED"]
+        return [GoalEvalDetail(goal_id=g["id"], complete=bool(evidence), evidence=evidence,
+                               reasoning="mock: 步骤全 PASS")
+                for g in goals]
+
+
+# ── 轻量 LLM 评审(ep/ee/et)─────────────────────────────────────────
+# 每个角色单轮 llm_api.chat 评引擎装配好的 ctx,输出严格 JSON;verdict 收进角色合法集。
+
+ROLE_SYSTEMS: dict[str, str] = {
+    Role.EVALUATOR_PLAN: (
+        "你是计划评审 Agent。评审下面给出的执行计划 DAG 是否结构完整、可执行、覆盖任务目标。\n"
+        "【输出】只返回一行 JSON:{\"verdict\":\"pass\"|\"fail\",\"opinion\":\"评审意见\"}\n"
+        "- pass: 计划可执行;fail: 计划需重规划。不解题、不猜 flag。"
+    ),
+    Role.EVALUATOR_STEP: (
+        "你是步骤验收 Agent。验收执行 Agent 对当前步骤的产出是否达成验收标准。\n"
+        "【可用上下文】任务、当前步骤(instruction/criterion/status/attempts)、"
+        "提交判定(submission correct=true 表示该步产出已被平台确认)、本轮评估意见、执行历史。\n"
+        "【输出】只返回一行 JSON:{\"verdict\":\"pass\"|\"retry\"|\"escalate\","
+        "\"is_completed\":true|\"false\",\"opinion\":\"验收意见\"}\n"
+        "- pass: 步骤达成。is_completed 是'任务整体达成'信号,不是'本步骤达成':"
+        "仅当任务核心目标(拿到格式合法 flag)已达成时才置 true,单步 PASS 默认置 false。\n"
+        "- 提交判定 correct=true(平台已确认 flag)→ is_completed 置 true。\n"
+        "- 动态 flag 容器题(has_container)且存在已验证经验:若执行 Agent 的解题步骤与漏洞信息"
+        "(注入点、漏洞类型、oracle、过滤绕过、提取方法)与已验证经验一致,且已提取格式合法的 flag,"
+        "即使提交判定 correct=None(平台未确认/鉴权失败),也可置 is_completed=true。\n"
+        "- 侦察/探测等前置步骤即使 PASS 也不置 is_completed=true(任务未达核心目标)。\n"
+        "- retry: 未达成但有修复空间;escalate: 证据不足/无法达成。\n"
+        "不解题、不猜 flag;基于证据给出 verdict + opinion。"
+    ),
+    Role.EVALUATOR_TASK: (
+        "你是任务反思 Agent。任务结束(完成或失败)时全局校验,决定 DONE 或重规划。\n"
+        "【可用上下文】任务、计划 DAG 全量步骤状态、执行历史、本轮评估意见、提交判定。\n"
+        "【输出】只返回一行 JSON:{\"verdict\":\"done\"|\"replan\",\"opinion\":\"反思意见\"}\n"
+        "- done: 目标已达成(如提交判定 correct=true);replan: 存在未达成关键步骤,给出重规划方向。\n"
+        "- done 亦可在动态 flag 容器题下达成:解题过程经已验证经验核对一致且提取出格式合法 flag,"
+        "即使平台提交判定未确认(correct=None)。\n"
+        "不猜 flag;基于证据与过程指标全局评估。"
+    ),
+}
+
+
+def _parse_json(raw: str) -> dict:
+    """剥 ``` 围栏后解析 JSON;失败回 {}。"""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _sum_usage(log: list[dict]) -> dict | None:
+    if not log:
+        return None
+    return {
+        "prompt_tokens": sum(u.get("prompt_tokens", 0) for u in log),
+        "completion_tokens": sum(u.get("completion_tokens", 0) for u in log),
+        "total_tokens": sum(u.get("total_tokens", 0) for u in log),
+    }
+
+
+class _LLMEvaluator(Evaluator):
+    """轻量 LLM 评审基类:单轮 llm_api.chat(评 ctx),verdict 收进角色合法集,失败走默认。"""
+
+    role: str = ""
+    default_verdict: Verdict = Verdict.PASS
+    legal: frozenset = frozenset()
+
+    def _call(self, ctx: str) -> tuple[dict, str, dict | None]:
+        try:
+            raw = llm_api.chat(system=ROLE_SYSTEMS.get(self.role, ""),
+                               prompt=ctx, model=llm_api.role_model(self.role))
+            usage = _sum_usage(llm_api.pop_token_log())
+            return _parse_json(raw), raw, usage
+        except Exception as exc:  # noqa: BLE001 — LLM 故障不能阻塞评估,走兜底
+            return {}, f"(LLM 调用失败: {type(exc).__name__}: {exc})", None
+
+    def _coerce(self, value, default=None) -> Verdict:
+        v = str(value or "").strip().lower()
+        if v in self.legal:
+            return Verdict(v)
+        return default or self.default_verdict
+
+    def _result(self, parsed, raw, usage, opinion_field="opinion", **extra) -> EvalResult:
+        verdict = self._coerce(parsed.get("verdict"))
+        opinion = str(parsed.get(opinion_field) or "").strip()[:500]
+        if not opinion:
+            if raw.startswith("(LLM 调用失败"):
+                opinion = raw[:500]
+            else:
+                opinion = raw[:200] if raw else f"(LLM {self.role} 未给出意见文本)"
+        return EvalResult(verdict=verdict, opinion=opinion, total_usage=usage, **extra)
+
+    def system_for(self, role) -> str:
+        return ROLE_SYSTEMS.get(role, "")
+
+
+class PlanLLMEvaluator(_LLMEvaluator):
+    """ep 计划评审:pass/fail;解析失败 PASS(不阻塞执行)。"""
+
+    role = Role.EVALUATOR_PLAN
+    default_verdict = Verdict.PASS
+    legal = frozenset({"pass", "fail"})
+
+    def review(self, ctx: str) -> EvalResult:
+        parsed, raw, usage = self._call(ctx)
+        return self._result(parsed, raw, usage)
+
+
+class StepLLMEvaluator(_LLMEvaluator):
+    """ee 步骤验收:pass/retry/escalate + is_completed;解析失败 RETRY。"""
+
+    role = Role.EVALUATOR_STEP
+    default_verdict = Verdict.RETRY
+    legal = frozenset({"pass", "retry", "escalate"})
+
+    def step_eval(self, ctx: str) -> EvalResult:
+        parsed, raw, usage = self._call(ctx)
+        is_completed = bool(parsed.get("is_completed"))
+        return self._result(parsed, raw, usage, is_completed=is_completed)
+
+    def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
+        """轻量确定性:仅当 DAG 全部进入终态(PASSED/SKIPPED)且存在 PASSED 步骤时判定 goal 完成。
+
+        保守:不因个别步骤通过(如侦察通过≠拿到 flag)就宣告任务目标达成,避免在剩余
+        步骤未执行时提前完成目标、触发早停收口跳过真正解题步骤。
+        """
+        statuses = re.findall(r"\[(\w+)\]\s+status=(\w+)", dag_summary or "")
+        passed = [sid for sid, st in statuses if st == "PASSED"]
+        complete = bool(passed) and all(st in ("PASSED", "SKIPPED") for _, st in statuses)
+        evidence = passed if complete else []
+        reasoning = (
+            f"evidence: {passed}" if complete
+            else f"DAG 未全部终态(已过:{passed or '无'}),goal 未达成"
+        )
+        return [
+            GoalEvalDetail(goal_id=str(g.get("id", "")), complete=complete,
+                           evidence=evidence, reasoning=reasoning)
+            for g in goals
+        ]
+
+
+class TaskLLMEvaluator(_LLMEvaluator):
+    """et 任务反思:done/replan;解析失败 DONE。"""
+
+    role = Role.EVALUATOR_TASK
+    default_verdict = Verdict.DONE
+    legal = frozenset({"done", "replan"})
+
+    def reflect(self, ctx: str) -> EvalResult:
+        parsed, raw, usage = self._call(ctx)
+        return self._result(parsed, raw, usage)
+
+
+class ConfigurableEvaluator(Evaluator):
+    """按角色从 delegates 分发评估;eval_goals 委托 ee 委托者(引擎 GOAL_EVAL→EVALUATOR_STEP)。"""
+
+    def __init__(self, delegates: dict[str, Evaluator]):
+        self._delegates = delegates or {}
+        self._fallback = MockEvaluator({})
+
+    def _get(self, role: str) -> Evaluator:
+        return self._delegates.get(role, self._fallback)
+
+    def review(self, ctx: str) -> EvalResult:
+        return self._get(Role.EVALUATOR_PLAN).review(ctx)
+
+    def step_eval(self, ctx: str) -> EvalResult:
+        return self._get(Role.EVALUATOR_STEP).step_eval(ctx)
+
+    def reflect(self, ctx: str) -> EvalResult:
+        return self._get(Role.EVALUATOR_TASK).reflect(ctx)
+
+    def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
+        return self._get(Role.EVALUATOR_STEP).eval_goals(ctx, goals, dag_summary)
+
+    def system_for(self, role) -> str:
+        return self._get(role).system_for(role)
+
+
+def build_evaluator(ws, modes: dict[str, str] | None = None) -> ConfigurableEvaluator:
+    """按 config 构造分角色评估器。modes: {role: 'real'|'mock'};缺省读
+    EVALUATOR_PLAN/STEP/TASK(env 优先,model_config.json 兜底,默认 mock)。
+    real → 轻量 LLM 评审;mock → SmokeEvaluator。"""
+    if modes is None:
+        modes = {
+            Role.EVALUATOR_PLAN: cfg_get("EVALUATOR_PLAN") or "mock",
+            # ee 默认常开 real:is_completed 由 ee 软鉴定置位,关掉(→mock)则无法收口 DONE
+            Role.EVALUATOR_STEP: cfg_get("EVALUATOR_STEP") or "real",
+            Role.EVALUATOR_TASK: cfg_get("EVALUATOR_TASK") or "mock",
+        }
+    real = {
+        Role.EVALUATOR_PLAN: PlanLLMEvaluator(),
+        Role.EVALUATOR_STEP: StepLLMEvaluator(),
+        Role.EVALUATOR_TASK: TaskLLMEvaluator(),
+    }
+    mock = SmokeEvaluator(ws)
+    delegates = {
+        role: (real[role] if str(mode).strip().lower() == "real" else mock)
+        for role, mode in modes.items()
+    }
+    return ConfigurableEvaluator(delegates)

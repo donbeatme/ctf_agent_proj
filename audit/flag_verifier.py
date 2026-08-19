@@ -63,4 +63,3 @@ class FlagVerifier:
 def sha256_flag(flag: str) -> str:
     """为 expected_flags.json 生成不暴露明文的值。"""
     return hashlib.sha256(flag.strip().encode("utf-8")).hexdigest()
-

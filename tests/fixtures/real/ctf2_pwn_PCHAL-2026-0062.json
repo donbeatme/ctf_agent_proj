@@ -1,0 +1,40 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "PWN",
+  "created_at": "2026-05-28T08:49:22.817411+08:00",
+  "description": "Ubuntu 18",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T08:49:22.820823+08:00",
+      "file_id": "eb91291e-30e2-4fb1-bfe4-2a572063db59",
+      "file_md5": "55f70ad5e0588cd7dfb57270d0fb1cd1",
+      "file_name": "test",
+      "file_size": 16608,
+      "file_type": "application/octet-stream",
+      "id": "4df216da-298f-4fbb-be5c-c887e89c05d9",
+      "is_visible": true,
+      "practice_challenge_id": "54fd6f56-4458-4b07-8729-ea429c289cd1",
+      "updated_at": "2026-05-28T08:49:22.820823+08:00",
+      "path": "test"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0062",
+  "has_container": true,
+  "id": "54fd6f56-4458-4b07-8729-ea429c289cd1",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "test_your_nc",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 553,
+  "sort_order": 0,
+  "template_id": "cac6b909-0f47-4ec4-972e-d9cb517babb6",
+  "translations": null,
+  "updated_at": "2026-08-17T12:00:06.012867+08:00"
+}

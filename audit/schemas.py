@@ -162,9 +162,10 @@ class CTFAttempt:
 @dataclass
 class FlagResult:
     task_id: str
-    valid: bool
+    valid: Optional[bool]  # None = 无判定来源(动态 flag/未配置规则),不触发 REPLAN
     mode: str
     reason: str
+    submitted: bool = False  # 本次 run 是否真的提交过 flag(ok=True)或至少携带 flag 串
 
 
 @dataclass

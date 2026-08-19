@@ -119,33 +119,35 @@ assembler.ingest(role, **returns)
 
 ---
 
-## 4. 组件清单（9 个）
+## 4. 组件清单（11 个）
 
 | 组件 | key | priority | anchor | LEVELS | 投影源 |
 |---|---|---|---|---|---|
 | SystemPrompt | `system_prompt` | 99 | ✓ | 单档 | `kw["system"]` |
 | Task | `task` | 99 | ✓ | 单档 | `kw["raw_content"]` + `kw["goal_list"]` |
 | AgentComm | `agent_comm` | 98 | ✓ | 单档 | 最近 replan 之后的非 pass 意见事件 |
+| Submission | `submission` | 99 | ✓ | 单档 | `ws.meta["submission"]`（executor 提交 flag 的判定） |
 | Dag | `dag` | 5 | ✗ | raw / skeleton | `ws.blueprint` |
 | History | `history` | 2 | ✗ | raw / index / summary | STEP_RECORD + REPLAN 事件 |
 | Docs | `docs` | 3 | ✗ | raw / ref | `ws.docs` |
 | ToolDirectory | `tool_dir` | 4 | ✗ | raw / ref | `ws.tool_catalog` |
 | Tool | `tools` | 4 | ✗ | raw / ref | `ws.tools` |
+| Experience | `experience` | 4 | ✗ | raw / ref | `ws.experience` |
 | Trace | `trace` | 1 | ✗ | raw / index / summary | 最近 replan 之后的 USE_TOOL / TOOL_RESULT 事件 |
 
 ### 压缩优先级阶梯
 
 ```
-trace=1  >  history=2  >  docs=3  >  tools/tool_dir=4  >  dag=5
+trace=1  >  history=2  >  docs=3  >  tools/tool_dir=4 / experience=4  >  dag=5
 (先压)                                          (最后压)
-agent_comm=98 / task=99 / system_prompt=99  — 锚点，永不压
+agent_comm=98 / submission=99 / task=99 / system_prompt=99  — 锚点，永不压
 ```
 
 机械压缩候选按 `(priority, -size())` 排序：**优先级低 + 占比大**先压。
 
 ### SystemPromptComponent
 
-`target="system"`，锚点。每次 `plan()` 重建，只带本轮触发；渲染文本由 planner 预先拼好经 `kw["system"]` 传入（契约文案归 planner 单一持有）。
+`target="system"`，锚点。每次 assemble 重建，只带本轮触发；渲染文本经 `kw["system"]` 传入。planner 在 `plan()` 拼好（含状态上下文）；executor / ep / ee / et 由 engine 在 `_assemble_ctx` 调用点传入各自角色常量（`executor.system` / `evaluator.system_for(role)`）——契约文案归各角色模块单一持有，组件只读投影（供 `[ctx_asm]` 日志/信号），system 不进返回的 ctx 正文，角色各自把它当系统消息直传 LLM，避免双写。
 
 ### TaskComponent
 
@@ -154,6 +156,10 @@ agent_comm=98 / task=99 / system_prompt=99  — 锚点，永不压
 ### AgentCommComponent
 
 本轮评估意见（agent 通信）：**pass 是闸门**（不产出内容），非 pass（FAIL / RETRY / ESCALATE / REPLAN）才进 ctx。投影最近一次 replan 事件之后的非 pass 意见事件（kind ∈ `plan_review` / `step_eval` / `reflect` / `scheduling`）。作用域从事件流推导，不持瞬态——断点续跑后边界照样可推导。生命周期：`on_replan` 清空本轮（每轮重规划后只留本轮）。
+
+### SubmissionComponent
+
+提交状态（公用组件）：executor 提交 flag 后的平台判定。投影 `ws.meta["submission"]`（`{flag, ok, correct, message}`），由引擎在 executor 返回后经 `Workspace.record_submission` 落账。锚点、永不压。注册给 **ee / et**——提交判定是 ee 判任务完成（`is_completed`）的核心证据：ee 看到 `correct=true` 即可认定该步产出已被平台确认 → 引擎 `task_completed` → SCHEDULING → REFLECTING → DONE。executor 自己的判定经 TraceComponent（`submit_flag` 的 tool_result）已可见，不重复投影。
 
 ### DagComponent
 
@@ -186,6 +192,16 @@ agent_comm=98 / task=99 / system_prompt=99  — 锚点，永不压
 ### ToolComponent
 
 活动工具集（`ws.tools` 只读投影）。**动态**：默认空，`apply_tool` 申请后经 `ws.add_tools` 并入、`remove_tool` 经 `ws.remove_tools` 收缩——有申请就有删除。与本地协议解耦：`normalize` 接收标准工具格式（OpenAI function-calling / MCP），`ws.tools` 只存归一结果，本地 `@tool` 结构不泄漏进来。档位：raw（全目录）→ ref（仅 id）。
+
+### ExperienceComponent
+
+已验证解题经验（`ws.experience` 只读投影）。经验 = 同一题（friendly_id / template_id **完全一致**）
+在其它实例/场地**已被平台验证过**的解题过程——动态 flag 题用它对当前实例重跑推导即可本地判
+（EE 把关，免平台往返；分层见 `design/verification.md`）。只渲染紧凑索引（题号 / 方法 / 是否已验证 /
+上次成功 / 脚本路径），**不渲染过期 hint flag**（实例相关）；完整 trace 不在 ctx，EE 直接跑
+`verifier_path` 脚本即可（上下文渲染经 runner 沙箱执行）。档位：raw（每条一行）→ ref（仅
+procedure_id 索引）。生命周期：run 启动由 engine 装填（经 `executor.match_experience()` →
+`adapter.match_procedures`），run 内不清理。
 
 ### TraceComponent
 
@@ -233,7 +249,7 @@ Workspace 在 `_init_assembler()` 中按角色注册（懒加载）：
 | 角色 | 组件（按拼接序） |
 |---|---|
 | planner | SystemPrompt / Task / AgentComm / Dag / History / Docs / ToolDirectory / Tool / Trace |
-| executor | SystemPrompt / Task / AgentComm / Dag / Docs / ToolDirectory / Tool / Trace（agent=EXECUTOR） |
+| executor | SystemPrompt / Task / AgentComm / Dag / Docs / ToolDirectory / Tool / Experience / Trace（agent=EXECUTOR） |
 | evaluator_plan | SystemPrompt / Task / Dag / History |
 | evaluator_step | SystemPrompt / Task / AgentComm / Dag / History |
 | evaluator_task | SystemPrompt / Task / AgentComm / Dag / History |
@@ -248,4 +264,6 @@ Workspace 在 `_init_assembler()` 中按角色注册（懒加载）：
 | `tests/test_assembler.py` | CtxAssembler 信号响应 |
 | `tests/test_compress.py` | 机械压缩策略 |
 | `tests/test_tool_components.py` | 工具组件渲染 |
+| `tests/test_experience_ctx.py` | Experience 组件渲染 / `ws.experience` 持久化 / 注册表 |
+| `tests/test_experience_matching.py` | engine `_init_run` 装填经验 |
 | `tests/test_history_ctx.py` | History 组件渲染导出（需真实 LLM） |

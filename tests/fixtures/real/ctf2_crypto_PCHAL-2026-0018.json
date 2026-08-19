@@ -1,0 +1,39 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "CRYPTO",
+  "created_at": "2026-05-28T00:18:06.173407+08:00",
+  "description": "注意：得到的 flag 请包上 flag{} 提交",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T00:18:06.174498+08:00",
+      "file_id": "14163afc-9405-43a7-b916-87fe116fb4fd",
+      "file_md5": "ac459160fe5d60b7fb2a7c4c409c241c",
+      "file_name": "8c1b8065-c3ae-46d7-afc7-1be8d95aac47.zip",
+      "file_size": 425,
+      "file_type": "application/x-zip-compressed",
+      "id": "b2cae289-9b7f-4060-b143-2225410acab8",
+      "is_visible": true,
+      "practice_challenge_id": "6e36fd97-d3c5-4602-9089-b0f3ee1b9222",
+      "updated_at": "2026-05-28T00:18:06.174498+08:00",
+      "path": "8c1b8065-c3ae-46d7-afc7-1be8d95aac47.zip"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0018",
+  "id": "6e36fd97-d3c5-4602-9089-b0f3ee1b9222",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "Url编码",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 1617,
+  "sort_order": 0,
+  "template_id": "adfb3cb5-468e-4227-9c54-618d8520d5b4",
+  "translations": null,
+  "updated_at": "2026-08-17T11:02:19.01374+08:00"
+}

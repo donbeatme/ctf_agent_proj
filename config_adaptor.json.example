@@ -1,0 +1,15 @@
+{
+  "CTF2_SESSION_TOKEN": "",
+  "CTF2_API_KEY": "",
+  "CTF2_COOKIE": "",
+  "CTF2_BASE_URL": "https://ctf2.dasctf.com/api/v1",
+  "CTF2_SESSION_BASE": "",
+  "CTF2_ORIGIN": "https://ctf2.dasctf.com",
+  "CTF2_PRACTICE_GROUND_ID": "",
+  "CTF2_SUBMIT_URL_TEMPLATE": "",
+  "CTF2_DOWNLOAD_URL_TEMPLATE": "",
+  "CTF2_LIST_PAGE_SIZE": "100",
+  "CTF2_AUTO_START_TARGET": "true",
+  "CTF_STORE_DIR": "./data",
+  "CTF_ATTACHMENT_CACHE_BYTES": "2147483648"
+}

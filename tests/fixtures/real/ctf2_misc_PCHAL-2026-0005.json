@@ -1,0 +1,39 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "MISC",
+  "created_at": "2026-05-28T00:18:01.338465+08:00",
+  "description": "注意：得到的 flag 请包上 flag{} 提交",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T00:18:01.339867+08:00",
+      "file_id": "49820af1-3fda-4efd-8e7b-ab081b397f79",
+      "file_md5": "f6f20125194603d0b13eb38516afc7d6",
+      "file_name": "8033a99b-d9c6-4005-bfab-d83920b07b82.zip",
+      "file_size": 274859,
+      "file_type": "application/x-zip-compressed",
+      "id": "03bfb2d4-8f4d-449d-8975-d4599c2754da",
+      "is_visible": true,
+      "practice_challenge_id": "1dff1955-496b-40be-81f7-c37ccae980c3",
+      "updated_at": "2026-05-28T00:18:01.339867+08:00",
+      "path": "8033a99b-d9c6-4005-bfab-d83920b07b82.zip"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0005",
+  "id": "1dff1955-496b-40be-81f7-c37ccae980c3",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "snake",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 1264,
+  "sort_order": 0,
+  "template_id": "844f3d95-4366-467a-b3ec-e505fef52ac6",
+  "translations": null,
+  "updated_at": "2026-08-17T12:51:14.01489+08:00"
+}

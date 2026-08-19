@@ -1,0 +1,39 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "REVERSE",
+  "created_at": "2026-05-28T00:18:04.808523+08:00",
+  "description": "注意：得到的 flag 请包上 flag{} 提交",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T00:18:04.809593+08:00",
+      "file_id": "a7bf59b6-5ddb-4dca-b635-980cd3789e7c",
+      "file_md5": "10ca928890980fa00245bf192b7948e5",
+      "file_name": "4af449ae-cf09-4cff-8ca8-b63bc8d5856e.zip",
+      "file_size": 35229,
+      "file_type": "application/x-zip-compressed",
+      "id": "e307d8e6-6a87-4a5e-8f52-24f30cd1af05",
+      "is_visible": true,
+      "practice_challenge_id": "e3a1b528-8008-4268-b072-9b4bcd8b36c1",
+      "updated_at": "2026-05-28T00:18:04.809593+08:00",
+      "path": "4af449ae-cf09-4cff-8ca8-b63bc8d5856e.zip"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0015",
+  "id": "e3a1b528-8008-4268-b072-9b4bcd8b36c1",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "brichfire",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 29,
+  "sort_order": 0,
+  "template_id": "99447f9f-710b-4a12-b44c-a2136858833a",
+  "translations": null,
+  "updated_at": "2026-08-15T10:26:07.014732+08:00"
+}

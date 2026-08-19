@@ -282,3 +282,74 @@ def test_logger_env_check_step_skips_no_tools(tmp_path):
     log.on_run_end(state="DONE", fail_reason=None, total_cycles=1)
     text = (tmp_path / "run.log").read_text(encoding="utf-8")
     assert "check[step s1]" not in text
+
+
+# ===== 接线:task_understanding challenge_type 接入 run_start 分类探测 =====
+
+
+class _ReportCollector:
+    def __init__(self):
+        self.start_reports = []
+
+    def on_env_check(self, scope="", step_id=None, report=None, **kw):
+        if scope == "run_start":
+            self.start_reports.append(report)
+
+
+def test_engine_run_start_probes_challenge_type_category():
+    """raw 带 challenge_type 时,run_start 快照追加该分类就绪度探测。"""
+    collector = _ReportCollector()
+    evaluator = MockEvaluator({
+        "evaluator_plan": EvalResult(Verdict.PASS, "计划可执行"),
+        "evaluator_step": EvalResult(Verdict.PASS, "s1: 完成"),
+        "evaluator_task": EvalResult(Verdict.DONE, "反思: 无问题"),
+    })
+    engine = Engine(_StepPlanner(), MockExecutor(observation="执行完成"), evaluator,
+                    workspace=MockWorkspace(), checker=StubChecker())
+    engine.signals.subscribe(collector)
+    engine.run({**MOCK_TASK, "challenge_type": "ctf-pwn"})
+
+    assert len(collector.start_reports) == 1
+    rep = collector.start_reports[0]
+    assert rep["category"]["category"] == "ctf-pwn"     # 接线:题型分类探测进了 run_start
+    assert rep["category"]["compatibility"] == "Requires X"
+
+
+def test_engine_run_start_no_challenge_type_no_category_probe():
+    """raw 无 challenge_type → 不追加分类探测(纯全量快照)。"""
+    collector = _ReportCollector()
+    evaluator = MockEvaluator({
+        "evaluator_plan": EvalResult(Verdict.PASS, "计划可执行"),
+        "evaluator_step": EvalResult(Verdict.PASS, "s1: 完成"),
+        "evaluator_task": EvalResult(Verdict.DONE, "反思: 无问题"),
+    })
+    engine = Engine(_StepPlanner(), MockExecutor(observation="执行完成"), evaluator,
+                    workspace=MockWorkspace(), checker=StubChecker())
+    engine.signals.subscribe(collector)
+    engine.run(dict(MOCK_TASK))
+
+    assert len(collector.start_reports) == 1
+    assert "category" not in collector.start_reports[0]
+
+
+def test_logger_run_start_writes_challenge_type_category(tmp_path):
+    """run_start 带 category → log 写题型分类就绪度行。"""
+    from agent.logging import EngineLogger
+
+    log = EngineLogger(tmp_path)
+    log.on_run_started(task={})
+    log.on_env_check(scope="run_start", report={
+        "total": 70, "available": 60, "missing": 5, "manual": 4, "unknown": 1,
+        "missing_list": [],
+        "sandbox": {"category": "ctf-pwn", "needed": True, "available": False},
+        "category": {"category": "ctf-pwn", "exists": True,
+                     "compatibility": "Requires X", "allowed_tools": ["Bash"],
+                     "install_cmds": ["apt install gdb"],
+                     "sandbox": {"category": "ctf-pwn", "needed": True, "available": False}},
+    })
+    log.on_run_end(state="DONE", fail_reason=None, total_cycles=1)
+    text = (tmp_path / "run.log").read_text(encoding="utf-8")
+
+    assert "check[run_start] 题型分类就绪度: category=ctf-pwn" in text
+    assert 'compat="Requires X"' in text
+    assert "沙箱 needed=True available=False" in text

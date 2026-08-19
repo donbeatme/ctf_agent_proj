@@ -8,6 +8,7 @@
 """
 
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -19,7 +20,9 @@ from agent.ctx import (
     CtxAssembler,
     DagComponent,
     DocsComponent,
+    ExperienceComponent,
     HistoryComponent,
+    SubmissionComponent,
     SystemPromptComponent,
     TaskComponent,
     ToolComponent,
@@ -31,6 +34,34 @@ from agent.schema import (
 )
 
 _RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
+
+# 已验证经验可见范围(env 开关,默认仅 ee):CTF_EXPERIENCE_SCOPE=ee|agent|et|all|none,逗号可组合。
+# 测试模式默认 ee —— agent 新鲜解题,不靠已验证 procedure 走捷径;ee 拿经验当软鉴定参照核对。
+_EXP_ROLE_TOKEN = {
+    Role.EXECUTOR: "agent",
+    Role.EVALUATOR_STEP: "ee",
+    Role.EVALUATOR_TASK: "et",
+}
+
+
+def _exp_scope() -> set[str]:
+    return {s.strip().lower() for s in os.environ.get("CTF_EXPERIENCE_SCOPE", "ee").split(",") if s.strip()}
+
+
+def _exp_enabled(role: Role) -> bool:
+    """该角色是否装配 ExperienceComponent。none/未列出 → 不装配。
+    "ee" 默认覆盖评估侧(ee 步骤验收 + et 任务反思)两处软鉴定参照;"both" 等价 ee+et。"""
+    scope = _exp_scope()
+    if "all" in scope:
+        return True
+    if "both" in scope:
+        scope = scope - {"both"} | {"ee", "et"}
+    token = _EXP_ROLE_TOKEN.get(role)
+    if token is None:
+        return False
+    if "ee" in scope and token in ("ee", "et"):
+        return True
+    return token in scope
 
 
 def _now():
@@ -83,6 +114,7 @@ class Workspace:
         self.tools: dict[str, dict] = {}         # 活动工具集(统一形式 {id: {description, parameters}};动态按需注入,默认空)
         self.tool_catalog = None                 # 运行时静态工具目录加载器引用(apply_tool 校验用;**不持久化**)
         self.summaries: dict = {}                # 语义压缩摘要缓存 {f"{role}:{key}": {"text":..., "passes":...}}
+        self.experience: list[dict] = []         # 已匹配的解题经验(engine 启动时从 procedure 库装载)
         self.events: list[Event] = []
         self._persist = True                     # MockWorkspace 关掉,不落盘
         self.assembler = CtxAssembler(self)
@@ -119,23 +151,28 @@ class Workspace:
             DocsComponent,
             ToolDirectoryComponent,
             ToolComponent,
+            *((ExperienceComponent,) if _exp_enabled(Role.EXECUTOR) else ()),
             (TraceComponent, (), {"agent": Role.EXECUTOR}),
         )
         self.assembler.register_class(
             Role.EVALUATOR_STEP,
             SystemPromptComponent,
             TaskComponent,
+            SubmissionComponent,
             AgentCommComponent,
             DagComponent,
             HistoryComponent,
+            *((ExperienceComponent,) if _exp_enabled(Role.EVALUATOR_STEP) else ()),
         )
         self.assembler.register_class(
             Role.EVALUATOR_TASK,
             SystemPromptComponent,
             TaskComponent,
+            SubmissionComponent,
             AgentCommComponent,
             DagComponent,
             HistoryComponent,
+            *((ExperienceComponent,) if _exp_enabled(Role.EVALUATOR_TASK) else ()),
         )
 
     # ===== 生命周期 =====
@@ -162,6 +199,7 @@ class Workspace:
         ws.docs = st.get("docs") or {}
         ws.tools = st.get("tools") or {}
         ws.summaries = st.get("summaries") or {}
+        ws.experience = st.get("experience") or []
         raw = []
         for line in ws._read_lines("events.jsonl"):
             try:
@@ -187,6 +225,7 @@ class Workspace:
             "docs": self.docs,
             "tools": self.tools,
             "summaries": self.summaries,
+            "experience": self.experience,
         })
 
     # ===== 状态接口 =====
@@ -199,8 +238,10 @@ class Workspace:
         self.steps = {}
         self.env_state = {}
         self.summaries = {}
+        self.experience = []
         self.events = []
         self.meta["run_status"] = "PLANNING"
+        self.meta.pop("submission", None)   # run 级提交状态,新 run 不残留
         if self._persist:
             self._ensure_dir()
             with (self.root / "events.jsonl").open("w", encoding="utf-8") as fh:
@@ -213,11 +254,24 @@ class Workspace:
                 "docs": self.docs,
                 "tools": self.tools,
                 "summaries": {},
+                "experience": [],
             })
 
     def set_blueprint(self, bp: Blueprint):
         """规划产出 / 补丁合并后写入当前 DAG。"""
         self.blueprint = bp
+
+    def record_submission(self, info: dict):
+        """记录 executor 提交 flag 后的判定(正确/错误/仅记录/异常),供 ee/et 组件投影。
+
+        meta["submission"] 是 SubmissionComponent 的投影源;run 级状态,reset 时清除。
+        """
+        self.meta["submission"] = {
+            "flag": str(info.get("flag") or ""),
+            "ok": info.get("ok"),
+            "correct": info.get("correct"),
+            "message": info.get("message"),
+        }
 
     def record_step(self, step_id, verdict, observation="", *, result=None, attempts=0,
                     is_completed=False, agent=Role.EVALUATOR_STEP, **kw) -> StepResult:
@@ -248,6 +302,13 @@ class Workspace:
 
     def get_doc(self, doc_id):
         return self.docs.get(doc_id)
+
+    def set_experience(self, records):
+        """装载匹配到的解题经验(procedure 记录列表);空/None 清空。"""
+        self.experience = list(records or [])
+
+    def get_experience(self):
+        return list(self.experience)
 
     def get_tool(self, tool_id):
         """取统一形式的工具定义 dict({description, parameters});不存在返回 None。"""

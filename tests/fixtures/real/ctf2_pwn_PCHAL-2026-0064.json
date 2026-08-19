@@ -1,0 +1,40 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "PWN",
+  "created_at": "2026-05-28T08:49:23.41907+08:00",
+  "description": "Ubuntu 18",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T08:49:23.420675+08:00",
+      "file_id": "f1ca7f78-7f91-4f95-a490-533fca68921f",
+      "file_md5": "bd5ec6df8302e5d8659787a6acd9745c",
+      "file_name": "warmup",
+      "file_size": 724,
+      "file_type": "application/octet-stream",
+      "id": "cf550a3b-a460-415b-b061-2389208278b8",
+      "is_visible": true,
+      "practice_challenge_id": "859fb8d8-ee9f-43be-a6e1-db9a25519e5b",
+      "updated_at": "2026-05-28T08:49:23.420675+08:00",
+      "path": "warmup"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0064",
+  "has_container": true,
+  "id": "859fb8d8-ee9f-43be-a6e1-db9a25519e5b",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "warmup",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 71,
+  "sort_order": 0,
+  "template_id": "4b4a896e-4976-47c5-9408-ca13d4659628",
+  "translations": null,
+  "updated_at": "2026-08-11T14:34:10.015054+08:00"
+}

@@ -1,0 +1,85 @@
+"""SshSandboxBackend:per-challenge 持久容器生命周期经 FakeSsh 记录驱动。"""
+
+from pathlib import Path
+
+from agent.runner import ProcOutcome
+from sandbox_env import SandboxSettings, session_key_for
+from sandbox_env.base import container_name_for
+from sandbox_env.ssh_backend import SshSandboxBackend
+
+
+class FakeSsh:
+    """记录 exec/sync_to 调用,固定返回 ProcOutcome(SSH 通道替身)。"""
+
+    def __init__(self):
+        self.execs = []  # (cmd, timeout)
+        self.syncs = []  # (local, remote)
+
+    def exec(self, cmd_str, timeout=None):
+        self.execs.append((cmd_str, timeout))
+        if cmd_str.startswith("docker ps -aq"):
+            return ProcOutcome(0, b"", b"")  # 无该容器 → 需要创建
+        if cmd_str.startswith("docker run -d"):
+            return ProcOutcome(0, b"", b"")
+        if cmd_str.startswith("docker rm -f"):
+            return ProcOutcome(0, b"", b"")
+        if cmd_str.startswith("docker exec"):
+            return ProcOutcome(0, b"OUT", b"")
+        return ProcOutcome(0, b"", b"")
+
+    def sync_to(self, local, remote):
+        self.syncs.append((Path(local), remote))
+
+    def close(self):
+        pass
+
+
+def _backend(ssh=None):
+    return SshSandboxBackend(SandboxSettings(ssh_host="vm"), ssh=ssh or FakeSsh())
+
+
+def test_ensure_creates_container_once():
+    ssh = FakeSsh()
+    bk = _backend(ssh)
+    assert bk.ensure("abc123") == "ctf-abc123"
+    assert bk.ensure("abc123") == "ctf-abc123"  # 缓存命中,不再 docker ps
+    assert ssh.execs[0][0].startswith("docker ps -aq --filter name=^/ctf-abc123$")
+    runs = [c for c, _ in ssh.execs if "docker run -d" in c]
+    assert len(runs) == 1
+    assert "ctf-abc123" in runs[0] and "sleep infinity" in runs[0]
+
+
+def test_exec_runs_docker_exec_in_container():
+    ssh = FakeSsh()
+    bk = _backend(ssh)
+    out = bk.exec("echo hi", session_key="k1")
+    assert out.returncode == 0 and out.stdout == b"OUT"
+    last = ssh.execs[-1][0]
+    assert last.startswith("docker exec ctf-k1 /bin/bash -lc")
+    assert "'echo hi'" in last
+
+
+def test_per_challenge_container_isolation(tmp_path):
+    key_a = session_key_for(str(tmp_path / "a"))
+    key_b = session_key_for(str(tmp_path / "b"))
+    assert key_a != key_b
+    assert container_name_for(key_a) != container_name_for(key_b)
+
+
+def test_sync_uploads_to_session_subdir(tmp_path):
+    ssh = FakeSsh()
+    bk = _backend(ssh)
+    bk.sync(tmp_path, "k1")
+    assert ssh.syncs == [(tmp_path.resolve(), "/root/ctf/k1")]
+
+
+def test_cleanup_removes_container():
+    ssh = FakeSsh()
+    bk = _backend(ssh)
+    bk.cleanup("k1")
+    assert any("docker rm -f ctf-k1" in c for c, _ in ssh.execs)
+
+
+def test_is_ready_requires_host():
+    assert SshSandboxBackend(SandboxSettings(), ssh=FakeSsh()).is_ready() is False
+    assert SshSandboxBackend(SandboxSettings(ssh_host="vm"), ssh=FakeSsh()).is_ready() is True

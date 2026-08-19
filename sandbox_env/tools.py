@@ -1,0 +1,174 @@
+"""工具依赖管理:ToolManager(探测 / 安装(OS 适配,持久) / 冲突与不兼容)。
+
+依赖声明复用 agent.ctf_skill_tools.CtfSkillToolCatalog(TOOL_MANIFEST ~70 工具)。
+- probe_tool:在沙箱内跑 verify_check(import X → python3 -c;CLI 名 → command -v)
+- install_commands:按 Debian 容器做 OS 适配(pip → --break-system-packages;apt → 非交互;
+  gem/go → 先装运行时)
+- install_tools:探测缺失 → 适配命令 → 沙箱内安装(持久进会话容器)→ 重校验
+- tool_conflicts:纯元数据分析(同 verify_check / brew-only / 已知约束 / 功能冗余)
+"""
+
+from __future__ import annotations
+
+import re
+import shlex
+
+from opslog import emit
+
+from agent.ctf_skill_tools import CtfSkillToolCatalog
+
+_PIP_RE = re.compile(r"^(?:python3\s+-m\s+)?pip\s+install\s+(.+)$", re.IGNORECASE)
+_APT_RE = re.compile(r"^apt(?:-get)?\s+install\s+(?:-y\s+)?(.+)$", re.IGNORECASE)
+_GEM_RE = re.compile(r"^gem\s+install\s+(.+)$", re.IGNORECASE)
+_GO_RE = re.compile(r"^go\s+install\s+(.+)$", re.IGNORECASE)
+
+# 已知约束(Debian 沙箱容器)
+_KNOWN_CONSTRAINTS = {
+    "uncompyle6": "需 Python ≤ 3.8,Debian 容器 3.11+ 不兼容",
+    "hashcat": "需 GPU/OpenCL,容器内无 GPU",
+}
+# 功能冗余(仅一项即够)
+_REDUNDANT_PAIRS = [("ropgadget", "ropper")]
+
+
+class ToolManager:
+    def __init__(self, backend=None, catalog=None):
+        self.backend = backend  # SandboxBackend:probe/install 命令经它跑进沙箱
+        self.catalog = catalog or CtfSkillToolCatalog()
+
+    # ===== 探测 =====
+
+    def probe_tool(self, tool_id: str, session_key: str | None = None) -> dict:
+        """沙箱内校验工具可用性。状态:available|missing|incompatible|manual|unknown。"""
+        entry = self.catalog.get_tool(tool_id)
+        if entry is None:
+            return self._probe_result(tool_id, "unknown", None)
+        check = entry.get("verify_check") or ""
+        method = entry.get("install_method")
+        if method == "manual":
+            return self._probe_result(tool_id, "manual", check)
+        if method == "brew":
+            return self._probe_result(tool_id, "incompatible", check)
+        cmd = self._probe_cmd(check)
+        try:
+            out = self.backend.exec(cmd, session_key=session_key, timeout=30)
+        except Exception:
+            return self._probe_result(tool_id, "unknown", check)
+        status = "available" if out.returncode == 0 else "missing"
+        return self._probe_result(tool_id, status, check)
+
+    def _probe_result(self, tool_id: str, status: str, check: str | None) -> dict:
+        emit("sandbox", "probe", tool_id=tool_id, status=status)
+        return {"tool_id": tool_id, "status": status, "check": check}
+
+    @staticmethod
+    def _probe_cmd(check: str) -> str:
+        if check.startswith("import "):
+            return f"python3 -c {shlex.quote(check)}"
+        return f"command -v {shlex.quote(check)}"
+
+    # ===== 安装(OS 适配,持久进会话容器) =====
+
+    def install_commands(self, tool_ids, os="debian") -> dict[str, str]:
+        """逐工具 OS 适配安装命令(仅可自动安装的 pip/apt/gem/go;brew/manual 无命令)。"""
+        out: dict[str, str] = {}
+        for tid in tool_ids:
+            entry = self.catalog.get_tool(tid)
+            if entry is None:
+                continue
+            adapted = self._adapt(entry.get("install_method"), entry.get("install_command") or "")
+            if adapted:
+                out[tid] = adapted
+        return out
+
+    @staticmethod
+    def _adapt(method: str, cmd: str) -> str | None:
+        if method == "pip":
+            m = _PIP_RE.match(cmd)
+            return f"python3 -m pip install --break-system-packages {m.group(1).strip()}" if m else None
+        if method == "apt":
+            m = _APT_RE.match(cmd)
+            return f"DEBIAN_FRONTEND=noninteractive apt-get install -y {m.group(1).strip()}" if m else None
+        if method == "gem":
+            m = _GEM_RE.match(cmd)
+            return f"DEBIAN_FRONTEND=noninteractive apt-get install -y ruby && {cmd}" if m else None
+        if method == "go":
+            m = _GO_RE.match(cmd)
+            return (
+                f"DEBIAN_FRONTEND=noninteractive apt-get install -y golang "
+                f"&& export PATH=$PATH:$(go env GOPATH)/bin && {cmd}"
+            ) if m else None
+        return None  # brew/manual/未知 → 不可自动安装
+
+    def install_tools(self, tool_ids, *, session_key: str | None = None,
+                      force: bool = False) -> dict:
+        """探测缺失 → 安装 → 重校验。报告 {installed, failed, skipped_manual, incompatible}。"""
+        report = {"installed": [], "failed": [], "skipped_manual": [], "incompatible": []}
+        cmds = self.install_commands(tool_ids)
+        to_run = {tid: cmd for tid, cmd in cmds.items()}
+        for tid in tool_ids:
+            if tid in to_run:
+                continue
+            entry = self.catalog.get_tool(tid)
+            if entry is None:
+                report["failed"].append(tid)
+            elif entry.get("install_method") == "manual":
+                report["skipped_manual"].append(tid)
+            else:
+                report["incompatible"].append(tid)  # brew 等无适配命令
+        if not force:
+            for tid in list(to_run):
+                if self.probe_tool(tid, session_key=session_key).get("status") == "available":
+                    to_run.pop(tid)  # 已可用,跳过
+        if to_run and any("apt-get" in c for c in to_run.values()):
+            self.backend.exec("apt-get update", session_key=session_key, timeout=180)
+        for tid, cmd in to_run.items():
+            out = self.backend.exec(cmd, session_key=session_key, timeout=600)
+            ok = out.returncode == 0 and (
+                self.probe_tool(tid, session_key=session_key).get("status") == "available"
+            )
+            report["installed" if ok else "failed"].append(tid)
+        for tid in report["installed"]:
+            emit("sandbox", "install", tool_id=tid, result="installed")
+        for tid in report["failed"]:
+            emit("sandbox", "install", tool_id=tid, result="failed")
+        for tid in report["skipped_manual"]:
+            emit("sandbox", "install", tool_id=tid, result="skipped_manual")
+        for tid in report["incompatible"]:
+            emit("sandbox", "install", tool_id=tid, result="incompatible")
+        return report
+
+    # ===== 冲突与不兼容(纯元数据分析) =====
+
+    def tool_conflicts(self) -> list[dict]:
+        """形状 {a, b, reason, severity: conflict|incompatible|warning}。"""
+        out: list[dict] = []
+        groups: dict[str, list] = {}
+        for e in self.catalog.manifest:
+            ck = e.get("verify_check")
+            if ck:
+                groups.setdefault(ck, []).append(e)
+        for ck, es in groups.items():
+            if len(es) > 1:
+                for i in range(len(es)):
+                    for j in range(i + 1, len(es)):
+                        out.append({
+                            "a": es[i]["tool_id"], "b": es[j]["tool_id"],
+                            "reason": f"verify_check 相同: {ck}", "severity": "conflict",
+                        })
+        for e in self.catalog.manifest:
+            if e.get("install_method") == "brew" and not e.get("alt_methods"):
+                out.append({
+                    "a": e["tool_id"], "b": None,
+                    "reason": "主安装方式 brew,Debian 沙箱无 Homebrew,且无备选安装方式",
+                    "severity": "incompatible",
+                })
+        for tid, reason in _KNOWN_CONSTRAINTS.items():
+            if self.catalog.get_tool(tid):
+                out.append({"a": tid, "b": None, "reason": reason, "severity": "warning"})
+        for a, b in _REDUNDANT_PAIRS:
+            if self.catalog.get_tool(a) and self.catalog.get_tool(b):
+                out.append({"a": a, "b": b, "reason": "功能重叠(ROP gadget 搜索二选一)", "severity": "warning"})
+        emit("sandbox", "conflicts", count=len(out),
+             severity=",".join(sorted({c["severity"] for c in out})) or "none")
+        return out

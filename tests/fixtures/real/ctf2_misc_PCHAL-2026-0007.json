@@ -1,0 +1,39 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "MISC",
+  "created_at": "2026-05-28T00:18:01.951077+08:00",
+  "description": "注意：得到的 flag 请包上 flag{} 提交",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T00:18:01.952482+08:00",
+      "file_id": "18d5c82d-8acd-4b4d-ba4b-552e373edac0",
+      "file_md5": "24aa6ec6dea361917860406d25c32a46",
+      "file_name": "f4571698-e6e4-41b6-8853-2aab17cef02a.zip",
+      "file_size": 770,
+      "file_type": "application/x-zip-compressed",
+      "id": "fe9fa434-a134-4b06-8296-60242a1985e1",
+      "is_visible": true,
+      "practice_challenge_id": "7a44e5a1-beea-4663-9b23-ebe1baf38765",
+      "updated_at": "2026-05-28T00:18:01.952482+08:00",
+      "path": "f4571698-e6e4-41b6-8853-2aab17cef02a.zip"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0007",
+  "id": "7a44e5a1-beea-4663-9b23-ebe1baf38765",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "二维码",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 1284,
+  "sort_order": 0,
+  "template_id": "e415d9d6-6cbc-4c6e-86ce-68d9efe38e57",
+  "translations": null,
+  "updated_at": "2026-08-17T12:04:00.064435+08:00"
+}

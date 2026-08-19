@@ -194,6 +194,8 @@ class EngineLogger:
             self._write(f"  {role:<18} {calls:>5}   {ctx_avg:>8}   {lat_avg:>12}   {tok_str:>26}   {verdicts}")
         self._write("")
         self._write(f"  终态: {state or '?'}  fail_reason={fail_reason or 'None'}")
+        if self._log_dir and (self._log_dir / "audit.json").is_file():
+            self._write(f"  audit: {self._log_dir / 'audit.json'}")
         if self._env_missing:
             m = self._env_missing
             self._write(f"  环境检查: 缺工具 {m['missing']}/{m['total']}  "
@@ -403,19 +405,31 @@ class EngineLogger:
             self._agent_sub(f"result={result_str}  observation=\"{obs_short}\"")
 
     def _render_evaluator_response(self, role_v, res):
-        """评估器响应:verdict + opinion。"""
+        """评估器响应:verdict + 全量 opinion + observation(不再截断 200)。"""
         verdict = getattr(res, 'verdict', None)
         opinion = getattr(res, 'opinion', '') or ''
         is_completed = getattr(res, 'is_completed', False)
+        observation = getattr(res, 'observation', None) or ''
         verdict_str = str(verdict).upper() if verdict else "?"
         if is_completed:
             verdict_str += " is_completed=True"
-        content = f"{verdict_str}  opinion=\"{opinion[:200]}\"" if opinion else verdict_str
+        content = verdict_str
+        if opinion:
+            content += f"  opinion=\"{self._cap(opinion)}\""
         self._agent_line("verdict", content)
+        if observation:
+            self._agent_sub(f"observation: {self._cap(observation)}")
         # 统计
         rs = self._role_stats.get(role_v)
         if rs and verdict_str:
             rs["verdicts"].append(verdict_str.split()[0])
+
+    @staticmethod
+    def _cap(text: str, limit: int = 2000) -> str:
+        text = str(text)
+        if len(text) <= limit:
+            return text
+        return text[:limit] + f"...(truncated {len(text)}B)"
 
     @staticmethod
     def _fmt_args(args: dict) -> str:
@@ -522,8 +536,30 @@ class EngineLogger:
             shown = missing_list[:15]
             more = f" ...(共 {len(missing_list)} 条)" if len(missing_list) > 15 else ""
             self._engine(f"check[run_start] 缺工具: {', '.join(shown)}{more}")
+        cat = report.get("category") or {}
+        if cat:
+            self._env_snapshot_category(cat)
         self._env_missing = {"missing": missing, "manual": manual, "total": total,
                              "sandbox_available": bool(sb.get("available"))}
+
+    def _env_snapshot_category(self, cat):
+        """run_start 分类就绪度(任务理解层已判定题型时):compat/工具/安装/沙箱。"""
+        sb = cat.get("sandbox") or {}
+        cparts = [f"category={cat.get('category', '?')}"]
+        compat = cat.get("compatibility", "")
+        if compat:
+            cparts.append(f"compat=\"{compat[:60]}\"")
+        n_cmds = len(cat.get("install_cmds") or [])
+        if n_cmds:
+            cparts.append(f"install_cmds={n_cmds}")
+        n_tools = len(cat.get("allowed_tools") or [])
+        if n_tools:
+            cparts.append(f"allowed_tools={n_tools}")
+        if sb.get("needed"):
+            cparts.append(f"沙箱 needed=True available={bool(sb.get('available'))}")
+        else:
+            cparts.append("沙箱 无需隔离")
+        self._engine(f"check[run_start] 题型分类就绪度: {'; '.join(cparts)}")
 
     def _env_step(self, step_id, report):
         """每步执行前按 skill 分类查就绪度 + 当前活动集缺工具。"""

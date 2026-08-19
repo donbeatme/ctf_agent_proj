@@ -364,6 +364,7 @@ def model_info(model: str | None = None) -> dict:
 # 角色 → config key 后缀
 _ROLE_MODEL_KEYS: dict[str, str] = {
     "planner": "LLM_MODEL_PLANNER",
+    "executor": "LLM_MODEL_EXECUTOR",
     "evaluator_plan": "LLM_MODEL_EP",
     "evaluator_step": "LLM_MODEL_EE",
     "evaluator_task": "LLM_MODEL_ET",
@@ -392,7 +393,11 @@ class LLMError(RuntimeError):
 
 
 class ToolLoopError(RuntimeError):
-    pass
+    """工具循环超上限。携带已达成的部分工具轨迹,供上层保留日志/提取 flag。"""
+
+    def __init__(self, message: str, trace: list[dict] | None = None):
+        super().__init__(message)
+        self.trace = trace or []
 
 
 @dataclass
@@ -744,7 +749,7 @@ def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools
                 "tool_call_id": tc.id,
                 "content": json.dumps(result, ensure_ascii=False),
             })
-    raise ToolLoopError(f"工具循环超过上限 {max_tool_rounds} 轮")
+    raise ToolLoopError(f"工具循环超过上限 {max_tool_rounds} 轮", trace=trace)
 
 
 def _sum_usage(logs: list[dict]) -> dict:

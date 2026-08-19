@@ -1,3 +1,6 @@
 openai>=1.0
 requests>=2
 pydantic>=2
+PyYAML>=6
+paramiko>=3  # 沙箱 SSH 后端(sandbox_env→agent.ssh.SshBackend);lazy import,缺失时沙箱构造失败返回错误结果,不回退宿主
+attachments[pdf,html,image] @ git+https://github.com/MaximeRivest/attachments.git@b58297792d46338836109d0e6037591d6c279906

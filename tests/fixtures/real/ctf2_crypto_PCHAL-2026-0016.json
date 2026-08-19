@@ -1,0 +1,39 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "CRYPTO",
+  "created_at": "2026-05-28T00:18:05.527109+08:00",
+  "description": "注意：得到的 flag 请包上 flag{} 提交",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T00:18:05.52812+08:00",
+      "file_id": "290bf5e9-a0b4-4acf-86a1-16de4bbe7c10",
+      "file_md5": "449d973a78929f7c0cb164d0e730d593",
+      "file_name": "1784aa2b-cfcb-428e-949c-d6e4728fb94f.zip",
+      "file_size": 470,
+      "file_type": "application/x-zip-compressed",
+      "id": "7b49f57e-8d4f-40f7-954a-340868369f03",
+      "is_visible": true,
+      "practice_challenge_id": "b99a83ec-2b5a-4978-bfc4-81d4e2c26289",
+      "updated_at": "2026-05-28T00:18:05.52812+08:00",
+      "path": "1784aa2b-cfcb-428e-949c-d6e4728fb94f.zip"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0016",
+  "id": "b99a83ec-2b5a-4978-bfc4-81d4e2c26289",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "看我回旋踢",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 1837,
+  "sort_order": 0,
+  "template_id": "a21c47c2-ce07-4545-8b1c-8e4ad061de88",
+  "translations": null,
+  "updated_at": "2026-08-17T10:02:05.017808+08:00"
+}

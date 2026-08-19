@@ -1,0 +1,40 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "PWN",
+  "created_at": "2026-05-28T08:49:23.11022+08:00",
+  "description": "Ubuntu 18",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T08:49:23.112069+08:00",
+      "file_id": "59d4257b-507b-41d0-bf6d-76ec7b2988b8",
+      "file_md5": "06beddb7382b86fa3a96c12607c98838",
+      "file_name": "pwn1",
+      "file_size": 16536,
+      "file_type": "application/octet-stream",
+      "id": "4c502f08-e165-4f8c-8b4e-bffa62b80906",
+      "is_visible": true,
+      "practice_challenge_id": "250f010a-fbfc-462a-aee0-4ab862ae735d",
+      "updated_at": "2026-05-28T08:49:23.112069+08:00",
+      "path": "pwn1"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0063",
+  "has_container": true,
+  "id": "250f010a-fbfc-462a-aee0-4ab862ae735d",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "rip",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 401,
+  "sort_order": 0,
+  "template_id": "59c21661-0fa5-4aa0-bbb3-61a185ed24c4",
+  "translations": null,
+  "updated_at": "2026-08-17T12:00:30.01332+08:00"
+}

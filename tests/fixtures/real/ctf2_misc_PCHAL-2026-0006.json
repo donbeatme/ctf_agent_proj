@@ -1,0 +1,39 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "MISC",
+  "created_at": "2026-05-28T00:18:01.65847+08:00",
+  "description": "注意：得到的 flag 请包上 flag{} 提交",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T00:18:01.660011+08:00",
+      "file_id": "d9b75512-bf01-4f49-b6de-a81517042e9a",
+      "file_md5": "8208af5aae8e6103aa459ed9dd88968b",
+      "file_name": "200fd993-696d-42cd-a2f5-ba61bfb93f2d.zip",
+      "file_size": 9354,
+      "file_type": "application/x-zip-compressed",
+      "id": "184a9663-38fa-496a-8f2c-5579d16b87d9",
+      "is_visible": true,
+      "practice_challenge_id": "0079dc66-7e55-409c-b258-988a14f5ddff",
+      "updated_at": "2026-05-28T00:18:01.660011+08:00",
+      "path": "200fd993-696d-42cd-a2f5-ba61bfb93f2d.zip"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0006",
+  "id": "0079dc66-7e55-409c-b258-988a14f5ddff",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "荷兰宽带数据泄露",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 819,
+  "sort_order": 0,
+  "template_id": "967d0afb-b345-4680-a209-1b9e64576668",
+  "translations": null,
+  "updated_at": "2026-08-17T10:26:21.013957+08:00"
+}

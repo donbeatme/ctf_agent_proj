@@ -9,7 +9,7 @@ ctx 组装:
 """
 
 from agent import llm_api, tools
-from agent.blueprint import Blueprint
+from agent.blueprint import Blueprint, DAGError
 from agent.schema import PlanError, PlannerInput, PlannerMode, Trigger, parse_plan
 from agent.workspace import MockWorkspace
 from model_config import get
@@ -75,6 +75,35 @@ class DocStore:
         raise NotImplementedError
 
     def load_doc(self, doc_id: str) -> str | None:
+        return None
+
+
+class CombinedDocStore(DocStore):
+    """合并多个 DocStore(如技能库 + 审计经验库),按 doc_id 去重。
+
+    audit 模式用它同时检索技能文档与已验证经验。search 结果照旧写进 ws.docs,
+    DocsComponent 只渲染 id + 一句话描述,全文经 get_doc 工具按需取——不全量塞进上下文。
+    """
+
+    def __init__(self, stores):
+        self._stores = tuple(stores)
+
+    def search(self, task: dict) -> list[tuple[str, str]]:
+        results: list[tuple[str, str]] = []
+        seen = set()
+        for store in self._stores:
+            for doc_id, content in store.search(task):
+                if doc_id in seen:
+                    continue
+                seen.add(doc_id)
+                results.append((doc_id, content))
+        return results
+
+    def load_doc(self, doc_id: str) -> str | None:
+        for store in self._stores:
+            content = store.load_doc(doc_id)
+            if content is not None:
+                return content
         return None
 
 
@@ -176,7 +205,18 @@ class Planner:
             patch = parse_plan(text).to_patch()
         bp = Blueprint.from_dict(pin.feedback.dag) if pin.mode == PlannerMode.REVISE \
             else Blueprint(meta={"task": raw_content})
-        bp.apply_patch(patch)
+        try:
+            bp.apply_patch(patch)
+        except DAGError as exc:
+            # 结构性补丁错误重试一次:把 DAG 应用失败原因反馈给 LLM 修正(对齐 PlanError 重试)
+            retry_prompt = (
+                f"{ctx}\n\n[上一轮补丁无法应用: {exc}]\n"
+                "请针对当前 DAG 返回修正后的补丁:初始空 DAG 用 add 建每一步;"
+                "update/remove 只能针对已存在的 step id。"
+            )
+            text = self.llm_call(system=sys_text or system, prompt=retry_prompt)
+            patch = parse_plan(text).to_patch()
+            bp.apply_patch(patch)
         bp.meta["reason"] = patch.reason   # 规划理由落账,供 _record_plan 写入 replan 事件
         bp.meta["_response"] = text        # 原始 LLM 返回(供 log 记录)
         if getattr(self, "_last_usage", None):

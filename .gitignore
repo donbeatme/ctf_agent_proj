@@ -1,9 +1,13 @@
 model_config.json
+config_adaptor.json
+config_sandbox.json
 .env
 .claude/
 __pycache__/
 *.pyc
+*.pyo
 downloads/
+data/
 runs/
 tests/_scenario_out/
 tests/_ctx_out/
@@ -11,3 +15,27 @@ tests/_rounds_out/
 tmp/
 .idea/
 .venv/
+
+# Python tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editor / OS
+.vscode/
+.vs/
+.DS_Store
+Thumbs.db
+
+# Logs (run.log/ops.log 已落 runs/ 与 data/,根目录兜底)
+*.log
+# 平台凭证截图(可能含真实值,不入库)
+design/assets/

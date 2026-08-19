@@ -1,6 +1,20 @@
-"""执行 Agent 接口桩(② 职责)。③ 只调用,不实现。"""
+"""执行 Agent:接口桩 + MockExecutor + RealExecutor(② 真实执行)。
 
+- Executor:契约接口(③ 只调用,不实现)。
+- MockExecutor:可配置返回内容的执行 mock(测试/冒烟)。
+- RealExecutor:LLM 工具循环 → CommandRunner 路由跑命令 → ExecResult。内部 ReAct
+  (chat_with_tools 工具循环)由执行层自管,引擎不感知;tool_exec 复合引擎注入的
+  (apply_tool/get_doc/get_record)与执行工具(run_command/run_python/submit_flag/answer)。
+"""
+
+import json
 from dataclasses import dataclass
+from pathlib import Path
+
+from opslog import emit
+
+from agent.tools import APPLY_TOOL_SPEC, GET_DOC_SPEC, REMOVE_TOOL_SPEC
+from agent.llm_api import ToolLoopError
 
 
 @dataclass
@@ -12,8 +26,16 @@ class ExecResult:
 
 
 class Executor:
+    # 系统提示词(经 engine 传入 SystemPromptComponent 渲染;mock 为空)
+    system: str = ""
+
     def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
         raise NotImplementedError
+
+    def match_experience(self) -> list[dict]:
+        """当前挑战精确匹配到的已验证解题经验(engine _init_run 装填 ws.experience);
+        mock/无适配器返回空。"""
+        return []
 
 
 class MockExecutor(Executor):
@@ -35,3 +57,474 @@ class MockExecutor(Executor):
                 return self._fn(step, ctx)  # 兼容旧 2 参 fn(step, ctx)
         return ExecResult(observation=self._observation, result=self._result,
                           tool_calls=self._tool_calls)
+
+
+# ===== RealExecutor(② 真实执行) =====
+
+EXEC_SYSTEM = (
+    "你是 CTF 解题执行 Agent。根据当前步骤的指令与验收标准，实际执行命令/代码推进解题。\n"
+    "\n"
+    "【可用的上下文】\n"
+    "- 任务：题面原文与目标列表（Task）\n"
+    "- 当前步骤：instruction / criterion / status / attempts / skill_id（Dag）\n"
+    "- 工具目录：可申请的完整清单（apply_tool 申请后进活动工具集）\n"
+    "- 活动工具：已申请可用的工具\n"
+    "- 技能文档：检索命中的参考文档索引（经 get_doc 按 id 取全文）\n"
+    "- 本轮评估意见：前置评估 Agent 对之前步骤/计划的非 pass 意见（避免重犯）\n"
+    "- 工具轨迹：本角色本轮已执行的工具调用记录\n"
+    "\n"
+    "【执行准则】\n"
+    "- 用 run_command 跑 shell,run_python 跑 Python（命令只在沙箱 SSH 容器内执行）\n"
+    "- 需要技能文档或工具时，先 get_doc / apply_tool\n"
+    "- 逐步对齐 criterion；拿 flag 用 submit_flag 提交，无 flag 的结论用 answer 给出\n"
+    "- 命令失败时根据错误信息调整，不盲目重试同一命令"
+)
+
+RUN_COMMAND_SPEC = {
+    "type": "function",
+    "function": {
+        "name": "run_command",
+        "description": (
+            "在沙箱(SSH 容器)内执行一条 shell 命令(含参数)。自动安装缺失依赖;"
+            "工作目录缺省为题目附件目录,只能在该目录内操作。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "命令,如 'gdb -q ./pwn1'"},
+                "tool_id": {"type": "string",
+                            "description": "涉及的工具清单 id(如 'gdb'),用于沙箱自动安装"},
+                "cwd": {"type": "string", "description": "工作目录(缺省用题目附件目录)"},
+                "timeout": {"type": "number", "description": "超时秒数(缺省 120)"},
+            },
+            "required": ["command"],
+        },
+    },
+}
+
+RUN_PYTHON_SPEC = {
+    "type": "function",
+    "function": {
+        "name": "run_python",
+        "description": (
+            "在沙箱(SSH 容器)内执行一段 Python 代码(写临时脚本后运行)。"
+            "涉及 pip 工具(如 pwntools/angr)时填 tool_id:沙箱自动安装缺失依赖。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Python 源码"},
+                "tool_id": {"type": "string", "description": "依赖的 pip 工具清单 id"},
+                "cwd": {"type": "string", "description": "工作目录(缺省用题目附件目录)"},
+                "timeout": {"type": "number", "description": "超时秒数(缺省 120)"},
+            },
+            "required": ["code"],
+        },
+    },
+}
+
+SUBMIT_FLAG_SPEC = {
+    "type": "function",
+    "function": {
+        "name": "submit_flag",
+        "description": (
+            "最终解出的 flag 提交(flag{} 格式)。动态 flag 题(靶机容器题,flag 随实例变化):"
+            "若 flag 是经脚本/盲注推导出来的,附 provenance={verifier: 提取脚本相对路径, "
+            "trace: 提取过程摘要(如逐字符断言), flag_format: 匹配的格式},平台确认后该过程"
+            "会登记为已验证,后续实例可重跑推导本地判定。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "flag": {"type": "string", "description": "flag 内容"},
+                "provenance": {
+                    "type": "object",
+                    "description": "动态 flag 题的提取来源(EE 把关:来源可确认而非胡编)",
+                    "properties": {
+                        "verifier": {"type": "string", "description": "提取脚本相对 challenge 目录的路径"},
+                        "trace": {"type": "string", "description": "提取过程摘要(断言序列/脚本输出)"},
+                        "flag_format": {"type": "string", "description": "匹配的 flag 格式,如 CTF2{...}"},
+                    },
+                    "required": [],
+                },
+            },
+            "required": ["flag"],
+        },
+    },
+}
+
+ANSWER_SPEC = {
+    "type": "function",
+    "function": {
+        "name": "answer",
+        "description": "给出最终结论(非 flag 类答案,如取证结论/推导结果)。",
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "结论文本"}},
+            "required": ["text"],
+        },
+    },
+}
+
+GET_RECORD_SPEC = {
+    "type": "function",
+    "function": {
+        "name": "get_record",
+        "description": "按 uuid 取历史事件全文(展开索引投影)。",
+        "parameters": {
+            "type": "object",
+            "properties": {"uuid": {"type": "string", "description": "历史事件的 uuid"}},
+            "required": ["uuid"],
+        },
+    },
+}
+
+EXEC_TOOL_SPECS: list[dict] = [
+    RUN_COMMAND_SPEC, RUN_PYTHON_SPEC, SUBMIT_FLAG_SPEC, ANSWER_SPEC,
+    GET_DOC_SPEC, APPLY_TOOL_SPEC, REMOVE_TOOL_SPEC, GET_RECORD_SPEC,
+]
+
+
+def _parse_args(arguments) -> dict:
+    if isinstance(arguments, dict):
+        return arguments
+    try:
+        return json.loads(arguments or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _normalize_trace(src) -> tuple[list[dict], dict]:
+    """归一工具轨迹 → (tool_calls, result)。
+
+    src 可为 ToolResult-like(带 .trace)或原始 trace 列表(异常抛出时)。
+    result 从 submit_flag/answer 提取,喂 engine 的 flag 提取与步骤产物。
+    """
+    raw = getattr(src, "trace", None)
+    if raw is None:
+        raw = src if isinstance(src, list) else []
+    trace = [
+        {"tool": t.get("name"), "args": _parse_args(t.get("arguments")),
+         "result": t.get("result")}
+        for t in raw
+        if isinstance(t, dict) and t.get("name")
+    ]
+    result: dict = {}
+    for t in trace:
+        if t["tool"] == "submit_flag" and t["args"].get("flag"):
+            result["flag"] = t["args"]["flag"]
+        elif t["tool"] == "answer" and t["args"].get("text"):
+            result["answer"] = t["args"]["text"]
+    return trace, result
+
+
+class RealExecutor(Executor):
+    """真实执行 Agent:LLM 工具循环 + 命令路由。
+
+    - `llm_fn`: (system=, prompt=, tools=, tool_exec=) -> ToolResult-like(含 trace/
+      rounds/content/total_usage);缺省走 llm_api.chat_with_tools(executor 角色模型)。
+    - `runner`: CommandRunner(沙箱唯一执行);缺省真实构造。
+    - 工具调用轨迹归一为契约 shape {tool, args, result},喂 engine trace 通道。
+    """
+
+    system = EXEC_SYSTEM
+
+    def __init__(self, llm_fn=None, runner=None, workspace=None,
+                 max_tool_rounds=8, model=None, workdir=None, adapter=None):
+        from agent import llm_api
+        from agent.runner import CommandRunner
+
+        self.runner = runner or CommandRunner()
+        self.workspace = workspace
+        self.max_tool_rounds = max_tool_rounds
+        self.model = model or llm_api.role_model("executor")
+        self.workdir = workdir
+        self.adapter = adapter  # 平台 ChallengeAdapter(None=提交仅记录)
+        self._llm = llm_fn or self._default_llm()
+        self._target_resolved = False  # 目标地址惰性解析,单 run 只求一次(避免重复开靶)
+        self._target_cache: str | None = None
+        if self.adapter is not None:
+            # 动态 flag 本地判定钩子:adapter._local_verify 重跑已验证脚本推导当前实例 flag
+            # (set_procedure_runner 可选的注入缝;测试 fake adapter 无此方法则跳过)
+            setter = getattr(self.adapter, "set_procedure_runner", None)
+            if setter is not None:
+                setter(self._run_verifier)
+
+    def _default_llm(self):
+        from agent import llm_api
+
+        def call(*, system, prompt, tools, tool_exec, **kw):
+            return llm_api.chat_with_tools(
+                system=system, prompt=prompt, tools=tools, tool_exec=tool_exec,
+                model=self.model, max_tool_rounds=self.max_tool_rounds, **kw)
+
+        return call
+
+    # ===== 上下文 =====
+
+    def _category(self, step) -> str:
+        if step is not None and step.skill_id:
+            cat = step.skill_id.split(".")[0]
+            if cat:
+                return cat
+        if self.workspace is not None:
+            task = getattr(self.workspace, "meta", {}).get("task") or {}
+            return task.get("challenge_type") or ""
+        return ""
+
+    def _allowed_cwd(self) -> Path | None:
+        """允许的工作目录根:workdir 参数优先,其次 workspace meta task 的 challenge_dir/workdir/cwd。"""
+        if self.workdir:
+            return Path(self.workdir).resolve()
+        task = (getattr(self.workspace, "meta", {}).get("task") or {}) if self.workspace else {}
+        for k in ("challenge_dir", "workdir", "cwd"):
+            v = task.get(k)
+            if v:
+                return Path(str(v)).resolve()
+        return None
+
+    def _cwd(self, args: dict) -> str:
+        """解析执行工作目录:默认题目附件目录;args.cwd 必须在允许根内,否则拒绝。
+
+        命令只经沙箱执行,沙箱会同步 cwd 目录到远程——因此 cwd 必须锁定在题目
+        附件目录,防 LLM 把敏感宿主目录 sync 进沙箱。
+        """
+        allowed = self._allowed_cwd()
+        if allowed is None:
+            raise ValueError("无法确定题目附件目录(workdir/meta 均无 challenge_dir)")
+        cwd = args.get("cwd")
+        if not cwd:
+            return str(allowed)
+        cand = Path(str(cwd)).resolve()
+        if cand != allowed and not cand.is_relative_to(allowed):
+            raise ValueError(f"cwd 必须在题目附件目录内: {allowed}")
+        return str(cand)
+
+    def _challenge_id(self) -> str | None:
+        """从工作区任务元数据解析平台 challenge_id;本地/无 id 返回 None。"""
+        if self.workspace is not None:
+            task = getattr(self.workspace, "meta", {}).get("task") or {}
+            for k in ("challenge_id", "id", "friendly_id"):
+                v = task.get(k)
+                if v:
+                    return str(v)
+        return None
+
+    def _submit_flag(self, args: dict) -> dict:
+        """提交回环:有平台适配器且解析出 challenge_id → 真调 adapter.submit 返回判定;
+        否则仅记录(历史行为),失败降级为可观察的 ok=False 供 LLM 决策重试。
+        动态 flag 题的 provenance(verifier/trace)透传给适配器,平台确认后登记为已验证。"""
+        flag = args.get("flag", "")
+        if self.adapter is None:
+            return {"submitted": True, "flag": flag}  # 无适配器:仅记录
+        cid = self._challenge_id()
+        if not cid:
+            return {"submitted": True, "flag": flag, "ok": None, "correct": None,
+                    "message": "缺少 challenge_id,仅记录提交"}
+        provenance = args.get("provenance") or None
+        try:
+            if provenance:
+                res = self.adapter.submit(cid, flag, provenance=provenance)
+            else:
+                res = self.adapter.submit(cid, flag)
+        except Exception as exc:
+            return {"submitted": True, "flag": flag, "ok": False, "correct": None,
+                    "message": f"提交异常: {type(exc).__name__}: {exc}"}
+        return {"submitted": True, "flag": flag, "ok": res.ok, "correct": res.correct,
+                "message": res.message}
+
+    def _run_verifier(self, verifier_path: str, target: str | None) -> str | None:
+        """重跑已验证提取脚本(沙箱),推导当前实例 flag(stdout 末行);失败返回 None。
+
+        脚本约定:相对 challenge 目录,读 argv[1](或 metadata.yml)取靶机地址,
+        推导结果打印在 stdout 末行。用于 adapter._local_verify 的动态题本地判定。
+        """
+        try:
+            cwd = Path(self._cwd({})).resolve()
+        except ValueError:
+            return None
+        try:
+            script = (cwd / verifier_path).resolve()
+            rel = script.relative_to(cwd)
+        except (ValueError, OSError):
+            return None
+        if not script.is_file():
+            return None
+        target_arg = target or ""
+        code = (
+            "import runpy, sys\n"
+            f"script = {str(rel)!r}\n"
+            f"sys.argv = [script, {target_arg!r}] if {target_arg!r} else [script]\n"
+            "try:\n"
+            # run_name='__main__' 让脚本的 `if __name__=='__main__'` 守卫生效
+            "    runpy.run_path(script, run_name='__main__')\n"
+            "except SystemExit:\n"
+            "    pass\n"
+        )
+        out = self.runner.run_python(code, cwd=cwd, timeout=90)
+        lines = [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
+        return lines[-1] if lines else None
+
+    def match_experience(self) -> list[dict]:
+        """当前挑战精确匹配到的已验证解题经验(经适配器);无适配器/无 id → 空。"""
+        if self.adapter is None:
+            return []
+        cid = self._challenge_id()
+        if not cid:
+            return []
+        try:
+            return self.adapter.match_procedures(cid) or []
+        except Exception:
+            return []
+
+    # ===== 目标地址(靶机) =====
+
+    def _target(self) -> str | None:
+        """解析靶机地址(惰性,单 run 只求一次)。
+
+        顺序:task.target_info(理解层已结构化)→ task.target(host:port 串)→
+        含容器题 + 有适配器 → 惰性 start_target 开靶(缓存 host:port)。无则 None。
+        """
+        if self._target_resolved:
+            return self._target_cache
+        self._target_resolved = True
+        task = (getattr(self.workspace, "meta", {}).get("task") or {}) if self.workspace else {}
+        info = task.get("target_info")
+        if isinstance(info, dict):
+            self._target_cache = self._fmt_target(info) or None
+            return self._target_cache
+        raw = task.get("target")
+        if isinstance(raw, str) and raw.strip():
+            self._target_cache = raw.strip()
+            return self._target_cache
+        cid = self._challenge_id()
+        if cid and task.get("has_container") and self.adapter is not None:
+            try:
+                r = self.adapter.start_target(cid)
+            except Exception as exc:
+                emit("executor", "target_resolve_failed", challenge_id=cid,
+                     error=f"{type(exc).__name__}: {exc}")
+                return None
+            host, port = r.get("host") or "", r.get("port")
+            if host and port:
+                self._target_cache = f"{host}:{port}"
+        return self._target_cache
+
+    @staticmethod
+    def _fmt_target(info: dict) -> str:
+        if info.get("kind") == "url":
+            return info.get("url") or f"{info.get('scheme')}://{info.get('host')}"
+        host = info.get("host")
+        if not host:
+            return ""
+        if info.get("port") is not None:
+            return f"{host}:{info['port']}"
+        return str(host)
+
+    def _build_prompt(self, step, ctx: str) -> str:
+        parts = []
+        if step is not None:
+            head = f"# 当前步骤\nid={step.id}\n指令: {step.instruction}"
+            if step.criterion:
+                head += f"\n验收标准: {step.criterion}"
+            if step.depends_on:
+                head += f"\n依赖步骤: {list(step.depends_on)}"
+            parts.append(head)
+        target = self._target()
+        if target:
+            parts.append(
+                "# 目标地址(靶机)\n"
+                f"{target}\n"
+                "用 nc/pwntools 连接该地址解题(容器题目标为动态分配,只此一次有效)。"
+            )
+        if ctx:
+            parts.append("# 上下文\n" + ctx)
+        return "\n\n".join(parts)
+
+    # ===== 执行 =====
+
+    def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
+        category = self._category(step)
+
+        def exec_tool(name: str, args: dict):
+            if name == "run_command":
+                return self._run_command(args, category)
+            if name == "run_python":
+                return self._run_python(args, category)
+            if name == "submit_flag":
+                return self._submit_flag(args)
+            if name == "answer":
+                return {"answer": args.get("text", "")}
+            if tool_exec is not None:
+                return tool_exec(name, args)
+            return {"error": f"unknown tool: {name}"}
+
+        prompt = self._build_prompt(step, ctx)
+        try:
+            tr = self._llm(system=EXEC_SYSTEM, prompt=prompt,
+                           tools=EXEC_TOOL_SPECS, tool_exec=exec_tool)
+        except ToolLoopError as exc:
+            # 工具循环超上限:保留已达成的部分轨迹(喂 run.log/events.jsonl/flag 提取)
+            trace, result = _normalize_trace(exc.trace)
+            return ExecResult(
+                observation=f"执行 Agent 工具循环超上限({self.max_tool_rounds} 轮),"
+                            f"已执行 {len(trace)} 次工具调用",
+                result=result or None,
+                tool_calls=trace or None,
+            )
+        except Exception as exc:
+            return ExecResult(
+                observation=f"执行 Agent LLM 循环异常: {type(exc).__name__}: {exc}")
+
+        trace, result = _normalize_trace(tr)
+        return ExecResult(
+            observation=self._summarize(tr, trace),
+            result=result or None,
+            tool_calls=trace or None,
+            total_usage=getattr(tr, "total_usage", None),
+        )
+
+    def _run_command(self, args: dict, category: str) -> dict:
+        cmd = args.get("command")
+        if not cmd or not str(cmd).strip():
+            return {"error": "run_command 需要 command"}
+        try:
+            cwd = self._cwd(args)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        out = self.runner.run(
+            str(cmd),
+            cwd=cwd,
+            category=category,
+            tool_id=args.get("tool_id"),
+            timeout=args.get("timeout"),
+        )
+        return out.as_dict()
+
+    def _run_python(self, args: dict, category: str) -> dict:
+        code = args.get("code")
+        if not code:
+            return {"error": "run_python 需要 code"}
+        try:
+            cwd = self._cwd(args)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        out = self.runner.run_python(
+            code,
+            cwd=cwd,
+            category=category,
+            tool_id=args.get("tool_id"),
+            timeout=args.get("timeout"),
+        )
+        return out.as_dict()
+
+    @staticmethod
+    def _summarize(tr, trace: list[dict]) -> str:
+        rounds = getattr(tr, "rounds", 0)
+        line = f"执行 {rounds} 轮工具调用"
+        if trace:
+            line += f": " + ", ".join(t["tool"] for t in trace)
+        tail = getattr(tr, "content", None)
+        if tail and str(tail).strip():
+            line += f"; 结论: {str(tail).strip()[:200]}"
+        return line

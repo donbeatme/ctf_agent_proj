@@ -162,26 +162,20 @@ def test_is_completed_skips_deadlock():
             '[{"id":"s1","instruction":"读题","criterion":"拿到文本","depends_on":[]},'
             '{"id":"s2","instruction":"编码","criterion":"可逆","depends_on":["s1"]},'
             '{"id":"s3","instruction":"提交","criterion":"平台判定","depends_on":["s2"]}]',
-            '{"update":[{"id":"s3","criterion":"平台判定通过"}],"reason":"s2 升级后收紧 s3 标准"}',
-            '{}',  # 反思
+            '{}',  # 反思终局修订:空补丁合法收尾
         ),
         ep=[EvalResult(Verdict.PASS, "计划可执行")],
-        ee=[
-            EvalResult(Verdict.PASS, "s1: 完成", is_completed=True),  # 任务目标已达成
-            EvalResult(Verdict.ESCALATE, "s2: 编码结果不符", observation="aGVsbG8="),
-        ],
+        ee=[EvalResult(Verdict.PASS, "s1: 完成", is_completed=True)],  # 任务目标已达成
         et=[EvalResult(Verdict.DONE, "反思: 无问题")],
         executor=MockExecutor(observation="执行完成"),
     )
     engine.run(MOCK_TASK)
-    # 任务已完成(ee 判定),s2 被升级也不进死锁,直接反思收尾
+    # ee 判 is_completed → 早停收口:s1 通过后不再调度 s2/s3,直接反思收尾
     assert engine.scheduler.state == EngineState.DONE
     assert engine.task_completed is True
     assert engine.fail_reason is None
-    assert engine.bp.steps["s2"].status.value == "ESCALATED"
-    # 升级 s2 触发的重规划(STEP_EVAL source)带状态上下文,但不是死锁触发
-    assert all(p.feedback and p.feedback.state_context is not None for p in engine.planner.calls[1:])
-    assert all(p.feedback.state_context.trigger != "deadlock" for p in engine.planner.calls[1:])
+    assert engine.bp.steps["s2"].status.value != "PASSED"  # 早停,未执行
+    assert engine.bp.steps["s3"].status.value != "PASSED"  # 早停,未执行
 
 
 # ===== 3. 真死锁:ESCALATED 阻断,限次解不开 → FAILED =====
@@ -428,12 +422,12 @@ SCENARIOS = [
         "state": EngineState.DONE,
         "steps": {"s1": "PASSED", "s2": "PASSED"},
     },
-    {  # 6 ee 判完成 + 残留未完成 → 不触发死锁
+    {  # 6 ee 判完成 → 早停收口,跳过剩余 DAG 步骤
         "id": "is_completed_skip_deadlock",
         "planner": _plan_responses(
             '[{"id":"s1","instruction":"读题","criterion":"拿到文本","depends_on":[]},'
             '{"id":"s2","instruction":"编码","criterion":"可逆","depends_on":["s1"]}]',
-            '{}',  # s2 升级后重规划:不动 DAG,保持 s2 为残留未完成
+            '{}',  # 反思终局修订:空补丁合法收尾
             '{}',
         ),
         "evaluator_plan": [EvalResult(Verdict.PASS, "计划可执行")],
@@ -441,7 +435,7 @@ SCENARIOS = [
                EvalResult(Verdict.ESCALATE, "s2: 编码失败")],
         "evaluator_task": [EvalResult(Verdict.DONE, "反思: 无问题")],
         "state": EngineState.DONE,
-        "steps": {"s1": "PASSED", "s2": "ESCALATED"},
+        "steps": {"s1": "PASSED", "s2": "PENDING"},  # 早停:s2 未执行,保持 PENDING
         "check": _chk_completed,
     },
     {  # 7 死锁解不开 → FAILED
@@ -1249,7 +1243,7 @@ def test_engine_wires_external_agent_ctx():
 
 def test_real_planner_mock_agents_smoke(tmp_path):
     """冒烟路径:真实 Planner + mock 执行/评估 → 全环走到 DONE,产出真 DAG、全部 PASSED。"""
-    from main import SmokeEvaluator
+    from agent.evaluator import SmokeEvaluator
     from agent.workspace import Workspace
 
     ws = Workspace.create("run-smoke", MOCK_TASK, root=tmp_path)
@@ -1279,7 +1273,7 @@ def test_real_planner_mock_agents_smoke(tmp_path):
 def test_real_planner_ep_fail_replans_then_done(tmp_path):
     """空初始计划 → SmokeEvaluator.ep FAIL → 真实 planner 重规划产出步骤 → DONE。
     验证 ep 按真实 blueprint 判空驱动重规划,而非无脑放行。"""
-    from main import SmokeEvaluator
+    from agent.evaluator import SmokeEvaluator
     from agent.workspace import Workspace
 
     ws = Workspace.create("run-smoke2", MOCK_TASK, root=tmp_path)

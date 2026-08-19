@@ -1,0 +1,54 @@
+# CTF 沙箱镜像:Debian 系(CTF skill 的命令是 Debian 系:sudo apt 等)。
+# 由 scripts/provision_alpine.sh 在远程 Alpine 宿主构建(上下文=项目根),或手动
+#   docker build -t ctf-sandbox:latest -f scripts/Dockerfile.ctf-sandbox .
+# 用 ctf-skill 官方自动检查+自动安装脚本 install_ctf_tools.sh all
+# (python + apt + gems + go;brew 无则跳过)预装 70 个工具。
+# 装不上的工具不中止构建(随后 --verify 如实报告缺失),由沙箱运行时 install_auto
+# 钩子按 tool_id 进会话容器自动补装。
+FROM debian:stable-slim
+
+# 国内镜像站加速(默认 aliyun;直连可用 --build-arg APT_MIRROR=deb.debian.org 覆盖。
+# 注:tuna 的 debian dists/InRelease 返回 403,apt 不可用;aliyun/ustc 均可)
+ARG APT_MIRROR=mirrors.aliyun.com
+
+# 基础 + 构建依赖(脚本里 pip/apt/gem/go 各自的编译器/头文件/运行时)
+RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+    sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
+        /etc/apt/sources.list 2>/dev/null || true; \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        sudo git curl wget ca-certificates \
+        build-essential python3 python3-dev python3-pip python3-venv \
+        libgmp-dev libffi-dev libssl-dev pkg-config libfplll-dev \
+        ruby ruby-dev libseccomp-dev golang \
+    && rm -rf /var/lib/apt/lists/*
+
+# tshark 安装弹 debconf 提问,预设不建 setuid(避免非交互构建挂起)
+RUN echo "wireshark-common wireshark-common/install-setuid boolean false" | debconf-set-selections \
+    && echo "tshark tshark/install-setuid boolean false" | debconf-set-selections
+
+# ctf-skill 官方自动检查+自动安装脚本;镜像内保留,供 docker exec --verify 复查
+COPY skills/ctf-skills/scripts/install_ctf_tools.sh /opt/install_ctf_tools.sh
+
+# all 模式装 python+apt+gems+go;单个包失败不中止构建,随后 --verify 如实打印缺失清单。
+# 脚本把 pip 工具装进 ~/.ctf-tools/venv(下一层 ENV PATH 已纳入),go 工具在 ~/go/bin。
+RUN bash /opt/install_ctf_tools.sh all; bash /opt/install_ctf_tools.sh --verify
+
+# 补装 all 模式在 py3.13 / 国内网络下装不上的工具:
+#   angr==9.2.193(清单固定版)无 py3.13 发行版 → 装最新(9.3.x 有 cp313 wheel)
+#   fpylll 缺运行时依赖 cysignals
+#   ffuf go 走 goproxy.cn(直连 proxy.golang.org 不通)
+RUN /root/.ctf-tools/venv/bin/pip install --index-url https://pypi.org/simple cysignals angr \
+    && GOPROXY=https://goproxy.cn,direct go install github.com/ffuf/ffuf/v2@latest
+
+# 让后续 docker exec 会话复用 venv 与 go 工具的 PATH
+ENV PATH="/root/.ctf-tools/venv/bin:/root/go/bin:${PATH}"
+
+# 沙箱运行时用 /bin/bash -lc(login shell)执行命令,而 login shell 会重置 ENV PATH,
+# 丢掉 venv/go 工具;写 profile.d 让 login shell 也带上。
+RUN printf '%s\n' \
+    'if [ -d /root/.ctf-tools/venv/bin ]; then export PATH="/root/.ctf-tools/venv/bin:$PATH"; fi' \
+    'if [ -d /root/go/bin ]; then export PATH="/root/go/bin:$PATH"; fi' \
+    > /etc/profile.d/ctf-tools.sh
+
+WORKDIR /work

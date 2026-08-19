@@ -1,25 +1,17 @@
-"""环境配置；不依赖 python-dotenv。"""
+"""环境配置；统一走 model_config(环境变量优先,model_config.json 兜底),不再自读 .env。"""
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-
-def load_env_file(path: Path) -> None:
-    """读取简单 KEY=VALUE 文件；已有环境变量优先。"""
-    if not path.exists():
-        return
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+from model_config import get as _cfg
 
 
-def env_bool(name: str, default: bool = False) -> bool:
-    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+def _cfg_bool(name: str, default: bool = False) -> bool:
+    value = _cfg(name)
+    if value is None or value == "":
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -40,24 +32,25 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        load_env_file(Path(__file__).resolve().parents[1] / ".env")
-        mode = os.getenv("CTF_AUDIT_MODE", "offline").strip().lower()
+        mode = str(_cfg("CTF_AUDIT_MODE", "offline")).strip().lower()
+        if mode not in {"offline", "online"}:
+            raise ValueError("CTF_AUDIT_MODE must be offline or online, got: %s" % mode)
         return cls(
             mode=mode,
-            data_dir=Path(os.getenv("CTF_AUDIT_DATA_DIR", "./data")),
-            langsmith_enabled=env_bool("LANGSMITH_TRACING") and bool(os.getenv("LANGSMITH_API_KEY")),
-            deepseek_api_key=os.getenv("DEEPSEEK_API_KEY") or None,
-            deepseek_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
-            ragflow_enabled=env_bool("RAGFLOW_ENABLED"),
-            ragflow_api_key=os.getenv("RAGFLOW_API_KEY") or None,
-            ragflow_base_url=os.getenv("RAGFLOW_BASE_URL", "http://127.0.0.1:9380"),
-            ragflow_dataset_name=os.getenv("RAGFLOW_DATASET_NAME", "ctf-agent-audit"),
+            data_dir=Path(str(_cfg("CTF_AUDIT_DATA_DIR", "./data"))),
+            langsmith_enabled=_cfg_bool("LANGSMITH_TRACING") and bool(_cfg("LANGSMITH_API_KEY")),
+            deepseek_api_key=_cfg("DEEPSEEK_API_KEY") or None,
+            deepseek_base_url=_cfg("DEEPSEEK_BASE_URL") or "https://api.deepseek.com",
+            deepseek_model=_cfg("DEEPSEEK_MODEL") or "deepseek-v4-flash",
+            ragflow_enabled=_cfg_bool("RAGFLOW_ENABLED"),
+            ragflow_api_key=_cfg("RAGFLOW_API_KEY") or None,
+            ragflow_base_url=_cfg("RAGFLOW_BASE_URL") or "http://127.0.0.1:9380",
+            ragflow_dataset_name=_cfg("RAGFLOW_DATASET_NAME") or "ctf-agent-audit",
             ragflow_timeout_seconds=max(
-                1.0, float(os.getenv("RAGFLOW_TIMEOUT_SECONDS", "30"))
+                1.0, float(str(_cfg("RAGFLOW_TIMEOUT_SECONDS") or 30))
             ),
             experience_search_limit=max(
-                1, int(os.getenv("EXPERIENCE_SEARCH_LIMIT", "5"))
+                1, int(str(_cfg("EXPERIENCE_SEARCH_LIMIT") or 5))
             ),
-            ragflow_observability=env_bool("RAGFLOW_OBSERVABILITY", True),
+            ragflow_observability=_cfg_bool("RAGFLOW_OBSERVABILITY", True),
         )

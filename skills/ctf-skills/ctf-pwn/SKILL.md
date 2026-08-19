@@ -58,6 +58,7 @@ gem install one_gadget seccomp-tools
 - [kernel-techniques.md](kernel-techniques.md) - Kernel exploitation techniques: tty_struct kROP (fake vtable + stack pivot), AAW via ioctl register control, userfaultfd race stabilization, SLUB allocator internals (freelist hardening/obfuscation), leak via kernel panic, MADV_DONTNEED race window extension (DiceCTF 2026), cross-cache CPU-split attack (DiceCTF 2026), PTE overlap file write (DiceCTF 2026), addr_limit bypass via failed file open for kernel memory read/write
 - [kernel-bypass.md](kernel-bypass.md) - Kernel protection bypass: KASLR/FGKASLR bypass (__ksymtab), KPTI bypass (swapgs trampoline, signal handler, modprobe_path/core_pattern via ROP), SMEP/SMAP bypass, GDB kernel module debugging, initramfs/virtio-9p workflow, exploit templates, exploit delivery
 - [field-notes.md](field-notes.md) - Detailed pwn notes: heap exploitation quick reference, additional exploit notes, useful commands
+- [tls-forwarder.md](tls-forwarder.md) - TLS-wrapped challenge ports (platform target forwarder): remote() gets 0 bytes/EOF, but TLSv1.3 + SNI + self-signed-cert bypass gets the real service
 
 ---
 
@@ -180,6 +181,21 @@ Leak libc via `puts@PLT(puts@GOT)`, return to vuln, stage 2 with `system("/bin/s
 **stub_execveat as execve alternative:** When no `pop rax; ret` exists, use `stub_execveat` (syscall 322/0x142) instead of `execve` -- send exactly 0x142 bytes so `read()` return value sets rax. See [rop-and-shellcode.md](rop-and-shellcode.md#stub_execveat-syscall-as-execve-alternative-asis-ctf-2018).
 
 **Shell interaction:** After `execve`, `sleep(1)` then `sendline(b'cat /flag*')`. See [rop-and-shellcode.md](rop-and-shellcode.md).
+
+## TLS-Wrapped Target Ports
+
+**Pattern:** `remote(host, port)` TCP connect succeeds but every `recv` returns 0 bytes then EOF — the platform forwards the container port through a TLS forwarder (self-signed cert, TLSv1.3, needs SNI). Plain `ssl=True` is NOT enough (pwntools pins TLSv1.2). Connect with TLSv1.3 + SNI + verification disabled:
+
+```python
+from pwn import *
+import ssl
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+r = remote(host, port, ssl=True, ssl_context=ctx)
+```
+
+Verify first with `openssl s_client -connect host:port -servername host -quiet`. See [tls-forwarder.md](tls-forwarder.md) for the full recipe and detection checklist.
 
 ## Format String Through Input Transformation
 

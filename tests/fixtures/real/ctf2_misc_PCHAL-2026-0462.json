@@ -1,0 +1,38 @@
+{
+ "accepts_file_submission": false,
+ "accepts_ops_check": false,
+ "allow_writeup_submission": false,
+ "allows_multiple_flag_submissions": false,
+ "category": "MISC",
+ "created_at": "2026-05-28T11:45:45.506163+08:00",
+ "description": "某黑客潜入到某公司内网通过嗅探抓取了一段文件传输的数据，该数据也被该公司截获，你能帮该公司分析他抓取的到底是什么文件的数据吗？\n注意：得到的 flag 请包上 flag{} 提交",
+ "difficulty": "Easy",
+ "files": [
+  {
+   "created_at": "2026-05-29T09:44:11.329923+08:00",
+   "file_id": "2241fb0e-83e3-463e-8c8d-6156228dddad",
+   "file_md5": "08644d727eff282833035841df1677a6",
+   "file_name": "efa02e35-ee20-476f-94a2-cadbcef7d076.zip",
+   "file_size": 180801,
+   "file_type": "application/zip",
+   "id": "58f92842-0f6f-4cea-a2e5-3c53fd32254a",
+   "is_visible": true,
+   "practice_challenge_id": "d5968593-d7f8-4634-a204-af543c08b472",
+   "updated_at": "2026-05-29T09:44:11.329923+08:00"
+  }
+ ],
+ "friendly_id": "PCHAL-2026-0462",
+ "id": "d5968593-d7f8-4634-a204-af543c08b472",
+ "is_solved": false,
+ "is_visible": true,
+ "max_attempts": 0,
+ "name": "被嗅探的流量",
+ "points": 1,
+ "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+ "show_writeups": false,
+ "solve_count": 968,
+ "sort_order": 0,
+ "template_id": "398b997f-3923-4b05-bc4f-63f08cdcce27",
+ "translations": null,
+ "updated_at": "2026-08-18T19:25:44.015187+08:00"
+}

@@ -256,6 +256,77 @@ class MockExecutor:
 
 `fn` 为 `(step, ctx, tool_exec=None) -> ExecResult`，优先级高于 observation/result；兼容旧 2 参 `(step, ctx)`。
 
+### 2.1 执行目标与命令路由（CommandRunner / RealExecutor）
+
+RealExecutor 内部把 `run_command`/`run_python` 交给 `CommandRunner`,命令**只能在沙箱
+（SSH→VM 的 docker 容器）下执行**——无 target 参数、无宿主回退：
+
+```python
+class CommandRunner:
+    def run(self, cmd, *, cwd, category, tool_id, timeout) -> RunOutcome
+    def run_python(self, code, *, cwd, category, tool_id, timeout) -> RunOutcome
+```
+
+执行决策：
+1. **沙箱唯一执行面**：`CommandRunner` 懒建 `SandboxManager`（读 `config_sandbox`），
+   `run`/`run_python` 透传 cmd/code、cwd、category、tool_id、timeout 给
+   `sandbox.exec`/`sandbox.run_python`；`RunOutcome.target` = 后端名（ssh → `ssh`，
+   docker → `docker`）。manager 内部即「检查依赖→镜像复制→真实执行」：`ensure` 容器 →
+   `sync` 工作目录 → `tool_id` 缺失自动装依赖进该会话容器 → `backend.exec`。
+2. **无沙箱绝不回退宿主**：沙箱构造失败（缺 `CTF_SSH_HOST`/凭据）→ 返回
+   `RunOutcome(ok=False, stderr="沙箱未配置…", target="none")`，LLM 循环内非致命错误；
+   **绝不**在 Windows 宿主 `subprocess.run` / WSL / 本机 docker 上执行。
+3. **cwd 收口到附件目录**：executor `_cwd` 只允许题目附件目录（`workdir` 参数 → meta task
+   `challenge_dir`），`args.cwd` 越界 → `{"error": ...}` 拒绝——防 LLM 把敏感宿主目录
+   sync 进沙箱。
+
+**沙箱执行**：`CTF_SSH_HOST` 已配置时（runner 懒建 `SandboxManager`，或显式注入
+`CommandRunner(sandbox=...)`），命令经**沙箱环境管理器**（`sandbox_env/`）接管——见
+[sandbox_env.md](sandbox_env.md)。核心变化：每 challenge 一个**持久容器**
+（`docker run -d --name ctf-<hash> ... sleep infinity`），容器内安装持久；`run_command` 的
+`tool_id` 缺失时先自动装依赖进该容器再执行；工作目录经 `SshBackend.sync_to` 增量上传到会话
+子目录 `{workdir}/{session_key}`。后端 `SshSandboxBackend` 走 `agent/ssh.py`（paramiko
+exec + SFTP 同步），凭据读 `config_sandbox`（`CTF_SSH_HOST/USER/PASSWORD`，也可显式注入
+`CommandRunner(sandbox=...)`），密码不进源码；paramiko 缺失/凭据不全时沙箱构造失败 →
+返回错误结果，不崩、不回退宿主。
+
+> **Git Bash 注意**：MSYS2 会把以 `/` 开头的导出变量值按 POSIX 路径重写（`/root/ctf`
+> → `D:/Git/root/ctf`）。在 Git Bash 里设 `CTF_SSH_WORKDIR=/root/ctf` 会被改写；可用
+> `MSYS2_ENV_CONV_EXCL=CTF_SSH` 或改在 Python 内 `os.environ` 赋值规避。
+
+**环境准备**：远程 VM 的 docker 与 `ctf-sandbox:latest` 镜像由
+`scripts/provision_alpine.sh` 检测并自动安装/构建（幂等）；沙箱镜像定义在
+`scripts/Dockerfile.ctf-sandbox`。基础镜像由 provision 管；**单题工具依赖**由
+`SandboxManager` 按需自动装进会话容器（`CTF_SANDBOX_INSTALL_AUTO` 控制，见 sandbox_env.md）。
+
+### 2.2 提交回环与 flag 验证分层（动态 flag）
+
+`submit_flag` 工具最终走 `adapter.submit(challenge_id, flag, provenance=...)`。`provenance`
+可选（EE 把关：flag 来源可确认而非胡编乱造）：
+
+```json
+{
+  "verifier": "solve_extract.py",      // 相对 challenge 目录的提取脚本
+  "trace": "逐字符 ascii 二进制搜索...",  // 提取过程摘要
+  "flag_format": "CTF2{uuid}"
+}
+```
+
+`submit` 判定分层（详见 `design/verification.md`）：
+
+| 情形 | 判定 |
+|---|---|
+| 静态题 + 本地已验证字面量 | `LOCAL_VERIFIED`（本地比对，行为不变） |
+| 动态题 + 已验证 procedure + 注入 runner | `LOCAL_PROCEDURE`（重跑 verifier 推导当前实例 flag 比对，解 ALREADY_SOLVED 死锁） |
+| 动态题无 procedure / runner / 推导失败 | 返回 `None` → 交回平台 |
+| 平台 success + 给了 provenance | 落 `platform_verified=1` procedure（T2 → T1） |
+| 平台 success + 动态题无 provenance | 记 `method='procedure'`、`verifier_path=None` 占位行（标记"平台确认可解"，无脚本不自动推导） |
+| 平台 ALREADY_SOLVED + 动态题 | 走上面本地分层，不再拿过期 `challenge_flags` 串比对 |
+
+verifier 脚本契约（executor `_run_verifier` 执行）：读 `argv[1]`（或同目录 `metadata.yml`
+`target` 字段）取靶机地址；推导出的 flag 打印在 **stdout 末行**；失败不打印 → 本地判定
+返回 `None` 交平台。
+
 ---
 
 ## 3. Evaluator — 评估 Agent 接口

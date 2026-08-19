@@ -8,8 +8,10 @@
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..integrations.deepseek import DeepSeekChat
+from agent import llm_api
+
 from ..integrations.langsmith_logger import redact
+from ..integrations.llm_chat import LlmApiAgentEvalsClient
 from ..schemas import (
     CTFAttempt,
     StepEvaluation,
@@ -20,9 +22,41 @@ from ..schemas import (
 from ..settings import Settings
 
 
-STEP_PROMPT = """Evaluate one step of an authorized CTF agent execution. Judge whether the tool
-choice and observed result make progress toward the objective. Do not solve the challenge or infer
-a flag. Return a continuous process-quality score from 0 to 1. Trajectory: {outputs}"""
+STEP_PROMPT = """你是步骤验收 Agent。验收执行 Agent 对当前步骤的产出是否达成验收标准。
+
+【可用的上下文】
+- 任务：题面原文与目标列表（Task）
+- 当前步骤：instruction / criterion / status / attempts（Dag）
+- 提交判定：已提交 flag 的平台判定（correct=true 表示该步产出已被平台确认）
+- 本轮评估意见：前置非 pass 意见（AgentComm）
+- 执行历史：已完成的步骤轨迹（History）
+
+【验收依据】
+- observation：执行 Agent 本轮的实际输出（是否达成 criterion）
+- submission：提交 flag 的判定（如已提交）
+- 前置评估意见与历史轨迹
+
+【输出】
+- pass：步骤达成，进入下一目标；若 correct=true 判定任务完成（is_completed）
+- retry：未达成但有修复空间，返回执行重试
+- escalate：证据不足 / 无法达成，升级触发任务反思
+- 不解题、不猜 flag；基于证据给出 verdict + opinion
+
+【轨迹】
+{outputs}
+
+对上述轨迹给出 0..1 的过程质量分与说明（JSON）。"""
+
+
+def _sum_usage(usage_log: List[dict]) -> Dict[str, int] | None:
+    if not usage_log:
+        return None
+    total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    for item in usage_log:
+        total["prompt_tokens"] += int(item.get("prompt_tokens", 0))
+        total["completion_tokens"] += int(item.get("completion_tokens", 0))
+        total["total_tokens"] += int(item.get("total_tokens", 0))
+    return total
 
 
 class StepAcceptanceEvaluator:
@@ -30,6 +64,7 @@ class StepAcceptanceEvaluator:
         self.settings = settings
         self._cached_online_evaluator: Any = None
         self._online_disabled_reasons: Dict[str, str] = {}
+        self.last_usage: Optional[Dict[str, int]] = None
 
     def begin_attempt(self, attempt_id: str) -> None:
         """开始任务时清除该任务遗留的熔断状态。"""
@@ -78,6 +113,7 @@ class StepAcceptanceEvaluator:
         step_id: str,
         repeated: bool = False,
         position: int = 0,
+        ctx: str = "",
     ) -> StepEvaluationItem:
         """工具执行完成事件的即时验收入口，只评价当前这一个步骤。"""
         if self.settings.mode == "offline":
@@ -95,10 +131,11 @@ class StepAcceptanceEvaluator:
             try:
                 online_evaluator = self._online_evaluator()
                 response = online_evaluator(
-                    outputs=self._messages(attempt, call, result, position),
+                    outputs=self._messages(attempt, call, result, position, ctx=ctx),
                 )
+                self.last_usage = _sum_usage(llm_api.pop_token_log())
                 score = self._response_score(response)
-                evaluator = "AgentEvals/DeepSeek"
+                evaluator = "AgentEvals/LlmApi"
                 llm_reason = self._response_reason(response)
             except Exception as exc:  # 第三方 SDK/API 失败必须降级，不能终止任务。
                 print("\n[StepEvaluator ONLINE ERROR]")
@@ -155,12 +192,12 @@ class StepAcceptanceEvaluator:
                     evaluator="StepEvaluator/offline-rules",
                 )
             )
-        online = any(item.evaluator == "AgentEvals/DeepSeek" for item in normalized)
+        online = any(item.evaluator == "AgentEvals/LlmApi" for item in normalized)
         fallback = any("online-fallback:" in item.evaluator for item in normalized)
         if online and fallback:
-            evaluator = "AgentEvals/DeepSeek + offline-fallback"
+            evaluator = "AgentEvals/LlmApi + offline-fallback"
         elif online:
-            evaluator = "AgentEvals/DeepSeek"
+            evaluator = "AgentEvals/LlmApi"
         elif fallback:
             evaluator = "StepEvaluator/offline-rules (online-fallback)"
         else:
@@ -177,17 +214,20 @@ class StepAcceptanceEvaluator:
     def _online_evaluator(self) -> Any:
         if self._cached_online_evaluator is not None:
             return self._cached_online_evaluator
-        if not self.settings.deepseek_api_key:
-            raise RuntimeError("MissingDeepSeekApiKey")
+        try:
+            from agent import llm_api as _llm_api
+            _llm_api.resolve_key()
+        except Exception as exc:
+            raise RuntimeError("MissingLLMApiKey") from exc
         try:
             from agentevals.trajectory.llm import create_trajectory_llm_as_judge
         except ImportError as exc:
             raise RuntimeError("AgentEvalsNotInstalled") from exc
-        judge = DeepSeekChat(self.settings).agentevals_client()
+        judge = LlmApiAgentEvalsClient(role="evaluator_step")
         self._cached_online_evaluator = create_trajectory_llm_as_judge(
             prompt=STEP_PROMPT,
             judge=judge,
-            model=self.settings.deepseek_model,
+            model=_llm_api.role_model("evaluator_step"),
             continuous=True,
         )
         return self._cached_online_evaluator
@@ -207,7 +247,7 @@ class StepAcceptanceEvaluator:
     def _error_label(exc: Exception) -> str:
         """日志只记录稳定的异常类型，避免把 API 响应或密钥写入报告。"""
         message = str(exc)
-        known_labels = ("MissingDeepSeekApiKey", "AgentEvalsNotInstalled")
+        known_labels = ("MissingDeepSeekApiKey", "MissingLLMApiKey", "AgentEvalsNotInstalled")
         if message in known_labels:
             return message
         return type(exc).__name__
@@ -254,14 +294,15 @@ class StepAcceptanceEvaluator:
         call: TrajectoryStep,
         result: Optional[TrajectoryStep],
         position: int,
+        ctx: str = "",
     ) -> List[Dict[str, Any]]:
         call_id = "call_%s_%d" % (attempt.attempt_id, position)
+        problem = str(attempt.metadata.get("problem_statement", attempt.task_id))
+        user_content = f"{ctx}\n\n{problem}" if ctx else problem
         messages: List[Dict[str, Any]] = [
             {
                 "role": "user",
-                "content": str(
-                    attempt.metadata.get("problem_statement", attempt.task_id)
-                ),
+                "content": user_content,
             },
             {
                 "role": "assistant",

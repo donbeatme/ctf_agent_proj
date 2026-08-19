@@ -168,9 +168,11 @@ def test_chat_with_tools_exceeds_rounds_raises(monkeypatch):
         return _resp(tool_calls=[_tc("t1")])
     monkeypatch.setattr(llm_api, "_request", fake)
 
-    with pytest.raises(llm_api.ToolLoopError):
+    with pytest.raises(llm_api.ToolLoopError) as ei:
         llm_api.chat_with_tools("任务", tools=[{}], tool_exec=lambda n, a: {},
                                 api_key="test", max_tool_rounds=3)
+    # 已达成的部分轨迹保留在异常上(供上层日志/flag 提取,不因超限丢失)
+    assert [t["name"] for t in ei.value.trace] == ["t1", "t1", "t1"]
 
 
 def test_tool_exec_exception_recorded_not_fatal(monkeypatch):

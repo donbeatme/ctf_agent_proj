@@ -94,16 +94,49 @@ class MockWorkspace:
 | `tests/test_skills.py` | 技能库加载器 / DocStore 检索（CtfSkillsDocStore） |
 | `tests/test_ctf_skill_tools.py` | 工具/依赖声明包装：CtfSkillToolCatalog / TOOL_MANIFEST / apply_tool 动态申请 |
 | `tests/test_checks.py` | 环境检查：SkillEnvProbe 探测 + ENV_CHECK 打点 + run.log 输出 |
+| `tests/test_planner.py` | Planner 文档合并检索（CombinedDocStore 去重/透传）+ DAG 失败重试一次 |
 | `tests/test_timing.py` | PhaseTimer 阶段超时 |
 | `tests/smoke_scenarios.py` | 端到端场景（revise/escalate/deadlock/reflect），真实 Planner + mock 其他 |
 | `tests/test_history_ctx.py` | History 组件渲染导出（需真实 LLM） |
+| `tests/test_runner.py` | CommandRunner 沙箱唯一执行：委托 SandboxManager；无沙箱 → 错误结果,绝不回退宿主 |
+| `tests/test_ssh_sync.py` | SshBackend(paramiko) SFTP 增量同步题目目录 |
+| `tests/test_real_executor.py` | RealExecutor LLM 工具循环 + `_cwd` 收口（越界拒绝/默认 challenge_dir/错误返回） |
+| `tests/test_config_split.py` | 配置拆分：config_adaptor/config_sandbox 各读自己 JSON、env 优先、model_config 不再含 CTF_SSH_*/CTF2_* |
+| `tests/test_sandbox_env_base.py` | SandboxManager 门面 + FakeBackend（平台无关） |
+| `tests/test_sandbox_env_ssh.py` | SshSandboxBackend：per-challenge 持久容器生命周期（docker run/exec/rm） |
+| `tests/test_sandbox_env_tools.py` | ToolManager：探测 / OS 适配安装 / 冲突与不兼容分析 |
+| `tests/test_sandbox_env_integration.py` | 沙箱 ↔ runner 集成（exec/run_python 委托、依赖钩子） |
+| `tests/test_real_understander.py` | RealTaskUnderstander 真实理解（metadata/distfiles/题型判定/目标生成） |
+| `tests/test_real_understander_engine_integration.py` | 理解层 → Engine 集成（challenge_dir 传透） |
+| `tests/test_task_understanding_merge.py` | 多源任务输入归一化 / 合并 |
+| `tests/test_local_challenge_workflow.py` | 本地 challenge 物化 → 理解 → 解题工作流（沙箱） |
+| `tests/test_local_verify_tiers.py` | 本地验证层级（探针/软/硬判定） |
+| `tests/test_offline_workflow_reproduction.py` | 离线工作流复现（无 LLM/沙箱,mock 全链路） |
+| `tests/test_procedures.py` | 规程/流程工具 |
+| `tests/test_opslog.py` | opslog 统一操作日志（adapter/sandbox/engine 事件 JSONL + attach 转发） |
+| `tests/test_submission_component.py` | flag 提交组件（本地比对/提交状态） |
+| `tests/test_evaluator_config.py` | 评估器配置（ep/ee/et 权重等） |
+| `tests/test_experience_ctx.py` | 经验上下文组件渲染 |
+| `tests/test_experience_matching.py` | 历史经验匹配（检索/排序） |
+| `tests/test_audit_flag_delegation.py` | audit FlagVerifier 委托（正确 flag 判定） |
+| `tests/test_audit_goals_binding.py` | audit 目标绑定 |
+| `tests/test_audit_persistence.py` | audit 持久化（经验/记录落盘） |
+| `tests/test_audit_wiring_integration.py` | audit ↔ Engine/Planner 接线集成（AgentAuditService） |
+| `tests/test_ctf_platform_base.py` | ChallengeAdapter 基类契约（FakeAdapter 平台无关） |
+| `tests/test_ctf_platform_storage.py` | ChallengeStore(SQLite) + AttachmentCache(LRU+md5+淘汰) |
+| `tests/test_ctf_platform_ctf2.py` | Ctf2Adapter：parse/download/submit/sync/靶机开关（FakeSession,mock 离线） |
+| `tests/test_ctf_platform_cli.py` | ctf_platform CLI 命令（challenge-fetch/sync、flag-submit、cache-*、challenge-target） |
+| `tests/test_ctf_platform_integration.py` | 适配器 ↔ 主架构集成（物化目录契约/metadata.yml） |
+| `tests/test_real_ctf_ingestion.py` | 真实 ctf2 平台 ingestion（需网络+凭证） |
+| `tests/test_real_ctf_maze_ingestion.py` | 真实 ctf2 maze 题型 ingestion（需网络+凭证） |
+| `tests/test_six_categories.py` | 六类题型冒烟（scripts/run_six_categories.py） |
 
 ---
 
 ## 4. 测试运行
 
 ```bash
-python -m pytest tests/ -x -q          # 全量（213 个）
+python -m pytest tests/ -q             # 全量（471 passed, 4 skipped）
 python -m pytest tests/test_engine.py  # 仅引擎测试
 ```
 

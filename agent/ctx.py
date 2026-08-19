@@ -1,4 +1,4 @@
-"""上下文组装:CtxComponent(组件基类)+ CtxAssembler(组装器)+ 8 个组件。
+"""上下文组装:CtxComponent(组件基类)+ CtxAssembler(组装器)+ 10 个组件。
 
 设计见 design/ctx.md;状态源与注册表见 design/workspace.md。
 
@@ -616,6 +616,40 @@ class AgentCommComponent(CtxComponent):
         return "# 本轮评估意见\n" + "\n".join(lines)
 
 
+class SubmissionComponent(CtxComponent):
+    """提交状态(公用组件):executor 提交 flag 后的平台判定。
+
+    workspace.meta["submission"] 的只读投影:{flag, ok, correct, message}。
+    判定来自 adapter.submit(正确/错误/仅记录/异常)。**提交判定是 ee 判任务完成
+    (is_completed)的核心证据**——ee 看到 correct=true 即可认定"该步产出已被平台
+    确认",故注册给 ee/et;executor 自己的判定经 TraceComponent(tool_result)已可见。
+    锚点组件永不压。
+    """
+
+    key = "submission"
+    priority = 99
+    anchor = True
+
+    def render(self):
+        sub = (self._ws.meta or {}).get("submission") if self._ws else None
+        if not isinstance(sub, dict) or not sub.get("flag"):
+            return ""
+        correct = sub.get("correct")
+        if correct is True:
+            verdict = "正确(平台确认)"
+        elif correct is False:
+            verdict = "错误(平台拒绝)"
+        elif sub.get("ok") is False:
+            verdict = "未判定(提交异常)"
+        else:
+            verdict = "未判定(仅记录,无平台确认)"
+        lines = ["# 已提交 flag", f"flag: {sub.get('flag')}", f"判定: {verdict}"]
+        msg = sub.get("message")
+        if msg:
+            lines.append(f"message: {msg}")
+        return "\n".join(lines)
+
+
 class DagComponent(CtxComponent):
     """当前计划 DAG:ws.blueprint 的只读投影(不持副本)。step 带 doc_id。
 
@@ -873,6 +907,66 @@ class DocsComponent(CtxComponent):
         self.clear()
 
 
+class ExperienceComponent(CtxComponent):
+    """已验证解题经验:ws.experience 的只读投影(精确匹配到的 procedure 记录)。
+
+    经验 = 同一题(friendly_id/template_id 完全一致)在其它实例/场地**已被平台验证过**
+    的解题过程——动态 flag 题用它当"重放参照":ee/et 软鉴定解题步骤与漏洞信息(不依赖
+    平台每次提交确认)。raw 档渲染紧凑索引 + trace_json 解题细节(oracle/标记/提取方法/
+    flag 格式),**不渲染过期 hint flag**(实例相关,防误导);ref 档仅 procedure_id 索引。
+    装配范围由 workspace._exp_enabled(CTF_EXPERIENCE_SCOPE,默认仅 ee)决定。
+    生命周期:run 启动由 engine 装填(经 adapter.match_procedures),run 内不清理。
+    """
+
+    key = "experience"
+    priority = 4            # 参考类,与 tools/tool_dir 同区(docs=3 之后压)
+    LEVELS = ("raw", "ref")
+    compress_methods = "索引里只剩 procedure_id(脚本路径可重跑验证),连描述也去掉"
+
+    # trace_json 里可入 ctx 的解题证据字段(flag 本身/verified_flag 是实例相关,不渲染)
+    _TRACE_KEYS = ("oracle", "true_mark", "false_mark", "waf_mark", "extraction", "flag_format")
+
+    def render(self):
+        records = self._ws.experience if self._ws else []
+        if not records:
+            return ""
+        if self.level == 0:
+            lines = ["# 已验证解题经验"]
+            for r in records:
+                verified = "是" if r.get("platform_verified") else "否"
+                ok_at = r.get("last_ok_at") or "-"
+                vp = r.get("verifier_path") or "-"
+                lines.append(
+                    f"- {r.get('friendly_id') or r.get('challenge_id')} "
+                    f"[{r.get('method')}] 已验证={verified} 上次成功={ok_at} 脚本={vp}"
+                )
+                lines.extend(self._trace_lines(r))
+            return "\n".join(lines)
+        return "# 已验证解题经验(索引)\n" + ", ".join(
+            f"`{r['procedure_id']}`" for r in records
+        )
+
+    @classmethod
+    def _trace_lines(cls, r: dict) -> list[str]:
+        """trace_json 的解题步骤/漏洞信息明细(ee 软鉴定参照);无/无法解析则退化空。"""
+        t = r.get("trace_json")
+        if isinstance(t, str):
+            try:
+                t = json.loads(t)
+            except (ValueError, TypeError):
+                t = None
+        if not isinstance(t, dict):
+            return []
+        out = []
+        for k in cls._TRACE_KEYS:
+            v = t.get(k)
+            if v not in (None, ""):
+                out.append(f"    {k}: {v}")
+        if t.get("verified_at"):
+            out.append(f"    verified_at: {t['verified_at']}")
+        return out
+
+
 def _one_tool_spec(spec) -> tuple[str, dict] | None:
     """单条标准工具定义 → (tool_id, 统一 dict);无法识别(非 dict / 无 id)返回 None。"""
     if not isinstance(spec, dict):
@@ -1092,6 +1186,18 @@ class TraceComponent(CtxComponent):
             self._summary = c.get("text", "")
             self._sig = c.get("sig")
 
+    @staticmethod
+    def _fmt_output(out) -> str:
+        """工具结果 → 单行文本:str 原样;dict/list json(截断)保可读;其余 str()。"""
+        if isinstance(out, str):
+            return out.replace("\n", " ")
+        if out is None:
+            return ""
+        if isinstance(out, (dict, list)):
+            s = json.dumps(out, ensure_ascii=False, default=str).replace("\n", " ")
+            return s if len(s) <= 400 else s[:397] + "..."
+        return str(out).replace("\n", " ")
+
     def _render_raw(self, evs):
         lines = []
         for e in evs:
@@ -1101,7 +1207,7 @@ class TraceComponent(CtxComponent):
                 lines.append(f"- step={e.step_id or '-'} call {d.tool} {args}")
             elif isinstance(d, ToolResultDetail):
                 args = json.dumps(d.args, ensure_ascii=False)
-                output = (d.output or "").replace("\n", " ")
+                output = self._fmt_output(d.output)
                 lines.append(f"- step={e.step_id or '-'} result {d.tool} {args} -> {output}")
             elif isinstance(d, dict):
                 args = json.dumps(d.get("args", {}), ensure_ascii=False)
@@ -1109,7 +1215,7 @@ class TraceComponent(CtxComponent):
                 if e.kind == EventKind.USE_TOOL:
                     lines.append(f"- step={e.step_id or '-'} call {tool} {args}")
                 else:
-                    output = (d.get("output") or "").replace("\n", " ")
+                    output = self._fmt_output(d.get("output"))
                     lines.append(f"- step={e.step_id or '-'} result {tool} {args} -> {output}")
         return lines
 

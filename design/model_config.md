@@ -2,6 +2,16 @@
 
 实现：`model_config.py`、`agent/llm_api.py`。
 
+> **配置拆分**：本文件只覆盖主配置（`model_config`，模型/引擎/评估器）。平台适配器与沙箱的
+> **敏感配置已拆出**，与主 config 分开、各配对其子类实现：
+> - `config_adaptor.py` + `config_adaptor.json`（配对 `Ctf2Adapter`→`StoreSettings`）：
+>   `CTF2_SESSION_TOKEN`/`CTF2_API_KEY`/`CTF2_COOKIE`/URL 等。
+> - `config_sandbox.py` + `config_sandbox.json`（配对 `SandboxManager`→`SandboxSettings`）：
+>   `CTF_SSH_HOST`/`CTF_SSH_USER`/`CTF_SSH_PASSWORD` 等。
+>
+> 三模块统一「env 优先 → 各自 JSON 兜底」；`config_adaptor` 另保留 `CTF2_CONFIG_JSON` 外部
+> 文件兼容兜底。`model_config.json` 不再承载 `CTF_SSH_*`/`CTF2_*`。
+
 ---
 
 ## 1. 配置（`model_config.json`）

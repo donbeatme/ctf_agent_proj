@@ -6,7 +6,7 @@ flag 是最终结果，权重最高；轨迹、工具可靠性、步数和时间
 
 from collections import Counter
 from datetime import datetime
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from .schemas import AttemptMetrics, CTFAttempt, StepKind
 
@@ -31,7 +31,7 @@ def _clamp(value: float) -> float:
 
 def calculate_attempt_metrics(
     attempt: CTFAttempt,
-    flag_valid: bool,
+    flag_valid: Optional[bool],
     step_evaluation_score: float,
     weights: Dict[str, float] = None,
 ) -> AttemptMetrics:
@@ -65,6 +65,7 @@ def calculate_attempt_metrics(
     # 少于参考步数不额外加分；超过时平滑衰减。
     step_efficiency = _clamp(expected_steps / max(expected_steps, reported_effective_steps, 1))
     time_efficiency = _clamp(time_budget / max(time_budget, duration, 1.0))
+    # flag_valid=None(无判定来源/动态 flag):保守计 0,不阻塞任务级决策(决策在 TaskReflectionEvaluator)
     flag_score = 1.0 if flag_valid else 0.0
     # 综合分中的过程质量由第二评估点“步骤验收”的平均分提供。
     accepted_step_score = _clamp(float(step_evaluation_score))

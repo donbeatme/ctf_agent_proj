@@ -9,7 +9,9 @@
 执行/评估均为接口桩(外部团队实现),当前可挂 MockExecutor / MockEvaluator。
 串行 MVP:一次只取并执行一个 ready 步骤,不并行。
 ctx 注入统一走 workspace:planner 与外部 agent(ep/ex/ee/et)都经 assembler.assemble
-组装(组件是 workspace 只读投影;外部桩接口收单串文本,engine 合并 system+ctx)。
+组装(组件是 workspace 只读投影;外部桩接口收单串 ctx 文本)。system 提示词经
+SystemPromptComponent 渲染(角色各自把它当系统消息传给 LLM,engine 只传组件不并入 ctx,
+避免与角色自持常量双写)。
 模型返回走 assembler.ingest 反向装填:planner→blueprint+replan 边界 / executor→
 use_tool + dag.step.result / 评估→record_opinion(agent_comm 通道投影源,pass 是
 闸门不产内容)。生命周期 hook:engine 打点,assembler.dispatch(replan/
@@ -168,6 +170,7 @@ class Engine:
         self._stalls = 0
         self._deadlock_attempts = 0
         self.task_completed = False
+        self.submitted_flag: str | None = None  # 已提交的 flag(执行层报告后填充,审计/反思用)
         self.goals: list[Goal] = []            # 任务理解层下发的固定目标(仅 id)
         self._goal_complete: dict[str, list[str]] = {}  # goal_id → evidence step_ids
         self.fail_reason: str | None = None
@@ -230,6 +233,9 @@ class Engine:
                           max_deadlock_attempts=self.max_deadlock_attempts)
         if self._checker is not None:
             rep = self._checker.probe_manifest()
+            ctype = (self.raw_content or {}).get("challenge_type")
+            if ctype:
+                rep["category"] = self._checker.probe_category(ctype)
             self.signals.emit(Signal.ENV_CHECK, scope="run_start", report=rep)
         run_timer = PhaseTimer("run", deadline_ms=self._run_timeout_ms)
         run_timer.__enter__()
@@ -280,6 +286,8 @@ class Engine:
         # 清 workspace 的 run 级残留(blueprint/events/steps/summaries),避免复用实例时
         # ctx 组件投影上一个 run 的 DAG/历史(§5.4);docs/tools 静态配置保留
         self.workspace.reset()
+        # 装载精确匹配到的已验证解题经验(ExperienceComponent 投影源;经适配器查询 procedure 库)
+        self.workspace.set_experience(self.executor.match_experience())
         self.bp = None
         self.turn = []
         self.current = None
@@ -288,6 +296,7 @@ class Engine:
         self._stalls = 0
         self._deadlock_attempts = 0
         self.task_completed = False
+        self.submitted_flag = None
         self.fail_reason = None
         self._goal_complete = {}
         self.scheduler = Scheduler()
@@ -417,13 +426,13 @@ class Engine:
                 d = e.detail
                 if isinstance(d, StepRecordDetail) and d.is_completed:
                     self.task_completed = True
+                    # ee 已判任务达成:同步把未决 goal 置完成,消除报告矛盾
+                    for g in self.goals:
+                        self._goal_complete.setdefault(g.id, [])
             elif e.kind == EventKind.GOAL_EVAL:
                 d = e.detail
                 if hasattr(d, "complete") and d.complete:
                     self._goal_complete[d.goal_id] = list(getattr(d, "evidence", []) or [])
-        # task_completed 由 goal 全部完成或 step_record is_completed 共同决定
-        if self.goals and all(g.id in self._goal_complete for g in self.goals):
-            self.task_completed = True
 
     def _rebuild_turn(self, ws):
         """从事件流重建 self.turn:收集最后一次 REPLAN 之后的所有意见事件。
@@ -524,9 +533,11 @@ class Engine:
         max_out = model_max_output(model)
         return int((window - max_out) * ratio)
 
-    def _assemble_ctx(self, role, budget=None, **kw) -> str:
+    def _assemble_ctx(self, role, budget=None, system=None, **kw) -> str:
         """调用 assembler.assemble 组装上下文;assembler 自带信号发射(若已注入 signals)。
         自动注入 goal_list + compress 回调 + budget,供组件使用。
+        system 传给 SystemPromptComponent 渲染(只读投影,供 ctx_asm 日志/信号);
+        返回 ctx 正文——system 不进返回串,角色各自把它当系统消息直传 LLM,避免双写。
         """
         a = self._assembler()
         if a is None:
@@ -534,9 +545,9 @@ class Engine:
         if "goal_list" not in kw and self.goals:
             kw["goal_list"] = self.goals
         budget = budget if budget is not None else self._role_budget(role)
-        ctx, system, over = a.assemble(role, budget=budget, **kw)
+        ctx, _system, over = a.assemble(role, budget=budget, system=system, **kw)
         # 溢出信号由 assembler 内发射(带 role/overflow/method 完整字段),这里不重复
-        return f"{system}\n\n{ctx}".strip() if system else ctx
+        return ctx
 
     def _record_plan(self, reason="", source="", changes=""):
         """规划产出落账:经 assembler.ingest("planner") 反向装填(blueprint + replan 边界事件)。
@@ -830,8 +841,6 @@ class Engine:
             # 外部评估返回的 detail 契约违规(如空 reasoning)不应崩 run,按同路径降级
             self._log.engine_error(f"goal eval 异常: {type(exc).__name__}: {exc}")
             return
-        if self.goals and all(g.id in self._goal_complete for g in self.goals):
-            self.task_completed = True
 
     def _llm_wrap(self, role, fn, ctx_size=0):
         """包裹一次外部 agent 调用,前后发 llm_call_start/end + response。
@@ -867,6 +876,46 @@ class Engine:
             pop_token_log()  # 丢弃失败调用的记录
             self.signals.emit(Signal.LLM_CALL_END, role=role, latency_ms=ms, error=exc)
             raise
+
+    @staticmethod
+    def _extract_flag(res) -> str | None:
+        """从执行结果提取已提交的 flag(规范落点:引擎 submitted_flag)。
+
+        优先取执行结果 dict 的 flag 键;否则扫描提交类工具调用(submit_flag 等)的参数。
+        未提交返回 None——FlagVerifier 依此判"agent 未提交 flag"。
+        """
+        result = res.result
+        if isinstance(result, dict) and result.get("flag"):
+            return str(result["flag"])
+        for tc in res.tool_calls or []:
+            tool = str(tc.get("tool") or "")
+            if tool == "submit_flag" or tool.endswith("flag"):
+                args = tc.get("args")
+                if isinstance(args, dict) and args.get("flag"):
+                    return str(args["flag"])
+        return None
+
+    @staticmethod
+    def _extract_submission(res) -> dict | None:
+        """从执行结果提取提交记录(flag + 平台判定:ok/correct/message)。
+
+        submit_flag 工具调用的 result 是权威判定来源(adapter.submit 返回);
+        无提交类调用返回 None。供 engine 写入 ws.meta["submission"],ee/et 经
+        SubmissionComponent 投影可见。
+        """
+        for tc in res.tool_calls or []:
+            tool = str(tc.get("tool") or "")
+            if tool == "submit_flag" or tool.endswith("flag"):
+                args = tc.get("args")
+                flag = args.get("flag") if isinstance(args, dict) else None
+                sub: dict = {"flag": flag}
+                r = tc.get("result")
+                if isinstance(r, dict):
+                    for k in ("ok", "correct", "message"):
+                        if k in r:
+                            sub[k] = r[k]
+                return sub
+        return None
 
     @staticmethod
     def _extract_usage(result) -> tuple[int, int]:
@@ -924,7 +973,9 @@ class Engine:
                         self._fail(
                             f"初始规划超时({t.elapsed_ms:.0f}ms)且无产出")
         elif s == EngineState.PLAN_REVIEW:
-            ctx = self._assemble_ctx(Role.EVALUATOR_PLAN, )
+            ctx = self._assemble_ctx(
+                Role.EVALUATOR_PLAN,
+                system=self.evaluator.system_for(Role.EVALUATOR_PLAN))
             t = PhaseTimer("plan_review", deadline_ms=self._phase_deadline("plan_review"))
             with t:
                 res = self._safe_call(
@@ -946,7 +997,8 @@ class Engine:
                 self._go(EngineState.SCHEDULING, "plan review passed")
         elif s == EngineState.SCHEDULING:
             step = self.bp.next_step()
-            if step is None:
+            if step is None or self.task_completed:
+                # ee 已判任务完成(is_completed)→ 早停收口:跳过剩余 DAG 步骤直接反思终局
                 if self.task_completed or self.bp.is_done():
                     self._go(EngineState.REFLECTING, "task completed")
                 else:
@@ -972,7 +1024,8 @@ class Engine:
             a = self._assembler()
             if a is not None:
                 a.precompress(Role.PLANNER)
-            ctx = self._assemble_ctx(Role.EXECUTOR, step_id=self.current.id, )
+            ctx = self._assemble_ctx(Role.EXECUTOR, step_id=self.current.id,
+                                     system=self.executor.system)
             t = PhaseTimer("executing", deadline_ms=self._phase_deadline("executing"))
             with t:
                 res: ExecResult = self._safe_call(
@@ -986,9 +1039,18 @@ class Engine:
             if t.timed_out:
                 self.signals.emit(Signal.PHASE_TIMEOUT, phase="executing",
                                   elapsed_ms=t.elapsed_ms, step_id=self.current.id)
-                res = ExecResult(observation=f"执行超时({t.elapsed_ms:.0f}ms)")
+                # 超时只追加标记,不丢弃执行产出:executor 可能已提取/提交 flag,
+                # result/submission/tool_calls 是 ee 软鉴定判完成的关键证据。
+                note = f"[执行超时({t.elapsed_ms:.0f}ms)]"
+                res.observation = f"{res.observation}\n{note}".strip()
             self._obs = res.observation
             self.current.result = res.result
+            submitted = self._extract_flag(res)
+            if submitted is not None:
+                self.submitted_flag = submitted
+            submission = self._extract_submission(res)
+            if submission is not None:
+                self.workspace.record_submission(submission)
             if a is not None and res.tool_calls:
                 a.ingest(Role.EXECUTOR, step_id=self.current.id,
                          tool_calls=res.tool_calls)
@@ -997,8 +1059,9 @@ class Engine:
                                   detail=f"step_id={self.current.id} tool_calls={n}  {n} use_tool + {n} tool_result  trace 通道")
             self._go(EngineState.STEP_EVAL, f"step {self.current.id} executed")
         elif s == EngineState.STEP_EVAL:
-            ctx = self._assemble_ctx(Role.EVALUATOR_STEP, step_id=self.current.id,
-                                     )
+            ctx = self._assemble_ctx(
+                Role.EVALUATOR_STEP, step_id=self.current.id,
+                system=self.evaluator.system_for(Role.EVALUATOR_STEP))
             if self._obs:
                 ctx = f"{ctx}\n\nobservation: {self._obs}".strip()
             t = PhaseTimer("step_eval", deadline_ms=self._phase_deadline("step_eval"))
@@ -1015,6 +1078,9 @@ class Engine:
                 res = EvalResult(Verdict.ESCALATE, f"步骤校验超时({t.elapsed_ms:.0f}ms)")
             if res.is_completed:
                 self.task_completed = True
+                # ee 已判任务达成:同步把未决 goal 置完成,消除报告矛盾
+                for g in self.goals:
+                    self._goal_complete.setdefault(g.id, [])
             if res.verdict == Verdict.RETRY:
                 if self.current.attempts >= self.current.max_attempts:
                     self.bp.set_status(self.current.id, StepStatus.ESCALATED)
@@ -1059,7 +1125,9 @@ class Engine:
                                   attempts=self.current.attempts)
                 self._replan(EvalSource.STEP_EVAL, res)
         elif s == EngineState.REFLECTING:
-            ctx = self._assemble_ctx(Role.EVALUATOR_TASK, )
+            ctx = self._assemble_ctx(
+                Role.EVALUATOR_TASK,
+                system=self.evaluator.system_for(Role.EVALUATOR_TASK))
             t = PhaseTimer("reflecting", deadline_ms=self._phase_deadline("reflecting"))
             with t:
                 res = self._safe_call(

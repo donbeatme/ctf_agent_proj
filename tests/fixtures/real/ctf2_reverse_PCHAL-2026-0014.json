@@ -1,0 +1,39 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "REVERSE",
+  "created_at": "2026-05-28T00:18:04.489186+08:00",
+  "description": "注意：得到的 flag 请包上 flag{} 提交",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T00:18:04.49038+08:00",
+      "file_id": "b50d4b27-7cfa-4a02-95a2-68cfcb2c2ede",
+      "file_md5": "74d98478ffec38d3d3b1e56a565654b8",
+      "file_name": "29894069-43cf-49fe-93f8-dc99eff72748.zip",
+      "file_size": 109264,
+      "file_type": "application/x-zip-compressed",
+      "id": "384761f8-efb4-4e87-9e45-1f362f9b36e1",
+      "is_visible": true,
+      "practice_challenge_id": "cca98df5-5420-4944-8be9-2ad1b3de9661",
+      "updated_at": "2026-05-28T00:18:04.49038+08:00",
+      "path": "29894069-43cf-49fe-93f8-dc99eff72748.zip"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0014",
+  "id": "cca98df5-5420-4944-8be9-2ad1b3de9661",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "CrackMe",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 54,
+  "sort_order": 0,
+  "template_id": "a0275247-6a45-4ad6-9b03-0ea5318a277a",
+  "translations": null,
+  "updated_at": "2026-08-15T07:45:25.012233+08:00"
+}

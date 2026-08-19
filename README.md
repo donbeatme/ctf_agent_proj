@@ -108,13 +108,57 @@ agent/
 ├── signals.py        # 事件总线：SignalBus pub/sub
 ├── logging.py        # 日志层：run.log 人类可读格式 + 汇总表
 ├── evaluator.py      # 评估 Agent 接口桩（ep/ee/et）
-├── executor.py       # 执行 Agent 接口桩（run(step, ctx, tool_exec=None)）
+├── executor.py       # 执行 Agent：Executor 契约 + MockExecutor + RealExecutor（LLM 工具循环 → CommandRunner 路由 → ExecResult）
+├── runner.py         # 沙箱唯一执行面：CommandRunner 全部委托 SandboxManager(SSH→VM 容器),无沙箱绝不回退宿主 + 超时/截断
+├── ssh.py            # 远程执行后端：SshBackend(paramiko exec + SFTP 增量同步题目目录到 VM)
 ├── llm_api.py        # LLM 网关：chat/chat_with_tools + token 计算 + role_model
 ├── timing.py         # PhaseTimer 阶段超时
 └── tools.py          # 工具协议：@tool 装饰器/openai_tool_specs/call_tool + lookup 工具 + apply_tool/remove_tool 动态申请
 
-skills/ctf-skills/    # vendored ctf-skills 技能库（Agent Skills 格式，11 类 ~114 文档）
-design/               # 设计文档（10 份）
+ctf_platform/         # 平台适配器层（与主架构解耦,换平台/靶场只换子类）
+├── base.py           # ChallengeAdapter(ABC)：4 能力(物化/下载管理/提交/持久化) + ingest 模板方法
+├── ctf2.py           # Ctf2Adapter：ctf2 平台实现(parse/download URL模板回退/submit/sync/靶机开关)
+├── storage.py        # ChallengeStore(SQLite 索引+flag) + AttachmentCache(LRU+md5)
+├── config.py         # StoreSettings.from_env()（env 优先）
+├── cli.py            # 7 条命令: challenge-fetch/sync, flag-submit, flags-import, cache-stats/purge, challenge-target(开/关靶机)
+└── errors.py         # AdapterError/AuthError/DownloadError/ParseError/CacheIntegrityError
+
+sandbox_env/          # 沙箱环境管理器(类适配器):SandboxBackend(ABC) + SandboxManager 门面 + ToolManager
+├── base.py           # SandboxBackend 接口 + SandboxManager 门面(exec/run_python/工具委托) + session_key_for
+├── ssh_backend.py    # SshSandboxBackend:per-challenge 持久容器(docker run -d sleep infinity) over SSH
+├── tools.py          # ToolManager:沙箱内探测(verify_check)/安装(OS 适配,持久)/冲突与不兼容分析
+├── config.py         # SandboxSettings.from_env()(CTF_SSH_* / CTF_SANDBOX_*)
+├── cli.py            # 3 条命令: sandbox-probe/conflicts/deps
+└── errors.py         # SandboxError/SandboxUnavailableError/SandboxExecError/ToolInstallError
+
+opslog.py             # 统一操作日志:adapter/sandbox/engine 事件 JSONL 落盘(./data/ops.log)+ attach 转发
+config_adaptor.py     # 平台适配器配置：env → config_adaptor.json → CTF2_CONFIG_JSON 外部文件兜底（配对 Ctf2Adapter→StoreSettings）
+config_sandbox.py     # 沙箱配置：env → config_sandbox.json（配对 SandboxManager→SandboxBackend）
+
+task_understanding/   # 任务理解层：本地 challenge 物化输入 → Engine 契约
+├── real_understander.py # RealTaskUnderstander:raw_content → TaskInput(goal_list)
+├── classify.py       # 题型判定:关键词 + 附件扩展名启发,回填 challenge_type（收编自 challenge_intake）
+├── goals.py          # 目标生成策略:goal_list(obtain_flag)
+├── normalize.py      # 多源任务输入归一化:字段归一成 engine 可消费的 raw dict（收编自 challenge_intake）
+├── artifact_adapter.py # attachments Artifact → JSON-safe
+├── image_understanding.py # ImageUnderstander / OllamaImageUnderstander
+└── loaders/
+    └── local.py      # 本地 challenge_dir / metadata.yml / distfiles
+
+audit/                # 可观测性层：PlanStep 字段扩展 + 评估器 + 集成（与主架构解耦）
+├── service.py        # AgentAuditService:Plan 字段扩展 + bind_evaluator + flag 验证 + 经验回流
+├── settings.py       # CTF_AUDIT_MODE offline/online（model_config 兜底）
+├── schemas.py        # AuditPlan/PlanStep/… 模型
+├── flag_verifier.py  # FlagVerifier:正确 flag 判定
+├── metrics.py        # 评估权重
+├── agent_adapter.py  # AgentRuntimeBindings + audit_plan_fields 往返转换
+├── evaluators/       # plan/step/task 三个评估器（计划评审/步骤验收/任务反思）
+├── integrations/     # deepseek/experience/langsmith_logger/llm_chat/ragflow
+└── README.md
+
+skills/ctf-skills/    # vendored ctf-skills 技能库（Agent Skills 格式，11 类 117 文档）
+scripts/              # 沙箱环境准备：provision_alpine.sh（VM 上检测+自动装 docker/构建镜像）+ Dockerfile.ctf-sandbox（Debian 沙箱）；真跑冒烟 harness：rerun/resume_hackworld.py + run_one_challenge/run_six_categories.py
+design/               # 设计文档（15 份）
 tests/                # 测试
 ```
 
@@ -122,9 +166,9 @@ tests/                # 测试
 
 | 接口 | 交付方 | 本仓库状态 |
 |---|---|---|
-| 任务理解层输出 API | ② 任务理解层 | `TaskUnderstander.understand(raw) → TaskInput` 已接线；本仓提供 `ChallengeUnderstander`（`agent/challenge_intake.py`）：多源摄入 + `CATEGORY_KEYWORDS` 题型判定 → `challenge_type` / `goal_list`；默认 Mock 仍可用 |
-| 技能文档（Skill） | —（③ 自持,原第二组 ① 交付） | 已落地：`agent/skills.py` 加载器 + vendored `skills/ctf-skills`（11 类 ~114 文档）。检索经 `DocStore.search(task)→[(doc_id,text)]` + `load_doc(doc_id)`（契约见 design/contracts.md §1）；命中分类只注册 SKILL.md，子文档经 `get_doc` 按需取 |
-| 执行 Agent | 第二组 ② | `Executor.run(step, ctx) → ExecResult` 接口桩 + `MockExecutor`（step 可带 `skill_id`，ctx 含绑定技能文档索引） |
+| 任务理解层输出 API | ② 任务理解层 | `TaskUnderstander.understand(raw) → TaskInput` 已接线；本仓提供 `ChallengeUnderstander`（`agent/challenge_intake.py`）多源摄入 + `RealTaskUnderstander`（`task_understanding/real_understander.py`）本地 challenge 目录/显式路径解析 → `challenge_type` / `goal_list`；默认 Mock 仍可用 |
+| 技能文档（Skill） | —（③ 自持,原第二组 ① 交付） | 已落地：`agent/skills.py` 加载器 + vendored `skills/ctf-skills`（11 类 118 文档）。检索经 `DocStore.search(task)→[(doc_id,text)]` + `load_doc(doc_id)`（契约见 design/contracts.md §1）；命中分类只注册 SKILL.md，子文档经 `get_doc` 按需取 |
+| 执行 Agent | 第二组 ② | `Executor.run(step, ctx, tool_exec) → ExecResult` 已实现：`MockExecutor` + `RealExecutor`（LLM 工具循环 + `CommandRunner` 沙箱唯一执行）。命令默认经 SSH 到远程 VM 的 Docker（Debian 沙箱镜像 `ctf-sandbox:latest`），容器生命周期与工具依赖由 `SandboxManager`（`sandbox_env/`）接管——每 challenge 持久容器 + 缺失工具自动装进容器；无沙箱绝不回退宿主；`--executor real` 接线见 main.py |
 | 评估 Agent | 第二组 ③ | `Evaluator.review/step_eval/reflect` 接口桩 + `MockEvaluator` |
 | 工具执行 | 第二组 ② | `@tool` 注册 + `call_tool` 已接线，CTF2 工具已实现 |
 | CTF 工具清单(动态申请) | —(③ 自持,原第二组① 交付) | 已落地：`agent/ctf_skill_tools.py` 声明式目录；经 `Engine(tool_catalog=...)` → `ws.tool_catalog` 供 `ToolDirectoryComponent` 渲染**全量菜单**（planner 只读 + executor 申请）+ `apply_tool`/`remove_tool` 动态增删活动集 `ws.tools`（默认空）。纯声明不接执行（executor 调用不在范围）。运行时可经 `agent/checks.py` **只读探测**缺工具/缺沙箱/分类就绪度并写 run.log（apply 时逐工具 + run 起始快照 + 每步按 skill 分类） |
@@ -187,9 +231,32 @@ export DEEPSEEK_API_KEY="sk-..."        # Linux/macOS
   "DEEPSEEK_MODEL": "deepseek-v4-flash",
   "LLM_MODEL_PLANNER": "deepseek-v4-flash",
   "LLM_MODEL_EP": "qwen3-235b-a22b",
+  "EVALUATOR": "smoke",
   "engine": { }
 }
 ```
+
+> 评估器用 **config 开关**（env `EVALUATOR` 优先，其次 model_config.json `EVALUATOR`），`smoke`=SmokeEvaluator（mock，链路冒烟）、`audit`=AgentAuditEvaluator（真实评估，见 `audit/`）；CLI `--evaluator` 仅作旧调用兜底。
+>
+> `smoke` 路径下按 **分角色开关** `EVALUATOR_PLAN` / `EVALUATOR_STEP` / `EVALUATOR_TASK`（env 优先，默认 `mock`）分发 ep/ee/et：`real`=轻量 LLM 评审（单轮 `llm_api.chat` 评 ctx，输出 JSON verdict，见 `agent/evaluator.py`）、`mock`=SmokeEvaluator（ep 按 blueprint 判空、ee 恒 PASS、et 恒 DONE）。`EVALUATOR=audit` 时忽略分角色开关。
+>
+> `EVALUATOR=audit` 走 `audit/` 真实评估：`review`→PlanEvaluator（结构评审）、`step_eval`→StepAcceptanceEvaluator、`reflect`→FlagVerifier+metrics+TaskReflectionEvaluator+经验入库。**正确性权威是平台/_local_verify 的提交判定**（`submission_result` binding 读 `ws.meta["submission"]`），静态 FlagVerifier 只在提交无判定时兜底；动态 flag（Hack World）无规则 → `flag.valid=None` + 已提交 → pass，避免 REPLAN 死循环。`CTF_AUDIT_MODE`（env/`model_config.json`，默认 `offline`）控制 LLM 评审是否启用：`offline`=纯确定性规则，`online`=走 `llm_api`（需配 key）。每次 reflect 的评估派生字段原子写 `runs/<run_id>/audit.json`（不含原始轨迹，轨迹真源是 `events.jsonl`）。
+
+**敏感配置按适配器/沙箱拆分**（与主 config(model_config) 分开，env 优先，各配对其 JSON 兜底；gitignore，不入库）：
+- `config_adaptor.py` + `config_adaptor.json`：平台适配器凭证（`CTF2_SESSION_TOKEN`/`CTF2_API_KEY`/`CTF2_COOKIE`）与 URL（`CTF2_BASE_URL`/`CTF2_SESSION_BASE`/`CTF2_ORIGIN`）；`CTF2_CONFIG_JSON` 指向的外部文件作兼容兜底。
+- `config_sandbox.py` + `config_sandbox.json`：沙箱凭据（`CTF_SSH_HOST`/`CTF_SSH_USER`/`CTF_SSH_PASSWORD`）与沙箱项（backend/镜像/容器模型）。
+
+ctf_platform 平台接入（见 [design/ctf_platform.md](design/ctf_platform.md)）：
+
+```bash
+export CTF2_CONFIG_JSON="D:/pythonProject/ctf2/config.json"   # 兼容兜底(可选);新布局写 config_adaptor.json
+export CTF2_PRACTICE_GROUND_ID="..."   # 靶场 id（详情/下载/提交/拉取/靶机需要）
+export CTF2_AUTO_START_TARGET="true"   # 物化含容器题自动开靶机(host:port 写 metadata.yml target)
+export CTF_STORE_DIR="./data"          # 本地库+缓存根目录（默认 ./data）
+export CTF_ATTACHMENT_CACHE_BYTES="2147483648"   # 附件缓存上限,超限 LRU 淘汰
+```
+
+> 也可直接 `export CTF2_SESSION_TOKEN="..."`（网页登录态 JWT，等价旧 `CTF2_TOKEN`）或写 `config_adaptor.json`。下载走真实 API：详情 → `files[].download_url` CDN 直下（免鉴权），md5 校验落缓存。friendly_id 拉取需先 `challenge-sync` 建索引（详情端点只接受 UUID）。
 
 ### 运行
 
@@ -224,6 +291,11 @@ python tests/smoke_scenarios.py
 | [design/engine.md](design/engine.md) | Engine 状态机 + run/resume + budget + 持久化 |
 | [design/tools.md](design/tools.md) | 工具协议：@tool 装饰器 + lookup + 归一化 |
 | [design/model_config.md](design/model_config.md) | 模型配置 + role_model + token API |
+| [design/config.md](design/config.md) | 配置架构：model_config / config_adaptor / config_sandbox 三模块拆分 + 配对 + 凭证获取截图 |
 | [design/workspace.md](design/workspace.md) | Workspace 持久化布局 + Event + StepResult |
-| [design/ctx.md](design/ctx.md) | 上下文组装：CtxComponent 基类 + CtxAssembler + 8 组件 + 压缩 |
+| [design/ctx.md](design/ctx.md) | 上下文组装：CtxComponent 基类 + CtxAssembler + 10 组件 + 压缩 |
 | [design/testing.md](design/testing.md) | 测试与 Mock 范围 + 职责边界声明 |
+| [design/ctf_platform.md](design/ctf_platform.md) | 平台适配器：ChallengeAdapter 4 能力 + SQLite schema + LRU + CLI + 解耦边界 |
+| [design/sandbox_env.md](design/sandbox_env.md) | 沙箱环境管理器：SandboxBackend/SandboxManager + 容器模型(per_challenge) + 工具依赖/冲突规则 + CLI/env |
+| [design/task_understanding.md](design/task_understanding.md) | 任务理解层：本地 challenge → metadata/attachments/goals/target 结构化输入 |
+| [design/verification.md](design/verification.md) | Flag 验证分层：静态/动态 flag 本地判定（T0/T1/T2 + procedure 重跑） |

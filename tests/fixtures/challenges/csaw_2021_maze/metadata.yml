@@ -1,0 +1,14 @@
+name: maze
+category: rev
+author: Vector 35
+description: |
+  Feel free to take a tour, but good luck finding your way out of this one!
+
+  nc {box} {port}
+
+  Author: Xusheng Li, Vector35
+box: rev.chal.csaw.io
+internal_port: "5000"
+flag_format: "flag{...}"
+files:
+  - maze_public

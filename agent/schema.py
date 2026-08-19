@@ -75,17 +75,47 @@ class GoalEvalDetail:
     reasoning: str = ""
 
 
+@dataclass
+class PlanReviewAuditDetail:
+    """audit 计划评审事件:决策 + 评分 + 问题/建议(富详情,区别于引擎的 OpinionDetail)。"""
+    decision: str = ""
+    score: float = 0.0
+    issues: list[str] = field(default_factory=list)
+    suggestions: list[str] = field(default_factory=list)
+
+
+@dataclass
+class StepEvalAuditDetail:
+    """audit 步骤验收事件:步骤 id + 决策 + 评分 + 推理。"""
+    step_id: str = ""
+    decision: str = ""
+    score: float = 0.0
+    reasoning: str = ""
+
+
+@dataclass
+class ReflectAuditDetail:
+    """audit 任务反思事件:终局决策 + 理由 + flag 校验结果 + 经验落库错误。"""
+    decision: str = ""
+    reason: str = ""
+    flag_valid: bool = False
+    store_error: str | None = None
+
+
 # kind → detail 类型注册表(键值与 EventKind 枚举值一致)
 EVENT_SCHEMA: dict[str, type] = {
-    "replan":       ReplanDetail,
-    "plan_review":  OpinionDetail,
-    "step_eval":    OpinionDetail,
-    "reflect":      OpinionDetail,
-    "scheduling":   OpinionDetail,
-    "step_record":  StepRecordDetail,
-    "use_tool":     ToolCallDetail,
-    "tool_result":  ToolResultDetail,
-    "goal_eval":    GoalEvalDetail,
+    "replan":           ReplanDetail,
+    "plan_review":      OpinionDetail,
+    "step_eval":        OpinionDetail,
+    "reflect":          OpinionDetail,
+    "scheduling":       OpinionDetail,
+    "step_record":      StepRecordDetail,
+    "use_tool":         ToolCallDetail,
+    "tool_result":      ToolResultDetail,
+    "goal_eval":        GoalEvalDetail,
+    "audit_plan_review": PlanReviewAuditDetail,
+    "audit_step_eval":  StepEvalAuditDetail,
+    "audit_reflect":    ReflectAuditDetail,
 }
 
 
@@ -274,6 +304,9 @@ class EventKind(StrEnum):
     USE_TOOL = "use_tool"
     TOOL_RESULT = "tool_result"
     GOAL_EVAL = "goal_eval"
+    AUDIT_PLAN_REVIEW = "audit_plan_review"  # audit 评估器富详情通道(经 event_sink 落 events.jsonl)
+    AUDIT_STEP_EVAL = "audit_step_eval"
+    AUDIT_REFLECT = "audit_reflect"
 
 
 class Role(StrEnum):

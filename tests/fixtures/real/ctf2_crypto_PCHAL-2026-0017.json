@@ -1,0 +1,39 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "CRYPTO",
+  "created_at": "2026-05-28T00:18:05.873203+08:00",
+  "description": "注意：得到的 flag 请包上 flag{} 提交",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T00:18:05.874373+08:00",
+      "file_id": "3580d658-32cd-4636-9066-81fa827354a9",
+      "file_md5": "b48de1c64231d8d100bc1f8c204f1aa3",
+      "file_name": "e072b2d9-73a5-49fe-b50c-54ac6dab310a.zip",
+      "file_size": 483,
+      "file_type": "application/x-zip-compressed",
+      "id": "b46d9365-3dd8-414c-9eda-9b4af3487be4",
+      "is_visible": true,
+      "practice_challenge_id": "afb6516e-0648-4087-962f-f420396d2e06",
+      "updated_at": "2026-05-28T00:18:05.874373+08:00",
+      "path": "e072b2d9-73a5-49fe-b50c-54ac6dab310a.zip"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0017",
+  "id": "afb6516e-0648-4087-962f-f420396d2e06",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "变异凯撒",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 1430,
+  "sort_order": 0,
+  "template_id": "e58ab666-ef28-48de-bafc-40b033a082f8",
+  "translations": null,
+  "updated_at": "2026-08-17T12:57:36.011786+08:00"
+}

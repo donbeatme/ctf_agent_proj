@@ -1,0 +1,39 @@
+{
+  "accepts_file_submission": false,
+  "accepts_ops_check": false,
+  "allow_writeup_submission": false,
+  "allows_multiple_flag_submissions": false,
+  "category": "REVERSE",
+  "created_at": "2026-05-28T00:18:04.185788+08:00",
+  "description": "非常简单的逆向",
+  "difficulty": "Easy",
+  "files": [
+    {
+      "created_at": "2026-05-28T00:18:04.187032+08:00",
+      "file_id": "97fdf807-1f05-484b-82f7-9cb129878ef1",
+      "file_md5": "7d6bf8776a130405f3ac5e4bd09a5cf5",
+      "file_name": "easyre.zip",
+      "file_size": 106807,
+      "file_type": "application/x-zip-compressed",
+      "id": "e2a2ae19-7cdc-45f6-9f77-30afb95487db",
+      "is_visible": true,
+      "practice_challenge_id": "13858171-f3fc-46d3-940e-1682b5cdfc71",
+      "updated_at": "2026-05-28T00:18:04.187032+08:00",
+      "path": "easyre.zip"
+    }
+  ],
+  "friendly_id": "PCHAL-2026-0013",
+  "id": "13858171-f3fc-46d3-940e-1682b5cdfc71",
+  "is_solved": false,
+  "is_visible": true,
+  "max_attempts": 0,
+  "name": "easyre",
+  "points": 1,
+  "practice_ground_id": "b9bbb32f-f186-458f-b90b-12440c0f6aea",
+  "show_writeups": false,
+  "solve_count": 1176,
+  "sort_order": 0,
+  "template_id": "2f175084-9b2a-4e48-8520-f40171c2a7e8",
+  "translations": null,
+  "updated_at": "2026-08-17T10:43:45.013648+08:00"
+}
