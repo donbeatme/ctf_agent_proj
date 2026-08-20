@@ -1,329 +1,182 @@
-# CTF Agent 解题指令台（前端说明）
+# 攻防 Agent 指令台（前端状态）
 
-面向操作者与联调同学：用浏览器完成配置 → 检视能力 → 发布题目 → 观察引擎主循环 → 导出审计交付。  
-本前端对接本仓库 **认知决策主循环**（Plan → Review → DAG → Execute → Step Eval → Reflect）；**执行 / 评估当前多为 Mock 接口桩**，真实沙箱与 Flag 校验由外部组交付后替换。
+面向操作者、演示方和联调同学：当前前端已经从普通 workflow 编排页升级为攻防任务作战台，入口覆盖登录、战情大屏、任务接入、Agent 实时工作区、成果审核、复盘、能力库、模型用量、MCP 工具和用户管理。
 
-| 项 | 说明 |
+> 注意：页面可见文案已统一转换为“攻防任务 / 场景类型 / 任务情报 / 成果审核 / 复盘报告”等表达。`ctf-web`、`challenge_type`、`flag-value`、`/api/flag/verify` 等仍保留为内部协议、DOM id、API 参数或 CSS 类名，不能直接改成中文文案，否则会破坏前后端联动。
+
+| 项 | 当前状态 |
 |---|---|
 | 入口文件 | `web/index.html` · `web/app.js` · `web/styles.css` |
-| 后端网关 | `web_server.py`（`python main.py serve`） |
-| 默认地址 | http://127.0.0.1:8765 |
-| 设计对照 | `design/contracts.md` · `design/engine.md` · `design/signals.md` |
+| 后端网关 | `web_server.py` |
+| 默认地址 | `http://127.0.0.1:8765` |
+| 当前推荐启动 | `.venv/bin/python web_server.py --port 8765` |
+| 静态资源版本 | `20260820-ops-copy` |
+| 页面语境 | 攻防任务、攻防研判、成果审核、证据交付 |
 
 ---
 
-## 30 秒上手
+## 30 秒启动
 
 ```bash
 # 仓库根目录
-python main.py serve --port 8765
-# 浏览器打开 http://127.0.0.1:8765
+.venv/bin/python web_server.py --port 8765
+
+# 浏览器打开
+http://127.0.0.1:8765
 ```
 
-**推荐最短路径（第一次解题）：**
-
-1. **模型与预算** → 填 BASE URL / 模型名 / API Key →「保存配置」  
-2. **任务运行** → 选「题面文本」→「① 解析题型」→「② 确认并启动」  
-3. 同一页下方看 **状态机 / DAG / SignalBus / events / run.log**  
-4. **审计与交付** →「用当前 run」→「生成报告」  
-5. **历史记录** → 回看、续跑或删除
-
-左侧导航可直接跳步；底部「上一步 / 下一步」按 1→7 顺序走完全流程。
+如果使用 `python main.py serve --port 8765`，必须确保当前 Python 环境已安装 `requirements.txt` 里的依赖。当前本地验证使用的是项目 `.venv`。
 
 ---
 
-## 界面总览（7 个模块）
+## 当前页面模块
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  CTF2 Agent · 解题指令台                                      │
-├──────────┬──────────────────────────────────────────────────┤
-│ 1 模型与预算 │  LLM 网关 · 引擎预算只读 · 本机工具探测            │
-│ 2 技能·工具·沙箱 │ 技能库浏览 · 工具声明清单 · 沙箱运行时探测     │
-│ 3 Agent 接口 │  能力地图（wired/stub/reserved）· 角色契约速查   │
-│ 4 经验 RAG │  查询/写回 ExperienceStore（前端预留）            │
-│ 5 任务运行 │  多源发布题目 · 题型判定 · Engine.run 实时观测     │
-│ 6 审计与交付 │  Markdown 报告 · product · Flag/HITL 预留        │
-│ 7 历史记录 │  runs/ 列表 · 详情 · resume · 删除                 │
-└──────────┴──────────────────────────────────────────────────┘
-```
-
-### 状态色含义（页面徽章）
-
-| 徽章 | 含义 |
-|---|---|
-| **已接线** / wired | 前端 + 网关 + 引擎侧已可用 |
-| **声明已接线** / wired_declare | 清单/探测已通，真实执行仍属执行层 |
-| **接口桩** / stub | 契约存在，当前为 Mock/Smoke 实现 |
-| **未接线** / reserved | 设计已声明，引擎未接；API 返回占位 |
-| **前端预留** / frontend_reserved | 技术路线需要，仓库尚无独立契约；仅 UI + 占位 API |
-
-预留接口统一返回形如：`{ "wired": false, "reserved": true, "message": "...", ... }`，便于联调时区分「未实现」与「请求失败」。
-
----
-
-## 模块 1 · 模型与预算
-
-**作用：** 配置 OpenAI 兼容网关，让 Planner 能真正调 LLM；预览引擎 token/步数等预算；在跑题前确认本机工具是否齐备。
-
-### 1.1 LLM 网关
-
-| 控件 | 作用 |
-|---|---|
-| BASE URL | 兼容 `/v1` 的网关地址（如 `http://host:port/v1`） |
-| 模型名称 | 默认 Planner 使用的模型 ID |
-| API Key | 写入 `model_config.json`（已 gitignore）；留空表示沿用已存密钥；界面只显示「已设置/未设置」 |
-| 启用 Planner 工具调用 | 对应 `LLM_ENABLE_TOOLS`。网关不支持 `tool_choice=auto` 时请关闭 |
-| 保存配置 | `POST /api/config`，后续 LLM 调用热读生效 |
-| 重新加载 | `GET /api/config`，从文件/环境变量回填表单 |
-
-环境变量优先于 `model_config.json`。
-
-### 1.2 引擎预算（只读）
-
-展示 `model_config.get_engine_config()`（如最大步数、token 上限等）。本页不直接改预算；需改 `model_config.json` 的 `engine` 段后保存/重载。
-
-### 1.3 环境探测
-
-按钮「探测本机工具」→ `GET /api/env-check` → `SkillEnvProbe.probe_manifest()`。  
-只读统计 available / missing，**不安装依赖**；与一次 run 启动时的 `ENV_CHECK` 信号同源。
-
----
-
-## 模块 2 · 技能 · 工具 · 沙箱
-
-**作用：** 浏览 Planner 会检索的 CTF 技能文档；查看工具声明清单；探测 docker/podman 是否可用（创建沙箱仍属执行层，未接线）。
-
-### 2.1 技能库
-
-| 控件 | 作用 |
-|---|---|
-| 分类筛选 | 按 `ctf-web` / `ctf-pwn` 等过滤 |
-| 搜索 | 按 `doc_id` / 描述模糊过滤 |
-| 列表点击 | `GET /api/skills/:id`，右侧预览 SKILL.md 全文 |
-
-数据源：vendored `skills/ctf-skills`，经 `agent/skills.py` 暴露。Planner 按题面关键词检索分类文档，子文档可经 `get_doc` 按需拉取。
-
-### 2.2 工具清单
-
-`GET /api/tools`：展示 `tool_id`、安装方式、校验方式与 installer 路径。  
-此处是**声明与探测**，不直接执行工具；真实调用由 Executor（执行层②）负责。
-
-### 2.3 沙箱探测
-
-「探测沙箱运行时」→ `GET /api/sandbox`。  
-对 `SANDBOX_CATEGORIES`（如 pwn/reverse/malware）调用 `probe_sandbox`，检测 docker/podman CLI。**创建容器沙箱未接线**，仅作环境就绪检查。
-
----
-
-## 模块 3 · Agent 接口
-
-**作用：** 一眼看清「哪些能力真能用、哪些是桩、哪些只是前端预留」，对照 `design/contracts.md`，避免把 Mock 当成完整解题链路。
-
-### 3.1 能力状态地图
-
-「刷新能力地图」→ `GET /api/capabilities`。每层包含：名称、契约、实现类、status、说明。典型分层：
-
-| 能力层 | 典型状态 | 说明 |
+| 导航 | 页面定位 | 当前状态 |
 |---|---|---|
-| 任务理解 Understander | wired | `ChallengeUnderstander` 多源摄入 + 题型判定 |
-| 规划 Planner | wired | 真 LLM + 技能库检索 |
-| 执行 Executor | stub | 当前 `MockExecutor` |
-| 计划评审 / 步骤验收 / 任务反思 | stub | `SmokeEvaluator` / `MockEvaluator` |
-| 技能库 / 环境探测 / 审计报告 | wired | 前端可直接用 |
-| 工具编排 | wired_declare | 声明已通，执行未接 |
-| 经验 RAG | reserved | 契约已有，引擎未接 `experience_store` |
-| Flag 验证 / HITL | frontend_reserved | 技术路线需要，独立契约未声明 |
-
-### 3.2 角色契约速查
-
-固定四格：Understander / Planner / Executor / Evaluator 当前落地实现。外部组交付真实 Executor/Evaluator 后，**引擎主循环无需改结构**，替换注入即可。
+| 战情总览 | 攻防任务大屏，展示运行槽、队列、完成量、成果待审、正确率、趋势图、场景分布、用量与审核漏斗 | 前端 mock 动态图表，带悬浮提示 |
+| 攻防任务接入 | 文本、JSON、URL、附件、平台任务库、本地任务目录接入；识别场景并派发 Agent | 已接 `/api/challenge/parse`、`/api/challenge/upload`、`/api/challenge/understand`、`/api/platform/*` |
+| Agent 工作区 | 能力角色、状态地图、执行链路、作战角色卡片 | 已接 `/api/capabilities` |
+| 成果审核 | 复盘报告、product、成果口令本地核验/平台提交、审核队列 | 报告/product 已接；成果核验已接平台适配器 |
+| 赛后复盘 | runs 历史、详情、DAG、events、log、关注、续跑、删除 | 已接 `/api/runs/*` |
+| 技能镜像 | 战术卡片、工具矩阵、沙箱矩阵，均按场景类型导航 + 卡片 + 弹窗展示 | 已接 `/api/skills`、`/api/tools`、`/api/sandbox`、`/api/sandbox/runtime` |
+| 战术黑板 | 线索、失败路径、复用打法、人工提示 | 前端展示为主，经验写回仍是预留接口 |
+| 模型用量 | 总览、阶段、模型、场景维度用量展示 | 前端展示为主，后续接真实聚合 |
+| MCP 工具 | 核心工作区、平台桥接、沙箱管理、浏览器、专项工具连接状态 | 前端能力声明 + 详情弹窗 |
+| 用户管理 | 登录/注册演示、队伍资料、偏好设置、主题切换 | 本地演示态，不上传凭据 |
 
 ---
 
-## 模块 4 · 经验 RAG
+## 最近前端改动记录
 
-**作用：** 按 `contracts.md §6 ExperienceStore` 预留「查经验 / 写经验」联调入口。引擎尚未接线，按钮只会拿到 `reserved: true` 占位响应。
+### 视觉和产品形态
 
-### 4.1 查询经验
+- 放弃“按步骤 workflow”心智，改成攻防任务作战台。
+- 登录/注册作为进入系统前置页面，不再放在左侧业务目录中。
+- 左侧导航铺满页面高度，主内容铺满工作区，不再只在页面中间显示内容。
+- 战情总览升级为大屏：折线/柱状/环形/漏斗等图表，带悬浮突出和说明。
+- 技能镜像中的战术卡片、工具矩阵、沙箱矩阵都改为“横向场景导航 + 卡片列表 + 详情弹窗”。
+- 各模块逐步改成卡片、导航、弹窗、状态块组合，减少纯文字堆叠。
+- 可见文案已从“CTF 解题”语境切换为“攻防任务 / 攻防研判”语境。
 
-| 字段 | 作用 |
-|---|---|
-| topics | 逗号分隔主题，如 `SQL注入, 文件上传` |
-| role | `evaluator_plan` / `evaluator_step` / `evaluator_task`（对应 ep/ee/et） |
-| 试查 | `POST /api/experience/query` |
+### 真实能力对接
 
-设计意图：评审/验收/反思前检索历史可执行结论。
-
-### 4.2 写回经验
-
-| 字段 | 作用 |
-|---|---|
-| topic / outcome / summary | 一条经验事件草稿 |
-| 试写 | `POST /api/experience/record` |
-
-设计写回时机：replan、ESCALATED、FAILED 等。当前 `accepted: false`。
-
----
-
-## 模块 5 · 任务运行（核心）
-
-**作用：** 把比赛题变成引擎可跑的 `TaskInput`，启动 `Engine.run`，并实时观测状态机与事件流。
-
-### 5.1 发布题目（多源摄入）
-
-先选来源 Tab，再「① 解析题型」，确认后「② 确认并启动」。
-
-| 来源 | 填什么 | 用途 |
-|---|---|---|
-| **题面文本** | 标题、题面、challenge_id、可选 goal ID | 最快上手；默认示例为 base64 编码题 |
-| **JSON 导入** | CTFd / 平台导出 JSON | 解析 name/title、description、category、files 等 |
-| **目标 URL** | 服务地址 + 可选说明 | Web/远程题，URL 参与题型启发 |
-| **附件上传** | 多文件（建议单文件 &lt; 20MB）+ 可选标题说明 | 上传至 `downloads/uploads/`；扩展名启发题型（如 `.pcap`→Forensics，`.elf`→Pwn） |
-
-**手动覆盖题型：** 可选强制 `ctf-web` / `ctf-pwn` / …；留空则走 `CATEGORY_KEYWORDS` 自动判定。
-
-**两步按钮：**
-
-1. **① 解析题型** → `POST /api/challenge/parse`（附件会先 `POST /api/challenge/upload`）  
-   - 展示主类型、置信度、候选排序、`goal_list`、归一化预览  
-2. **② 确认并启动** → `POST /api/runs`  
-   - 使用解析结果中的 `challenge_type` 等字段启动；改题面后需重新解析（启动按钮会再次禁用）
-
-### 5.2 运行状态（实时观测）
-
-| 区域 | 作用 |
-|---|---|
-| 进行中 / 最近 | 切换关注的 `run_id`；「刷新」重拉列表 |
-| run_id / 状态 / 当前步骤 / tokens | 来自 workspace 快照轮询 |
-| 状态机 pills | PLANNING → … → DONE / FAILED |
-| 停止 | `POST /api/runs/:id/stop` → `request_stop`（仅 live 显示） |
-| 计划 DAG | 步骤 ID、指令、criterion、depends_on、skill、状态 |
-| SignalBus | 运行中总线信号增量（`/signals?after=`） |
-| events.jsonl | 结构化事件时间线（`/events?after=`） |
-| run.log | 文本日志尾部（`/log?tail=`） |
-
-轮询约 900ms；终态后仍可从历史页回看同一套数据。
+- 新增平台桥接区：
+  - `GET /api/platform/status`
+  - `POST /api/platform/sync`
+  - `POST /api/platform/fetch`
+  - `POST /api/platform/target`
+- 新增真实任务理解入口：
+  - `POST /api/challenge/understand`
+  - 当传入 `challenge_dir` 或 `metadata_path` 时走 `RealTaskUnderstander`
+- 新增沙箱运行时状态：
+  - `GET /api/sandbox/runtime`
+  - 展示 SSH/Pi 配置、镜像、工作目录、工具冲突
+- 成果核验不再只是占位：
+  - `POST /api/flag/verify`
+  - 默认本地核验，勾选后才调用平台 submit
+- 修复 `SmokeEvaluator` 导入：
+  - 当前 `SmokeEvaluator` 来自 `agent.evaluator`
+  - `web_server.py` 不再从 `main` 导入它
 
 ---
 
-## 模块 6 · 审计与交付
+## 关键交互说明
 
-**作用：** 把一次 run 的状态 + 事件组装成可交付 Markdown；抽取 PASS 产物；为 Flag 校验与人机审批预留联调入口。
+### 登录 / 注册
 
-### 6.1 审计报告（已接线）
+当前是本地演示登录，不上传凭据。注册按钮第一次点击进入注册态，第二次校验密码后进入系统。
 
-| 控件 | 作用 |
+### 攻防任务接入
+
+支持五类入口：
+
+| 入口 | 说明 |
 |---|---|
-| run_id | 手动粘贴，或「用当前 run」填入任务页正在关注的 ID |
-| 生成报告 | `GET /api/runs/:id/report` → Markdown（目标、DAG、评估摘要、工具轨迹、product） |
-| 查看 product | `GET /api/runs/:id/product` → 仅 PASS 步骤的 `result` |
+| 任务情报文本 | 标题、描述、任务 ID、目标列表 |
+| JSON 导入 | 平台导出 JSON 或通用 JSON |
+| 目标 URL | 远程服务地址和补充说明 |
+| 附件上传 | 多文件上传到 `downloads/uploads/` |
+| 平台任务库 / 本地物化任务 | 通过平台适配器拉取，或直接理解本地任务目录 |
 
-适合复盘、对外交付、对照技术路线「审计交付」。
+派发前必须先识别场景。识别结果会写入内部 `challenge_type` 字段，这是引擎和技能检索协议的一部分，页面文案不会直接展示为“CTF 解题”语境。
 
-### 6.2 Flag 验证（前端预留）
+### 实时作战面板
 
-`POST /api/flag/verify`：提交 `flag` + 可选 `run_id`。  
-仓库无独立 Flag 契约；真实校验设计上落在 Evaluator 步骤验收（ee）。当前返回 `valid: null` 占位。
+派发 Agent 后，会像浏览器子页一样打开一个与“投递攻防任务”并列的任务标签。该面板展示：
 
-### 6.3 人机协同 HITL（前端预留）
+- run_id、状态、当前步骤、tokens
+- 状态机
+- 计划 DAG
+- SignalBus
+- events.jsonl
+- run.log
+- 可解释过程、工具状态和文件工作区示意
 
-| 控件 | 作用 |
-|---|---|
-| 拉取待审 | `GET /api/hitl/pending`（当前 `pending: []`） |
-| decision | approve / reject / replan / manual |
-| 提交决策 | `POST /api/hitl/decide` |
+### 成果审核
 
-引擎仅有 ee **escalate** 判定，尚无人工审批闸门；本页用于对齐技术路线「人机接管」接口形状。
+复盘报告和 product 已接线：
+
+- `GET /api/runs/:id/report`
+- `GET /api/runs/:id/product`
+
+成果提交通道：
+
+- 默认只做本地答案库核验
+- 勾选“真实提交到平台”后才调用平台提交
+- 需要平台适配器凭证已配置，否则会返回配置或鉴权相关错误
 
 ---
 
-## 模块 7 · 历史记录
-
-**作用：** 扫描磁盘 `runs/`，回看任意一次运行，未终态可续跑，终态可删除。
-
-| 操作 | 作用 |
-|---|---|
-| 刷新历史 | `GET /api/runs` |
-| 点击一条 | 加载快照、DAG、events、log |
-| 在任务页关注 | 跳到模块 5 并开始轮询该 run |
-| 续跑 resume | `POST /api/runs/:id/resume` → `Engine.resume`（未终态） |
-| 删除 | `DELETE /api/runs/:id`（**运行中不可删**） |
-
----
-
-## 推荐操作流（按角色）
-
-### A. 首次联调 / Demo
-
-1. 模型与预算：配好网关并保存；可选「探测本机工具」  
-2. Agent 接口：刷新能力地图，确认 Planner=wired、Executor=stub  
-3. 任务运行：用默认 base64 题走「解析 → 启动」  
-4. 审计：生成报告；历史：确认 `runs/` 有记录  
-
-### B. 换真题（Web / 附件题）
-
-1. 任务运行 → URL 或附件 Tab → 解析题型 → 必要时手动覆盖类型  
-2. 技能库页确认对应分类文档存在  
-3. 启动后盯 DAG 与 events；失败看 `fail_reason` 与 run.log  
-4. 需要续跑时在历史页 resume  
-
-### C. 与第二组对接（执行 / 评估 / RAG）
-
-1. Agent 接口看 stub / reserved 列表  
-2. 经验 RAG、Flag、HITL 页用「试*」按钮确认占位契约形状  
-3. 对方实现后：能力地图 status 应变为 wired，预留页去掉 reserved 徽章即可  
-
----
-
-## API 速查（前端实际调用）
+## API 速查
 
 ### 已接线
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET/POST | `/api/config` | 读/写模型配置 |
+| GET/POST | `/api/config` | 读写模型配置 |
 | GET | `/api/env-check` | 本机工具探测 |
-| GET | `/api/skills` · `/api/skills/:id` | 技能列表与正文 |
+| GET | `/api/skills` · `/api/skills/:id` | 能力文档列表与详情 |
 | GET | `/api/tools` | 工具声明清单 |
-| GET | `/api/sandbox` | 沙箱运行时探测 |
-| GET | `/api/capabilities` | 能力地图 |
-| POST | `/api/challenge/parse` | 多源归一化 + 题型判定 |
-| POST | `/api/challenge/upload` | 附件 base64 落盘 |
-| GET/POST | `/api/runs` | 列表 / 启动 |
-| GET | `/api/runs/:id` | 快照 |
-| GET | `/api/runs/:id/log\|events\|signals` | 日志与增量观测 |
-| GET | `/api/runs/:id/report\|product` | 审计报告与产物 |
-| POST | `/api/runs/:id/stop\|resume` | 停止 / 续跑 |
+| GET | `/api/sandbox` | 按场景的沙箱能力探测 |
+| GET | `/api/sandbox/runtime` | 沙箱运行时、镜像、工具冲突 |
+| GET | `/api/platform/status` | 平台配置、索引、缓存状态 |
+| POST | `/api/platform/sync` | 同步平台任务索引 |
+| POST | `/api/platform/fetch` | 拉取、物化并理解平台任务 |
+| POST | `/api/platform/target` | 开关平台靶机/目标环境 |
+| POST | `/api/challenge/parse` | 多源输入归一化和场景识别 |
+| POST | `/api/challenge/understand` | 真实任务目录理解 |
+| POST | `/api/challenge/upload` | 附件落盘 |
+| GET/POST | `/api/runs` | 历史列表 / 启动 run |
+| GET | `/api/runs/:id` | run 快照 |
+| GET | `/api/runs/:id/log` | 文本日志 |
+| GET | `/api/runs/:id/events` | 结构化事件 |
+| GET | `/api/runs/:id/signals` | 运行中信号 |
+| GET | `/api/runs/:id/report` | 复盘报告 |
+| GET | `/api/runs/:id/product` | PASS 步骤产物 |
+| POST | `/api/runs/:id/stop` | 请求停止 |
+| POST | `/api/runs/:id/resume` | 续跑 |
 | DELETE | `/api/runs/:id` | 删除历史 |
+| GET/POST | `/api/flag/verify` | 本地核验 / 平台提交成果口令 |
 
-### 前端预留（占位）
+### 仍是预留或展示态
 
-| 方法 | 路径 | 设计目标 |
-|---|---|---|
-| GET | `/api/experience` | 经验总览占位 |
-| POST | `/api/experience/query` | `ExperienceStore.query` |
-| POST | `/api/experience/record` | `ExperienceStore.record` |
-| GET/POST | `/api/flag/verify` | Flag 校验通道 |
-| GET | `/api/hitl/pending` | 待人工审批队列 |
-| POST | `/api/hitl/decide` | 人工决策回写 |
+| 路径 / 模块 | 当前状态 |
+|---|---|
+| `/api/experience/query` | 返回预留响应，经验库未真正接入 Engine |
+| `/api/experience/record` | 返回预留响应，写回未落库 |
+| `/api/hitl/pending` | 返回预留响应，人工审批队列未接 |
+| `/api/hitl/decide` | 返回预留响应，人工决策未接 |
+| 战术黑板 | 当前以前端卡片展示为主 |
+| 模型用量 | 当前以前端统计展示为主，后续可接真实 runs 聚合 |
 
 ---
 
-## 目录与实现边界
+## 已知边界
 
-```
-web/
-  index.html   # 七步向导结构与表单
-  app.js       # 路由步进、API 调用、轮询与渲染
-  styles.css   # 指令台视觉（含 reserved / wired 徽章）
-  README.md    # 本文档
-web_server.py  # 静态资源 + /api/* 网关；包装 Engine / Workspace / Skills
-```
-
-- **本仓库前端负责：** 配置、检视、摄入、启动、观测、审计、历史。  
-- **不负责：** 真实 Exploit 执行、Docker 沙箱编排、线上 Flag 提交平台对接（预留接口待接）。  
-- 静态页由 `SimpleHTTPRequestHandler` 从 `web/` 目录提供；API 与静态资源同端口。
+- 平台任务同步、拉取、提交依赖 `config_adaptor.json` 或环境变量中的平台登录态 / token。
+- 沙箱运行时探测依赖 `config_sandbox.json` 或环境变量中的 SSH/Pi 配置。
+- 页面文案已攻防化，但内部协议仍沿用原项目字段名，例如 `challenge_id`、`challenge_type`、`flag`。这些字段是后端契约，不是展示文案。
+- 若本地缺依赖，优先使用 `.venv/bin/python` 启动；当前本地已经补装 `PyYAML`。
 
 ---
 
@@ -331,24 +184,9 @@ web_server.py  # 静态资源 + /api/* 网关；包装 Engine / Workspace / Skil
 
 | 现象 | 处理 |
 |---|---|
-| 启动按钮灰色 | 先点「① 解析题型」；改题面后需重新解析 |
-| Planner 报 tool_choice 错误 | 模型页关闭「启用 Planner 工具调用」并保存 |
-| 端口占用 | 换端口：`python main.py serve --port 8766` |
-| 能力地图显示 stub | 正常：Executor/Evaluator 当前为 Mock，仍可跑通主循环 |
-| 经验 / Flag / HITL 返回 reserved | 正常：前端预留；等引擎或第二组实现后替换 |
-| 历史删不掉 | 该 run 仍在 live；先停止或等终态 |
-| 密钥不回显 | 设计如此；只显示是否已设置 |
-
----
-
-## 与主仓库文档的关系
-
-| 文档 | 关系 |
-|---|---|
-| 仓库根 [README.md](../README.md) | 项目总览与 `serve` 启动入口 |
-| [design/contracts.md](../design/contracts.md) | Agent / ExperienceStore 契约（模块 3、4） |
-| [design/engine.md](../design/engine.md) | 状态机与 run/resume（模块 5、7） |
-| [design/signals.md](../design/signals.md) | SignalBus 与 run.log（模块 5） |
-| [design/model_config.md](../design/model_config.md) | 模型与预算（模块 1） |
-
-有疑问时：先看本页「状态色含义」与「能力地图」，再决定是改配置、换 Mock，还是对接第二组真实实现。
+| 点击派发时报 `SmokeEvaluator from main` | 已修复；确认服务已重启，`web_server.py` 应从 `agent.evaluator` 导入 |
+| 启动按钮灰色 | 先点击“识别攻防任务”或通过平台/本地任务理解生成识别结果 |
+| 平台显示未配置 | 配置 `CTF2_SESSION_TOKEN` / `CTF2_COOKIE` / `CTF2_API_KEY` 或 `config_adaptor.json` |
+| 沙箱显示未配置 | 配置 `CTF_SSH_HOST` 等沙箱参数或 `config_sandbox.json` |
+| 成果提交失败 | 先确认平台状态已配置；默认本地核验不会真实提交 |
+| 页面仍显示旧文案 | 强刷新浏览器；当前资源版本为 `20260820-ops-copy` |

@@ -264,11 +264,11 @@ export CTF_ATTACHMENT_CACHE_BYTES="2147483648"   # 附件缓存上限,超限 LRU
 # 冒烟测试（真实 Planner + mock 执行/评估）
 python main.py run-task
 
-# 指令台前端（模型/技能沙箱/Agent 地图/经验 RAG/任务/审计交付/历史）
-python main.py serve --port 8765
+# 指令台前端（攻防作战台：登录、战情大屏、任务接入、Agent 工作区、成果审核、复盘、能力库、MCP、用户管理）
+.venv/bin/python web_server.py --port 8765
 # 浏览器打开 http://127.0.0.1:8765
-# 操作手册与模块说明见 web/README.md
-# 能力地图 GET /api/capabilities；未接线接口返回 reserved 占位
+# 当前前端状态、模块说明、API 速查见 web/README.md
+# 能力地图 GET /api/capabilities；平台桥接 GET /api/platform/status；沙箱运行时 GET /api/sandbox/runtime
 
 # 全量测试
 python -m pytest tests/ -x -q
@@ -283,7 +283,7 @@ python tests/smoke_scenarios.py
 
 | 文档 | 内容 |
 |---|---|
-| [web/README.md](web/README.md) | 解题指令台：启动、七模块操作、子功能说明、API 速查 |
+| [web/README.md](web/README.md) | 攻防 Agent 指令台：当前前端状态、十模块说明、平台/沙箱/成果审核对接、API 速查 |
 | [design/dag.md](design/dag.md) | DAG 数据结构：Step/Blueprint/Patch + 状态机 + 补丁合并 |
 | [design/contracts.md](design/contracts.md) | Agent 接口契约：Planner/Executor/Evaluator |
 | [design/schema.md](design/schema.md) | 类型系统：枚举、事件协议、Pydantic 模型 |
