@@ -49,6 +49,122 @@ def _tools():
     return _catalog
 
 
+def _platform_adapter():
+    from ctf_platform.config import StoreSettings
+    from ctf_platform.ctf2 import Ctf2Adapter
+
+    return Ctf2Adapter(StoreSettings.from_env())
+
+
+def _challenge_count(store) -> int:
+    row = store.conn.execute("SELECT COUNT(*) AS n FROM challenges").fetchone()
+    return int(row["n"] if row and "n" in row.keys() else 0)
+
+
+def _platform_status() -> dict:
+    from ctf_platform.config import StoreSettings
+
+    settings = StoreSettings.from_env()
+    adapter = _platform_adapter()
+    recent = adapter.store.query_challenges(limit=12)
+    return {
+        "configured": bool(settings.ctf2_session_token or settings.ctf2_cookie),
+        "api_key_set": bool(settings.ctf2_api_key),
+        "base_url": settings.ctf2_base_url,
+        "origin": settings.ctf2_origin,
+        "practice_ground_id": settings.ctf2_practice_ground_id,
+        "auto_start_target": settings.ctf2_auto_start_target,
+        "store_dir": str(settings.store_dir),
+        "challenges_dir": str(settings.challenges_dir),
+        "challenge_count": _challenge_count(adapter.store),
+        "cache": adapter.cache_stats(),
+        "recent": recent,
+    }
+
+
+def _understand_payload(raw: dict) -> dict:
+    from task_understanding.real_understander import RealTaskUnderstander
+
+    task_input = RealTaskUnderstander().understand(raw)
+    task = jsonable(task_input.raw_content)
+    goals = jsonable(task_input.goal_list)
+    return {
+        "task": task,
+        "goal_list": goals,
+        "goals_preview": [
+            (g.get("id") if isinstance(g, dict) else getattr(g, "id", str(g)))
+            for g in goals
+        ],
+        "classification": {
+            "primary": task.get("challenge_type"),
+            "label": task.get("challenge_type_label"),
+            "confidence": task.get("type_confidence"),
+            "ranked": [
+                {
+                    "category": s.get("category"),
+                    "label": s.get("label"),
+                    "score": s.get("score"),
+                    "evidence": s.get("evidence") or [],
+                }
+                for s in (task.get("type_scores") or [])
+            ],
+        },
+        "source": "RealTaskUnderstander",
+    }
+
+
+def _platform_fetch(body: dict) -> dict:
+    adapter = _platform_adapter()
+    source = body.get("source")
+    if source is None:
+        source = body.get("url") or body.get("challenge_id") or body.get("friendly_id")
+    if isinstance(source, str):
+        text = source.strip()
+        if text.startswith("{") or text.startswith("["):
+            source = json.loads(text)
+        elif Path(text).exists():
+            source = json.loads(Path(text).read_text(encoding="utf-8"))
+    dest = body.get("dest_dir") or body.get("dest")
+    challenge_dir = adapter.ingest(source, dest_dir=dest)
+    understood = _understand_payload({"challenge_dir": str(challenge_dir)})
+    return {
+        "ok": True,
+        "challenge_dir": str(challenge_dir),
+        "platform": adapter.platform,
+        "understood": understood,
+        "status": _platform_status(),
+    }
+
+
+def _sandbox_runtime(probe: bool = False) -> dict:
+    from sandbox_env.config import SandboxSettings
+    from sandbox_env.tools import ToolManager
+
+    settings = SandboxSettings.from_env()
+    out = {
+        "configured": settings.ssh_configured,
+        "backend": "ssh" if settings.ssh_configured else "local/unconfigured",
+        "host": settings.ssh_host,
+        "user": settings.ssh_user,
+        "image": settings.image,
+        "workdir": settings.ssh_workdir,
+        "container_model": settings.container_model,
+        "install_auto": settings.install_auto,
+        "keep_container": settings.keep_container,
+        "conflicts": ToolManager().tool_conflicts(),
+    }
+    if probe:
+        try:
+            from sandbox_env.manager import SandboxManager
+            manager = SandboxManager(settings)
+            out["ready"] = manager.backend.is_ready()
+            out["session_key"] = manager.session_key()
+        except Exception as exc:
+            out["ready"] = False
+            out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
 def jsonable(obj, *, depth=0, limit=8000):
     if depth > 8:
         return str(obj)[:limit]
@@ -197,10 +313,10 @@ def _read_log(run_id: str, tail: int = 200) -> str:
 def _make_agents(ws):
     from agent.challenge_intake import ChallengeUnderstander
     from agent.ctf_skill_tools import CtfSkillToolCatalog
+    from agent.evaluator import SmokeEvaluator
     from agent.executor import MockExecutor
     from agent.planner import Planner
     from agent.skills import CtfSkillsDocStore
-    from main import SmokeEvaluator
 
     planner = Planner(workspace=ws, docs=CtfSkillsDocStore())
     executor = MockExecutor(observation="(mock) 执行完成")
@@ -313,8 +429,8 @@ def _capabilities() -> dict:
                 "name": "任务理解层",
                 "contract": "TaskUnderstander.understand(raw)→TaskInput",
                 "status": "wired",
-                "impl": "ChallengeUnderstander / MockTaskUnderstander",
-                "note": "多源摄入+题型判定已落地;完整多模态(图片OCR等)仍可扩展",
+                "impl": "ChallengeUnderstander + RealTaskUnderstander",
+                "note": "文本/JSON/附件启发识别与本地 challenge_dir 真实元数据解析均已接入前端",
             },
             {
                 "id": "planner",
@@ -328,9 +444,9 @@ def _capabilities() -> dict:
                 "id": "executor",
                 "name": "执行 Agent",
                 "contract": "Executor.run(step, ctx, tool_exec=None)→ExecResult",
-                "status": "stub",
-                "impl": "MockExecutor",
-                "note": "第二组② 真实执行/Docker 沙箱未接入;接口已收口 tool_exec",
+                "status": "wired_declare",
+                "impl": "MockExecutor / RealExecutor + CommandRunner",
+                "note": "真实执行器已在仓库实现;Web 端默认保守使用 Mock,后续可按任务显式切换到沙箱执行",
             },
             {
                 "id": "evaluator_plan",
@@ -344,9 +460,9 @@ def _capabilities() -> dict:
                 "id": "evaluator_step",
                 "name": "步骤验收 ee",
                 "contract": "Evaluator.step_eval / eval_goals",
-                "status": "stub",
-                "impl": "SmokeEvaluator / MockEvaluator",
-                "note": "真实 Flag 校验逻辑未实现",
+                "status": "wired_declare",
+                "impl": "SmokeEvaluator + ctf_platform submit/local_check",
+                "note": "前端 Flag 审核已对接本地答案库与平台 submit;Engine 内 ee 仍可继续深化",
             },
             {
                 "id": "evaluator_task",
@@ -355,6 +471,14 @@ def _capabilities() -> dict:
                 "status": "stub",
                 "impl": "SmokeEvaluator / MockEvaluator",
                 "note": "终局 DONE/REPLAN",
+            },
+            {
+                "id": "platform",
+                "name": "CTF 平台适配",
+                "contract": "ChallengeAdapter.ingest/sync/submit/start_target",
+                "status": "wired",
+                "impl": "ctf_platform.Ctf2Adapter + ChallengeStore",
+                "note": "前端已接 /api/platform/status、fetch、sync、target 与 /api/flag/verify",
             },
             {
                 "id": "skills",
@@ -375,10 +499,10 @@ def _capabilities() -> dict:
             {
                 "id": "env_check",
                 "name": "环境/沙箱探测",
-                "contract": "SkillEnvProbe + Signal.ENV_CHECK",
+                "contract": "SkillEnvProbe + sandbox_env.SandboxManager",
                 "status": "wired",
-                "impl": "agent/checks.py",
-                "note": "只读 which/find_spec + docker/podman 探测",
+                "impl": "agent/checks.py + sandbox_env/*",
+                "note": "只读工具探测、SSH/Pi 沙箱配置状态、工具冲突检测已接入",
             },
             {
                 "id": "experience",
@@ -391,10 +515,10 @@ def _capabilities() -> dict:
             {
                 "id": "flag_verify",
                 "name": "Flag 验证",
-                "contract": "未在仓库声明独立 API",
-                "status": "frontend_reserved",
-                "impl": None,
-                "note": "技术路线要求;前端预留 /api/flag/verify",
+                "contract": "POST /api/flag/verify → local_check | platform_submit",
+                "status": "wired",
+                "impl": "ChallengeAdapter.get_flag/submit",
+                "note": "默认本地核验,勾选真实提交后才向平台提交",
             },
             {
                 "id": "hitl",
@@ -613,6 +737,17 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(_capabilities())
         if path == "/api/sandbox":
             return self._json(_sandbox_status())
+        if path == "/api/sandbox/runtime":
+            probe = (q.get("probe") or ["0"])[0] in ("1", "true", "yes")
+            try:
+                return self._json(_sandbox_runtime(probe=probe))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+        if path == "/api/platform/status":
+            try:
+                return self._json(_platform_status())
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
         if path == "/api/experience":
             return self._json(_reserved(
                 "/api/experience",
@@ -692,6 +827,8 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/challenge/parse":
             from agent.challenge_intake import normalize_sources, parse_challenge
             try:
+                if body.get("challenge_dir") or body.get("metadata_path"):
+                    return self._json(_understand_payload(body))
                 raw = normalize_sources(
                     title=body.get("title") or "",
                     description=body.get("description") or "",
@@ -707,6 +844,37 @@ class Handler(SimpleHTTPRequestHandler):
                     raw,
                     category_override=body.get("category_override") or body.get("challenge_type"),
                 ))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/challenge/understand":
+            try:
+                return self._json(_understand_payload(body))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/platform/fetch":
+            try:
+                return self._json(_platform_fetch(body))
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/platform/sync":
+            try:
+                adapter = _platform_adapter()
+                summary = adapter.sync_challenges(body.get("practice_ground_id"))
+                return self._json({"ok": True, "summary": summary, "status": _platform_status()})
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+        if path == "/api/platform/target":
+            try:
+                adapter = _platform_adapter()
+                challenge_id = body.get("challenge_id") or body.get("id")
+                if not challenge_id:
+                    return self._json({"error": "缺少 challenge_id"}, 400)
+                action = body.get("action") or "start"
+                if action == "stop":
+                    data = adapter.stop_target(challenge_id)
+                else:
+                    data = adapter.start_target(challenge_id)
+                return self._json({"ok": True, "challenge_id": challenge_id, "action": action, "target": data})
             except Exception as exc:
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/challenge/upload":
@@ -788,13 +956,48 @@ class Handler(SimpleHTTPRequestHandler):
                 event=body.get("event") or body,
             ))
         if path == "/api/flag/verify":
-            return self._json(_reserved(
-                "POST /api/flag/verify",
-                "Flag 验证(未声明契约)",
-                flag=body.get("flag"),
-                run_id=body.get("run_id"),
-                valid=None,
-            ))
+            try:
+                adapter = _platform_adapter()
+                challenge_id = body.get("challenge_id") or body.get("id")
+                flag = (body.get("flag") or "").strip()
+                if not flag:
+                    return self._json({"error": "缺少 flag"}, 400)
+                if not challenge_id:
+                    run_id = body.get("run_id")
+                    snap = _snapshot_from_disk(run_id) if run_id else None
+                    task = (snap or {}).get("task") or {}
+                    challenge_id = task.get("id") or task.get("challenge_id") or task.get("task_id")
+                if not challenge_id:
+                    return self._json({"error": "缺少 challenge_id；可填写平台题目 ID 或关联 run_id"}, 400)
+                known = adapter.get_flag(challenge_id)
+                real_submit = bool(body.get("real_submit"))
+                if real_submit:
+                    result = adapter.submit(challenge_id, flag)
+                    return self._json({
+                        "wired": True,
+                        "mode": "platform_submit",
+                        "challenge_id": challenge_id,
+                        "flag": flag,
+                        "ok": result.ok,
+                        "correct": result.correct,
+                        "message": result.message,
+                        "known_local_flag": bool(known),
+                    })
+                correct = None
+                if known and known.get("flag"):
+                    correct = known["flag"] == flag
+                return self._json({
+                    "wired": True,
+                    "mode": "local_check",
+                    "challenge_id": challenge_id,
+                    "flag": flag,
+                    "correct": correct,
+                    "known_local_flag": bool(known),
+                    "message": "默认未提交到平台；勾选真实提交后才调用 CTF 平台 submit。",
+                    "local_record": known,
+                })
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
         if path == "/api/hitl/decide":
             return self._json(_reserved(
                 "POST /api/hitl/decide",
