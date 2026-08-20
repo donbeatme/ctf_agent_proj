@@ -13,7 +13,29 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from attachments import att
+try:
+    from attachments import att
+except ModuleNotFoundError:
+    def att(path: str):
+        root = Path(path)
+        artifacts = []
+        if not root.exists():
+            return artifacts
+        for item in root.rglob("*"):
+            if item.is_file():
+                artifacts.append({
+                    "text": "",
+                    "images": [],
+                    "audio": [],
+                    "video": [],
+                    "meta": {
+                        "source": str(item.relative_to(root)),
+                        "mime": mimetypes.guess_type(str(item))[0],
+                        "size": item.stat().st_size,
+                        "loader": "fallback",
+                    },
+                })
+        return artifacts
 
 from agent.schema import Goal, TaskInput
 from agent.understander import TaskUnderstander
