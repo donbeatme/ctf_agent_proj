@@ -1,0 +1,20 @@
+id: reverse-sample-restore
+name: 逆向样本算法还原
+category: reverse
+scene: 逆向分析
+input_type:
+  - text
+  - binary
+recommended_tools:
+  - file
+  - strings
+  - ghidra
+  - radare2
+  - angr
+expected_outputs:
+  - 样本基础画像
+  - 关键函数定位
+  - 算法还原说明
+  - 成果审核摘要
+sandbox_image: ops-pi-reverse:0.1.0
+status: tested

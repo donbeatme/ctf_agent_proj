@@ -1,0 +1,19 @@
+id: web-login-review
+name: Web 登录接口风险研判
+category: web
+scene: Web 安全
+input_type:
+  - text
+  - url
+recommended_tools:
+  - curl
+  - httpx
+  - sqlmap
+  - browser-devtools
+expected_outputs:
+  - 接口入口清单
+  - 参数与认证风险分析
+  - 可复核验证步骤
+  - 成果审核摘要
+sandbox_image: ops-pi-web:0.1.0
+status: tested

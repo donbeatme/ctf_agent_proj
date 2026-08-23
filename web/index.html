@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>攻防 Agent 指令台</title>
-    <link rel="stylesheet" href="/styles.css?v=20260820-ops-copy">
+    <link rel="stylesheet" href="/styles.css?v=20260823-core-flow">
   </head>
   <body>
     <section class="auth-gate" id="auth-gate">
@@ -110,11 +110,11 @@
                 <h2 class="step-title">战情总览</h2>
                 <p class="step-desc">对标攻防智能体参考系统的系统概览：在线任务进度、单任务独立可销毁 Pi 沙箱、专项镜像、模型连接、执行链路和审核状态一屏可见。</p>
                 <div class="mission-grid">
-                  <article class="metric-card hot" data-tip="当前占用的攻防研判槽位 / 最大并发槽位；每个运行任务绑定独立 Pi 沙箱。"><span>运行中任务</span><strong id="dash-running">3 / 5</strong><small>Pi 沙箱容量：单任务独立容器，结束后可销毁</small></article>
-                  <article class="metric-card" data-tip="排队任务通常在等待镜像、模型配额、人工审核或 Worker 空闲。"><span>排队中</span><strong id="dash-queued">4</strong><small>等待镜像拉取、模型配额或 Worker 空闲</small></article>
-                  <article class="metric-card" data-tip="已完成任务会归档事件、证据、产物和 复盘报告，用于赛后复盘。"><span>已完成</span><strong id="dash-done">27</strong><small>成功任务会自动归档证据与 REPORT</small></article>
-                  <article class="metric-card warn" data-tip="Agent 命中疑似口令后不会直接提交，会进入证据审查队列。"><span>成果待审</span><strong id="dash-review">2</strong><small>命中候选成果后进入人工/自动审核</small></article>
-                  <article class="metric-card hot" data-tip="按提交通过数 / 总提交数估算，Mock 数据会随时间窗口动态刷新。"><span>正确率</span><strong id="dash-accuracy">81%</strong><small>近 7 天提交通过率与复盘修正后统计</small></article>
+                  <article class="metric-card hot" data-tip-key="running" data-tip="当前占用的攻防研判槽位 / 最大并发槽位；每个运行任务绑定独立 Pi 沙箱。"><span>运行中任务</span><strong id="dash-running">3 / 5</strong><small>Pi 沙箱容量：单任务独立容器，结束后可销毁</small></article>
+                  <article class="metric-card" data-tip-key="queued" data-tip="排队任务通常在等待镜像、模型配额、人工审核或 Worker 空闲。"><span>排队中</span><strong id="dash-queued">4</strong><small>等待镜像拉取、模型配额或 Worker 空闲</small></article>
+                  <article class="metric-card" data-tip-key="done" data-tip="已完成任务会归档事件、证据、产物和 复盘报告，用于赛后复盘。"><span>已完成</span><strong id="dash-done">27</strong><small>成功任务会自动归档证据与 REPORT</small></article>
+                  <article class="metric-card warn" data-tip-key="review" data-tip="Agent 命中疑似口令后不会直接提交，会进入证据审查队列。"><span>成果待审</span><strong id="dash-review">2</strong><small>命中候选成果后进入人工/自动审核</small></article>
+                  <article class="metric-card hot" data-tip-key="accuracy" data-tip="按提交通过数 / 总提交数估算，Mock 数据会随时间窗口动态刷新。"><span>正确率</span><strong id="dash-accuracy">81%</strong><small>近 7 天提交通过率与复盘修正后统计</small></article>
                 </div>
               </div>
               <section class="panel command-screen-panel">
@@ -131,29 +131,29 @@
                   </div>
                 </div>
                 <div class="bigscreen-grid">
-                  <article class="chart-panel chart-wide" data-tip="绿色为已解出任务，琥珀色为总尝试量；用于判断团队吞吐是否稳定。">
+                  <article class="chart-panel chart-wide" data-tip-key="throughput" data-tip="绿色为已解出任务，琥珀色为总尝试量；用于判断团队吞吐是否稳定。">
                     <div class="chart-head"><span>攻防研判吞吐趋势</span><strong id="chart-throughput-label">近 7 天</strong></div>
                     <canvas id="chart-throughput" width="900" height="260"></canvas>
                   </article>
-                  <article class="chart-panel" data-tip="展示当前时间窗口内各攻防场景占比，用于观察能力覆盖和任务偏科。">
+                  <article class="chart-panel" data-tip-key="category" data-tip="展示当前时间窗口内各攻防场景占比，用于观察能力覆盖和任务偏科。">
                     <div class="chart-head"><span>场景类型分布</span><strong>Category</strong></div>
                     <canvas id="chart-category" width="420" height="260"></canvas>
                   </article>
-                  <article class="chart-panel" data-tip="柱状为提交量，红色折线为正确率；适合观察爆破式尝试是否过多。">
+                  <article class="chart-panel" data-tip-key="accuracy-chart" data-tip="柱状为提交量，红色折线为正确率；适合观察候选成果质量是否稳定。">
                     <div class="chart-head"><span>正确率与提交量</span><strong>Accuracy</strong></div>
                     <canvas id="chart-accuracy" width="420" height="260"></canvas>
                   </article>
-                  <article class="chart-panel chart-wide" data-tip="绿色趋势表示模型 token 使用，琥珀趋势表示 Pi 沙箱占用。">
+                  <article class="chart-panel chart-wide" data-tip-key="usage" data-tip="绿色趋势表示模型 token 使用，琥珀趋势表示 Pi 沙箱占用。">
                     <div class="chart-head"><span>模型与沙箱使用</span><strong>Tokens / Pi Sandbox</strong></div>
                     <canvas id="chart-usage" width="900" height="260"></canvas>
                   </article>
-                  <article class="chart-panel" data-tip="从候选口令到证据完整、审核通过、重规划的转化漏斗。">
+                  <article class="chart-panel" data-tip-key="funnel" data-tip="从候选口令到证据完整、审核通过、重规划的转化漏斗。">
                     <div class="chart-head"><span>审核漏斗</span><strong>Evidence Review</strong></div>
                     <div class="funnel-board">
-                      <div style="--w: 92%" data-tip="Agent 从输出、命令结果、页面响应中提取的疑似口令。"><span>候选成果</span><strong id="funnel-candidate">18</strong></div>
-                      <div style="--w: 72%" data-tip="候选口令已绑定来源步骤、工具命令、证据片段。"><span>证据完整</span><strong id="funnel-evidence">13</strong></div>
-                      <div style="--w: 58%" data-tip="审核通过后进入提交与复盘报告归档。"><span>审核通过</span><strong id="funnel-approved">11</strong></div>
-                      <div style="--w: 18%" data-tip="证据不足或误判时触发 Planner 重新规划。"><span>重规划</span><strong id="funnel-replan">3</strong></div>
+                      <div style="--w: 92%" data-tip-key="funnel-candidate" data-tip="Agent 从输出、命令结果、页面响应中提取的疑似口令。"><span>候选成果</span><strong id="funnel-candidate">18</strong></div>
+                      <div style="--w: 72%" data-tip-key="funnel-evidence" data-tip="候选口令已绑定来源步骤、工具命令、证据片段。"><span>证据完整</span><strong id="funnel-evidence">13</strong></div>
+                      <div style="--w: 58%" data-tip-key="funnel-approved" data-tip="审核通过后进入提交与复盘报告归档。"><span>审核通过</span><strong id="funnel-approved">11</strong></div>
+                      <div style="--w: 18%" data-tip-key="funnel-replan" data-tip="证据不足或误判时触发 Planner 重新规划。"><span>重规划</span><strong id="funnel-replan">3</strong></div>
                     </div>
                   </article>
                 </div>
@@ -171,8 +171,8 @@
                   </div>
                   <div class="sandbox-list">
                     <div><strong>web-pi-001</strong><span class="state-pill neutral">空闲</span><small>ops-pi-web:0.1.0 · Nmap / SQLMap / Gobuster</small></div>
-                    <div><strong>crypto-pi-001</strong><span class="state-pill neutral">空闲</span><small>ops-pi-crypto:0.1.0 · SymPy / Z3 / PyCryptodome</small></div>
-                    <div><strong>pwn-pi-001</strong><span class="state-pill neutral">空闲</span><small>ops-pi-pwn:0.1.0 · GDB / QEMU / Pwntools</small></div>
+                    <div><strong>crypto-pi-001</strong><span class="state-pill neutral">空闲</span><small>密码安全镜像 · SymPy / Z3 / PyCryptodome</small></div>
+                    <div><strong>binary-pi-001</strong><span class="state-pill neutral">空闲</span><small>二进制攻防镜像 · GDB / QEMU / Pwntools</small></div>
                   </div>
                 </div>
               </section>
@@ -210,7 +210,7 @@
                 <h2>执行链路</h2>
                 <div class="pipeline">
                   <div><span>1</span><strong>攻防任务接入</strong><small>任务情报/附件/URL/JSON</small></div>
-                  <div><span>2</span><strong>场景类型识别</strong><small>ChallengeUnderstander</small></div>
+                  <div><span>2</span><strong>场景类型识别</strong><small>任务理解器</small></div>
                   <div><span>3</span><strong>Pi 沙箱</strong><small>按场景类型挂载镜像</small></div>
                   <div><span>4</span><strong>Agent 思考</strong><small>计划、工具、证据</small></div>
                   <div><span>5</span><strong>成果审核</strong><small>提交前复核</small></div>
@@ -236,7 +236,7 @@
               <div class="step-heading">
                 <p class="section-kicker">Arsenal</p>
                 <h2 class="step-title">技能军火库</h2>
-                <p class="step-desc">把 Web、Pwn、Crypto、Reverse、Forensics、OSINT 等能力做成可检索战术库。比赛中不是让用户“配置技能”，而是让 Agent 快速调用对应打法、工具与沙箱能力。</p>
+                <p class="step-desc">把 Web 安全、二进制攻防、密码安全、逆向分析、取证分析、情报研判等能力做成可检索战术库。比赛中不是让用户“配置技能”，而是让 Agent 快速调用对应打法、工具与沙箱能力。</p>
               </div>
               <section class="panel skills-doc-panel">
                 <div class="skills-library-head">
@@ -479,7 +479,7 @@
 
             <div class="wizard-step" data-step="run" id="step-run">
               <div class="step-heading">
-                <p class="section-kicker">Challenge Intake</p>
+                <p class="section-kicker">Ops Intake</p>
                 <h2 class="step-title">攻防任务接入</h2>
                 <p class="step-desc">队员把任务情报、平台 JSON、目标 URL、附件包丢进来，系统自动识别场景类型、生成目标、派发 Agent。这里是比赛现场最核心的入口。</p>
               </div>
@@ -502,6 +502,14 @@
                   <button type="button" class="source-tab" data-src="url">目标 URL</button>
                   <button type="button" class="source-tab" data-src="files">附件上传</button>
                 </div>
+                <div class="sample-task-bar" id="sample-task-bar" aria-label="快速样例">
+                  <span>快速样例</span>
+                  <button type="button" data-sample="web">Web 安全</button>
+                  <button type="button" data-sample="crypto">密码安全</button>
+                  <button type="button" data-sample="binary">二进制攻防</button>
+                  <button type="button" data-sample="reverse">逆向分析</button>
+                  <button type="button" data-sample="forensics">取证分析</button>
+                </div>
 
                 <section class="platform-ingest-panel">
                   <div class="arsenal-panel-head">
@@ -517,19 +525,19 @@
                   </div>
                   <div class="platform-status-grid">
                     <div><span>平台连接</span><strong id="platform-config-status">未检测</strong><small id="platform-base-url">PLATFORM_SESSION_BASE</small></div>
-                    <div><span>任务库索引</span><strong id="platform-challenge-count">0</strong><small id="platform-store-dir">ChallengeStore</small></div>
+                    <div><span>任务库索引</span><strong id="platform-challenge-count">0</strong><small id="platform-store-dir">本地任务库</small></div>
                     <div><span>附件缓存</span><strong id="platform-cache-size">0 B</strong><small id="platform-cache-count">0 files</small></div>
                     <div><span>沙箱运行时</span><strong id="platform-sandbox-status">未检测</strong><small id="platform-sandbox-image">SANDBOX_IMAGE</small></div>
                   </div>
                   <div class="platform-action-grid">
                     <label>平台任务 URL / friendly_id / JSON / 本地 JSON 路径
-                      <input id="platform-source" type="text" placeholder="https://... / web-100 / { ... } / /data/challenges/demo.json" autocomplete="off">
+                      <input id="platform-source" type="text" placeholder="https://... / web-100 / { ... } / /data/tasks/demo.json" autocomplete="off">
                     </label>
                     <label>物化目录（可选）
-                      <input id="platform-dest" type="text" placeholder="默认写入 PLATFORM_STORE_DIR/challenges/..." autocomplete="off">
+                      <input id="platform-dest" type="text" placeholder="默认写入 PLATFORM_STORE_DIR/tasks/..." autocomplete="off">
                     </label>
-                    <label>本地 challenge_dir / metadata.yml
-                      <input id="local-challenge-dir" type="text" placeholder="/Users/.../data/challenges/easy_rsa 或 metadata.yml" autocomplete="off">
+                    <label>本地任务目录 / metadata.yml
+                      <input id="local-challenge-dir" type="text" placeholder="/Users/.../data/tasks/easy_rsa 或 metadata.yml" autocomplete="off">
                     </label>
                   </div>
                   <div class="row">
@@ -545,9 +553,9 @@
                   <label>任务情报
                     <textarea id="task-desc" rows="5">给定一段文本，base64 编码后作为成果口令提交。</textarea>
                   </label>
-                  <label>challenge_id<input id="task-cid" type="text" value="c-ui" autocomplete="off"></label>
+                  <label>任务 ID / 平台编号<input id="task-cid" type="text" value="task-ui" autocomplete="off"></label>
                   <label>额外目标 ID（可选，逗号分隔）
-                    <input id="task-goals" type="text" placeholder="默认自动生成 find_口令 / solve_*" autocomplete="off">
+                    <input id="task-goals" type="text" placeholder="默认自动生成 obtain_proof / verify_target" autocomplete="off">
                   </label>
                 </div>
 
@@ -560,7 +568,7 @@
 
                 <div class="source-pane" data-src="url">
                   <label>目标地址（Web / 远程服务）
-                    <input id="task-url" type="url" placeholder="http://challenge.example:8080" autocomplete="off">
+                    <input id="task-url" type="url" placeholder="http://target.example:8080" autocomplete="off">
                   </label>
                   <label>补充说明（可选）
                     <textarea id="task-url-desc" rows="3" placeholder="登录框存在 SQL 注入…"></textarea>
@@ -572,7 +580,7 @@
                     <input id="task-files" type="file" multiple>
                   </label>
                   <ul id="task-file-list" class="attachment-list"></ul>
-                  <p class="hint" id="upload-status">扩展名会参与场景类型启发（如 .pcap→Forensics，.elf→Pwn）。</p>
+                  <p class="hint" id="upload-status">扩展名会参与场景类型启发（如 .pcap→取证分析，.elf→二进制攻防）。</p>
                   <label>附件任务标题（可选）<input id="task-file-title" type="text" placeholder="附件任务" autocomplete="off"></label>
                   <label>附件说明（可选）<textarea id="task-file-desc" rows="3" placeholder="从比赛平台下载的附件包"></textarea></label>
                 </div>
@@ -580,15 +588,15 @@
                 <label>手动覆盖场景类型（可选，覆盖自动判定）
                   <select id="task-type-override">
                     <option value="">自动判定</option>
-                    <option value="ctf-web">Web</option>
-                    <option value="ctf-pwn">Pwn</option>
-                    <option value="ctf-crypto">Crypto</option>
-                    <option value="ctf-reverse">Reverse</option>
-                    <option value="ctf-forensics">Forensics</option>
-                    <option value="ctf-osint">OSINT</option>
-                    <option value="ctf-malware">Malware</option>
-                    <option value="ctf-misc">Misc</option>
-                    <option value="ctf-ai-ml">AI/ML</option>
+                    <option value="ctf-web">Web 安全</option>
+                    <option value="ctf-pwn">二进制攻防</option>
+                    <option value="ctf-crypto">密码安全</option>
+                    <option value="ctf-reverse">逆向分析</option>
+                    <option value="ctf-forensics">取证分析</option>
+                    <option value="ctf-osint">情报研判</option>
+                    <option value="ctf-malware">恶意样本分析</option>
+                    <option value="ctf-misc">综合场景</option>
+                    <option value="ctf-ai-ml">AI 安全</option>
                   </select>
                 </label>
                 <div class="create-task-grid">
@@ -621,7 +629,7 @@
                   <button type="button" id="btn-parse" class="primary">识别攻防任务</button>
                   <button type="button" id="btn-start" disabled>派发 Agent</button>
                 </div>
-                <p class="hint" id="start-hint">请先解析场景类型；判定结果会写入 raw.challenge_type，供 Planner 检索技能库。</p>
+                <p class="hint" id="start-hint">请先解析场景类型；判定结果会写入内部场景类型字段，供 Planner 检索技能库。</p>
 
                 <div id="type-box" class="type-box hidden">
                   <h3>场景类型判定</h3>
@@ -690,7 +698,7 @@
                     <h3>Agent 思考与决策</h3>
                     <ol>
                       <li><span>理解任务情报</span><strong>抽取目标、成果口令格式、远程地址与附件线索</strong></li>
-                      <li><span>选择战术</span><strong>按场景类型召回 Web/Crypto/Pwn/Reverse/Forensics 技能</strong></li>
+                      <li><span>选择战术</span><strong>按场景类型召回 Web 安全、二进制攻防、密码安全、逆向分析、取证分析技能</strong></li>
                       <li><span>生成计划</span><strong>输出 DAG，标注依赖、验收标准与重试次数</strong></li>
                       <li><span>工具执行</span><strong>在 Pi 沙箱内运行命令，产物写入 artifacts</strong></li>
                     </ol>
@@ -739,9 +747,9 @@
               </section>
               <section class="panel reserved-panel flag-submit-panel">
                 <h2>成果提交通道 <span class="badge wired">已接平台适配器</span></h2>
-                <p class="panel-desc">默认只做本地答案库核验；勾选“真实提交到平台”后才调用 <code>ChallengeAdapter.submit</code>。</p>
+                <p class="panel-desc">默认只做本地答案库核验；勾选“真实提交到平台”后才调用平台提交接口。</p>
                 <label>成果口令<input id="flag-value" type="text" placeholder="proof{...}" autocomplete="off"></label>
-                <label>challenge_id / friendly_id（平台任务 ID）
+                <label>平台任务 ID / 任务别名
                   <input id="flag-challenge-id" type="text" placeholder="可为空：尝试从 run_id 读取" autocomplete="off">
                 </label>
                 <label>关联 run_id（可选）<input id="flag-run-id" type="text" autocomplete="off"></label>
@@ -887,7 +895,7 @@
                   <div>
                     <p class="panel-kicker">MCP Registry</p>
                     <h2>工具连接状态</h2>
-                    <p class="panel-desc">按 MCP 工具类型组织：核心工作区、Web 交互、Crypto、Pwn、Reverse、取证和待接入能力。</p>
+                    <p class="panel-desc">按 MCP 工具类型组织：核心工作区、Web 交互、密码安全、二进制攻防、逆向分析、取证和待接入能力。</p>
                   </div>
                 </div>
                 <div class="skill-filter-bar arsenal-filter-bar">
@@ -940,6 +948,6 @@
         </div>
       </div>
     </main>
-    <script src="/app.js?v=20260820-ops-copy"></script>
+    <script src="/app.js?v=20260823-core-flow"></script>
   </body>
 </html>
