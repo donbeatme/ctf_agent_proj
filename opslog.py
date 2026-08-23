@@ -9,7 +9,7 @@
     from opslog import emit
     emit("adapter", "submit", challenge_id=..., verdict=...)
 
-写入路径:默认 ./data/ops.log,CTF_OPS_LOG 环境变量可覆盖。绝不抛异常。
+写入路径:默认 ./data/ops.log,CTF_OPS_LOG 可覆盖(env 优先,model_config.json 兜底)。绝不抛异常。
 """
 
 from __future__ import annotations
@@ -20,7 +20,9 @@ import threading
 import time
 from pathlib import Path
 
-_log_path = Path(os.environ.get("CTF_OPS_LOG") or "data/ops.log")
+from model_config import get as _cfg
+
+_log_path = Path(_cfg("CTF_OPS_LOG") or "data/ops.log")
 _lock = threading.Lock()
 _sinks: list = []
 _MAX_FIELD = 500

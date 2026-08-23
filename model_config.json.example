@@ -1,0 +1,43 @@
+{
+  "LLM_BASE_URL": "https://api.deepseek.com",
+  "LLM_MODEL": "deepseek-v4-flash",
+  "LLM_MODEL_PLANNER": "",
+  "LLM_MODEL_EXECUTOR": "",
+  "LLM_MODEL_EP": "",
+  "LLM_MODEL_EE": "",
+  "LLM_MODEL_ET": "",
+  "EVALUATOR_PLAN": "mock",
+  "EVALUATOR_STEP": "real",
+  "EVALUATOR_TASK": "mock",
+  "engine": {
+    "max_cycles": 100,
+    "max_replans": 8,
+    "max_stalls": 3,
+    "max_deadlock_attempts": 3,
+    "max_step_attempts": 3,
+    "context_budget_tokens": {
+      "planner": null,
+      "evaluator_plan": null,
+      "executor": null,
+      "evaluator_step": null,
+      "evaluator_task": null
+    },
+    "context_budget_ratio": 0.9,
+    "max_json_len": 65536,
+    "run_token_budget_tokens": null,
+    "llm_rpm": 60,
+    "llm_circuit_breaker_threshold": 5,
+    "llm_circuit_breaker_recovery": 60,
+    "llm_total_timeout_ms": 300000,
+    "llm_stream": false,
+    "llm_stream_include_usage": false,
+    "run_timeout_ms": 1800000,
+    "phase_timeout_ms": {
+      "planning": 120000,
+      "plan_review": 60000,
+      "executing": 180000,
+      "step_eval": 60000,
+      "reflecting": 120000
+    }
+  }
+}

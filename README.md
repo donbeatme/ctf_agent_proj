@@ -153,7 +153,7 @@ audit/                # 可观测性层：PlanStep 字段扩展 + 评估器 + �
 ├── metrics.py        # 评估权重
 ├── agent_adapter.py  # AgentRuntimeBindings + audit_plan_fields 往返转换
 ├── evaluators/       # plan/step/task 三个评估器（计划评审/步骤验收/任务反思）
-├── integrations/     # deepseek/experience/langsmith_logger/llm_chat/ragflow
+├── integrations/     # experience/langsmith_logger/llm_chat/ragflow
 └── README.md
 
 skills/ctf-skills/    # vendored ctf-skills 技能库（Agent Skills 格式，11 类 117 文档）
@@ -219,16 +219,16 @@ pip install -r requirements.txt
 **API key 用环境变量设置**（密钥不进配置文件/仓库）：
 
 ```bash
-export DEEPSEEK_API_KEY="sk-..."        # Linux/macOS
-# Windows: set DEEPSEEK_API_KEY=sk-...   （永久生效用 setx）
+export LLM_API_KEY="sk-..."        # Linux/macOS,任意 OpenAI-compatible 厂商
+# Windows: set LLM_API_KEY=sk-...   （永久生效用 setx）
 ```
 
-其余 LLM/引擎配置经 `model_config.json`（可选，缺省用内置默认）；优先级 **环境变量 > model_config.json > 内置默认**：
+其余 LLM/引擎配置经 `model_config.json`（可选，缺省用内置默认；仓库提供 `model_config.json.example` 模板，copy 改名即可用）；优先级 **环境变量 > model_config.json > 内置默认**。LLM 不绑定厂商：设 `LLM_BASE_URL`/`LLM_MODEL` 即可接 OpenAI/Qwen/vLLM 等任意兼容端点（旧命名 `DEEPSEEK_API_KEY`/`DEEPSEEK_MODEL` 仍作兜底）：
 
 ```json
 {
-  "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
-  "DEEPSEEK_MODEL": "deepseek-v4-flash",
+  "LLM_BASE_URL": "https://api.deepseek.com",
+  "LLM_MODEL": "deepseek-v4-flash",
   "LLM_MODEL_PLANNER": "deepseek-v4-flash",
   "LLM_MODEL_EP": "qwen3-235b-a22b",
   "EVALUATOR": "smoke",

@@ -12,7 +12,7 @@
 |---|---|---|---|---|
 | `config_adaptor.py` | `config_adaptor.json` | `StoreSettings.from_env()` | `Ctf2Adapter`(平台适配器子类) | `CTF2_SESSION_TOKEN` / `CTF2_TOKEN` / `CTF2_COOKIE` / `CTF2_API_KEY` |
 | `config_sandbox.py` | `config_sandbox.json` | `SandboxSettings.from_env()` | `SandboxManager` → `SandboxBackend`(沙箱子类) | `CTF_SSH_PASSWORD` |
-| `model_config.py` | `model_config.json` | `llm_api` / engine / evaluator | —(主配置) | `DEEPSEEK_API_KEY`(env) |
+| `model_config.py` | `model_config.json` | `llm_api` / engine / evaluator | —(主配置) | `LLM_API_KEY`(env,`DEEPSEEK_*` 兜底) |
 
 `config_adaptor.json` / `config_sandbox.json` / `model_config.json` 均已加入 `.gitignore`。
 

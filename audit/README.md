@@ -19,7 +19,6 @@ audit/
 │   ├── step.py            # StepAcceptanceEvaluator(步骤验收)
 │   └── task.py            # TaskReflectionEvaluator(任务反思 + FlagVerifier + Reflexion)
 └── integrations/
-    ├── deepseek.py        # DeepSeekChat:LLM 网关
     ├── llm_chat.py        # LlmChatResult:统一聊天结果
     ├── ragflow.py         # RAGFlowExperienceStore:经验存取
     ├── experience.py      # build_experience:AuditRecord → 经验字典
@@ -52,7 +51,8 @@ service = AgentAuditService(
 |---|---|---|
 | `CTF_AUDIT_MODE` | `offline` | `offline` / `online`（非法值抛 `ValueError`） |
 | `CTF_AUDIT_DATA_DIR` | `./data` | 本地经验/数据根目录 |
-| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | LLM 模型 |
+| `LLM_MODEL` | `deepseek-v4-flash` | LLM 模型（`LLM_*` 优先，`DEEPSEEK_*` 兜底） |
+| `LLM_API_KEY` / `LLM_BASE_URL` | — | 任意 OpenAI-compatible 模型（key 与地址） |
 | `LANGSMITH_ENABLED` / `RAGFLOW_ENABLED` | `false` | 外部观测/经验开关 |
 | `RAGFLOW_API_KEY` / `RAGFLOW_BASE_URL` / `RAGFLOW_DATASET_NAME` / `RAGFLOW_TIMEOUT_SECONDS` | — | RAGFlow 连接 |
 | `EXPERIENCE_SEARCH_LIMIT` | `5` | 经验检索条数上限 |

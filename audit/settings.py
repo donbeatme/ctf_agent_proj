@@ -19,9 +19,9 @@ class Settings:
     mode: str
     data_dir: Path
     langsmith_enabled: bool
-    deepseek_api_key: Optional[str]
-    deepseek_base_url: str
-    deepseek_model: str
+    llm_api_key: Optional[str]      # LLM_* 优先,DEEPSEEK_* 兜底(兼容旧命名)
+    llm_base_url: str
+    llm_model: str
     ragflow_enabled: bool
     ragflow_api_key: Optional[str]
     ragflow_base_url: str
@@ -39,9 +39,9 @@ class Settings:
             mode=mode,
             data_dir=Path(str(_cfg("CTF_AUDIT_DATA_DIR", "./data"))),
             langsmith_enabled=_cfg_bool("LANGSMITH_TRACING") and bool(_cfg("LANGSMITH_API_KEY")),
-            deepseek_api_key=_cfg("DEEPSEEK_API_KEY") or None,
-            deepseek_base_url=_cfg("DEEPSEEK_BASE_URL") or "https://api.deepseek.com",
-            deepseek_model=_cfg("DEEPSEEK_MODEL") or "deepseek-v4-flash",
+            llm_api_key=_cfg("LLM_API_KEY") or _cfg("DEEPSEEK_API_KEY") or None,
+            llm_base_url=_cfg("LLM_BASE_URL") or _cfg("DEEPSEEK_BASE_URL") or "https://api.deepseek.com",
+            llm_model=_cfg("LLM_MODEL") or _cfg("DEEPSEEK_MODEL") or "deepseek-v4-flash",
             ragflow_enabled=_cfg_bool("RAGFLOW_ENABLED"),
             ragflow_api_key=_cfg("RAGFLOW_API_KEY") or None,
             ragflow_base_url=_cfg("RAGFLOW_BASE_URL") or "http://127.0.0.1:9380",

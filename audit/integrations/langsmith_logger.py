@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
+from model_config import get as _cfg
+
 from ..schemas import utc_now
 
 
@@ -58,7 +60,7 @@ class AuditLogger:
                 name=name,
                 run_type="chain",
                 inputs=safe_inputs,
-                project_name=__import__("os").getenv("LANGSMITH_PROJECT", "ctf-agent-audit"),
+                project_name=_cfg("LANGSMITH_PROJECT") or "ctf-agent-audit",
                 extra={"metadata": safe_metadata},
             )
             remote_tree.post()

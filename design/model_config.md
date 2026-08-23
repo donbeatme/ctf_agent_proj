@@ -18,9 +18,9 @@
 
 ```json
 {
-  "DEEPSEEK_API_KEY": "",
-  "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
-  "DEEPSEEK_MODEL": "deepseek-v4-flash",
+  "LLM_API_KEY": "",
+  "LLM_BASE_URL": "https://api.deepseek.com",
+  "LLM_MODEL": "deepseek-v4-flash",
   "engine": {
     "max_cycles": 100,
     "max_replans": 8,
@@ -112,6 +112,38 @@ config key 映射：
 - 不传 role 直接返回默认模型
 - 调用方负责传 model 参数：`llm_api.chat(model=role_model("planner"), ...)`
 - Planner 已在 `_default_llm()` 中接线；Evaluator 真实实现中同理
+
+### 切换其它模型 / 任意 OpenAI-compatible 厂商
+
+LLM 层走 OpenAI-compatible `chat.completions`，**不绑定 DeepSeek**。默认值只是指向
+DeepSeek；换成任意兼容端点只需覆盖三件套（`LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL`），
+环境变量与 config 皆可（env 优先）：
+
+```bash
+# 例:接 OpenAI
+export LLM_BASE_URL="https://api.openai.com/v1"
+export LLM_API_KEY="sk-..."
+export LLM_MODEL="gpt-4o"
+
+# 例:接本地 vLLM / Ollama
+export LLM_BASE_URL="http://127.0.0.1:8000/v1"
+export LLM_MODEL="qwen3-235b-a22b"
+```
+
+config 方式（`model_config.json`，env 未设时生效）：
+
+```json
+{
+  "LLM_API_KEY": "sk-...",
+  "LLM_BASE_URL": "https://api.openai.com/v1",
+  "LLM_MODEL": "gpt-4o"
+}
+```
+
+按角色细粒度覆盖：设置 `LLM_MODEL_PLANNER`/`LLM_MODEL_EXECUTOR`/`LLM_MODEL_EP`/
+`LLM_MODEL_EE`/`LLM_MODEL_ET`（优先级最高，见上表回落链）。如需保持旧命名兼容，
+`DEEPSEEK_API_KEY`/`DEEPSEEK_BASE_URL`/`DEEPSEEK_MODEL` 仍作为兜底读取，但新配置一律
+用 `LLM_*`。
 
 ---
 

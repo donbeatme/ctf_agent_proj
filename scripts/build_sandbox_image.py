@@ -20,7 +20,7 @@ from config_sandbox import get as _cfg
 HOST = _cfg("CTF_SSH_HOST") or sys.exit("CTF_SSH_HOST 未配置")
 USER = _cfg("CTF_SSH_USER") or "root"
 PASS = _cfg("CTF_SSH_PASSWORD") or ""
-MIRROR = os.environ.get("CTF_APT_MIRROR") or "mirrors.aliyun.com"
+MIRROR = _cfg("CTF_APT_MIRROR") or "mirrors.aliyun.com"
 SKIP_BUILD = "--skip-build" in sys.argv
 
 HERE = os.path.dirname(os.path.abspath(__file__))

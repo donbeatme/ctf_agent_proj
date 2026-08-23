@@ -6,6 +6,7 @@
 - StoreSettings.from_env 从 config_adaptor 取值(不再读 model_config)
 - SandboxSettings.from_env 从 config_sandbox 取值
 - model_config 不再承载 CTF_SSH_* / CTF2_*(敏感配置已迁移)
+- 原 env 专用变量(CTF2_CONFIG_JSON/CTF_OPS_LOG/CTF_EXPERIENCE_SCOPE/CTF_APT_MIRROR/LANGSMITH_PROJECT)也支持 JSON 兜底
 """
 
 import json
@@ -116,3 +117,50 @@ def test_model_config_no_longer_holds_sensitive_keys():
               "CTF2_SESSION_TOKEN", "CTF2_API_KEY", "CTF2_BASE_URL",
               "CTF2_COOKIE"):
         assert k not in data, f"{k} 不应留在 model_config"
+
+
+# ===== 原 env 专用变量:JSON 兜底 =====
+
+
+def test_adaptor_ctf2_config_json_from_own_json(monkeypatch, tmp_path):
+    external = _write(tmp_path, "external.json", {"CTF2_API_KEY": "ak-ext"})
+    p = _write(tmp_path, "adaptor.json", {"CTF2_CONFIG_JSON": str(external)})
+    monkeypatch.setattr(config_adaptor, "_CONFIG_FILE", p)
+    monkeypatch.delenv("CTF2_CONFIG_JSON", raising=False)
+    monkeypatch.delenv("CTF2_API_KEY", raising=False)
+    assert config_adaptor.get("CTF2_CONFIG_JSON") == str(external)
+    assert config_adaptor.get("CTF2_API_KEY") == "ak-ext"  # 防递归:仍落到外部文件
+
+
+def _patch_model_config(monkeypatch, tmp_path, data):
+    import model_config
+
+    p = _write(tmp_path, "model.json", data)
+    monkeypatch.setattr(model_config, "_CONFIG_FILE", p)
+    monkeypatch.setattr(model_config, "_config", dict(data))
+    return model_config
+
+
+def test_model_config_ops_log_json_fallback(monkeypatch, tmp_path):
+    mc = _patch_model_config(monkeypatch, tmp_path, {"CTF_OPS_LOG": "logs/x.log"})
+    monkeypatch.delenv("CTF_OPS_LOG", raising=False)
+    assert mc.get("CTF_OPS_LOG") == "logs/x.log"
+
+
+def test_model_config_experience_scope_json_fallback(monkeypatch, tmp_path):
+    mc = _patch_model_config(monkeypatch, tmp_path, {"CTF_EXPERIENCE_SCOPE": "ee,plan"})
+    monkeypatch.delenv("CTF_EXPERIENCE_SCOPE", raising=False)
+    assert mc.get("CTF_EXPERIENCE_SCOPE", "ee") == "ee,plan"
+
+
+def test_model_config_langsmith_project_json_fallback(monkeypatch, tmp_path):
+    mc = _patch_model_config(monkeypatch, tmp_path, {"LANGSMITH_PROJECT": "ctf-agent-prod"})
+    monkeypatch.delenv("LANGSMITH_PROJECT", raising=False)
+    assert mc.get("LANGSMITH_PROJECT") == "ctf-agent-prod"
+
+
+def test_sandbox_apt_mirror_json_fallback(monkeypatch, tmp_path):
+    p = _write(tmp_path, "sandbox.json", {"CTF_APT_MIRROR": "mirrors.tuna.tsinghua.edu.cn"})
+    monkeypatch.setattr(config_sandbox, "_CONFIG_FILE", p)
+    monkeypatch.delenv("CTF_APT_MIRROR", raising=False)
+    assert config_sandbox.get("CTF_APT_MIRROR") == "mirrors.tuna.tsinghua.edu.cn"

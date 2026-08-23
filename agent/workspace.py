@@ -8,11 +8,12 @@
 """
 
 import json
-import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from model_config import get as _cfg
 
 from agent.blueprint import Blueprint
 from agent.ctx import (
@@ -45,7 +46,7 @@ _EXP_ROLE_TOKEN = {
 
 
 def _exp_scope() -> set[str]:
-    return {s.strip().lower() for s in os.environ.get("CTF_EXPERIENCE_SCOPE", "ee").split(",") if s.strip()}
+    return {s.strip().lower() for s in _cfg("CTF_EXPERIENCE_SCOPE", "ee").split(",") if s.strip()}
 
 
 def _exp_enabled(role: Role) -> bool:

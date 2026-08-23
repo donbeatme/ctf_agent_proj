@@ -1,7 +1,8 @@
 """平台适配器配置:与主 config(model_config)分开,存放适配器级敏感配置。
 
 配对: Ctf2Adapter(及其子类)经 StoreSettings.from_env 消费本模块。
-取值优先级: 环境变量 → config_adaptor.json → CTF2_CONFIG_JSON 指向的外部文件(兼容旧布局)。
+取值优先级: 环境变量 → config_adaptor.json → CTF2_CONFIG_JSON 指向的外部文件(兼容旧布局;
+CTF2_CONFIG_JSON 指针本身也支持放 config_adaptor.json,env 优先)。
 """
 
 import json
@@ -11,13 +12,26 @@ from pathlib import Path
 _CONFIG_FILE = Path(__file__).resolve().parent / "config_adaptor.json"
 
 
+def _external_path() -> str | None:
+    """CTF2_CONFIG_JSON 解析:env → config_adaptor.json(不递归查外部文件自身)。"""
+    value = os.environ.get("CTF2_CONFIG_JSON")
+    if value:
+        return value
+    try:
+        data = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    value = data.get("CTF2_CONFIG_JSON")
+    return str(value) if value is not None else None
+
+
 def _external_config() -> dict:
     """CTF2_CONFIG_JSON 指向的外部配置文件(兼容旧布局)。"""
-    path = os.environ.get("CTF2_CONFIG_JSON")
+    path = _external_path()
     if not path:
         return {}
     try:
-        data = json.loads(Path(str(path)).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
