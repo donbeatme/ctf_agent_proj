@@ -1,0 +1,19 @@
+id: crypto-rsa-review
+name: RSA 参数安全分析
+category: crypto
+scene: 密码安全
+input_type:
+  - text
+  - attachment
+recommended_tools:
+  - python
+  - sympy
+  - z3
+  - pycryptodome
+expected_outputs:
+  - RSA 参数提取结果
+  - 风险路径判断
+  - 验证脚本或推导说明
+  - 成果审核摘要
+sandbox_image: ops-pi-crypto:0.1.0
+status: tested

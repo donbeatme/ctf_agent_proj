@@ -1,0 +1,20 @@
+id: forensics-traffic-review
+name: 流量证据包分析
+category: forensics
+scene: 取证分析
+input_type:
+  - text
+  - pcap
+recommended_tools:
+  - file
+  - tshark
+  - binwalk
+  - foremost
+  - exiftool
+expected_outputs:
+  - 流量包基础画像
+  - 会话与文件传输线索
+  - 可疑载荷还原结果
+  - 成果审核摘要
+sandbox_image: ops-pi-forensics:0.1.0
+status: tested

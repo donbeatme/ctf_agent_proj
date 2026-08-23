@@ -1,0 +1,20 @@
+id: binary-service-risk
+name: 二进制服务风险复现
+category: binary
+scene: 二进制攻防
+input_type:
+  - text
+  - binary
+recommended_tools:
+  - file
+  - checksec
+  - gdb
+  - pwntools
+  - qemu
+expected_outputs:
+  - 样本基础信息
+  - 保护机制检查结果
+  - 输入点与风险路径
+  - 成果审核摘要
+sandbox_image: ops-pi-pwn:0.1.0
+status: tested
