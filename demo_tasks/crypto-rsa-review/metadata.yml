@@ -15,5 +15,5 @@ expected_outputs:
   - 风险路径判断
   - 验证脚本或推导说明
   - 成果审核摘要
-sandbox_image: ops-pi-crypto:0.1.0
+sandbox_runtime: ssh-sandbox-unified
 status: tested

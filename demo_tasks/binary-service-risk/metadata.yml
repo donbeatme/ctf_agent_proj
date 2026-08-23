@@ -16,5 +16,5 @@ expected_outputs:
   - 保护机制检查结果
   - 输入点与风险路径
   - 成果审核摘要
-sandbox_image: ops-pi-pwn:0.1.0
+sandbox_runtime: ssh-sandbox-unified
 status: tested

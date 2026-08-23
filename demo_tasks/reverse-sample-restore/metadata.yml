@@ -16,5 +16,5 @@ expected_outputs:
   - 关键函数定位
   - 算法还原说明
   - 成果审核摘要
-sandbox_image: ops-pi-reverse:0.1.0
+sandbox_runtime: ssh-sandbox-unified
 status: tested
