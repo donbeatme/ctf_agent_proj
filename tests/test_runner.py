@@ -6,6 +6,9 @@
 - RunOutcome.as_dict / 超时透传 / ProcOutcome 导出
 """
 
+import sys
+import time
+import types
 from pathlib import Path
 
 from agent.runner import CommandRunner, ProcOutcome, RunOutcome
@@ -98,6 +101,33 @@ def test_no_sandbox_run_python_error(monkeypatch, tmp_path):
     r = CommandRunner()
     out = r.run_python("print(1)", cwd=tmp_path)
     assert out.ok is False and out.target == "none"
+
+
+def test_sandbox_init_failure_records_and_backs_off(monkeypatch):
+    """沙箱构造失败:记错误事件 + 持续失败亮 probe,退避期内不再反复重试构造。"""
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            self.calls = getattr(self.__class__, "calls", 0) + 1
+            self.__class__.calls = self.calls
+            raise RuntimeError("no ssh creds")
+
+    fake = types.ModuleType("sandbox_env")
+    fake.SandboxManager = _Boom
+    monkeypatch.setitem(sys.modules, "sandbox_env", fake)
+
+    r = CommandRunner()
+    assert r._ensure_sandbox() is None
+    assert r.sandbox is None
+    assert r.sandbox_blocked() is True  # 持续失败 → 能力探测亮起
+    # 退避期内不重试构造
+    r._ensure_sandbox()
+    assert _Boom.calls == 1
+    # 退避期满后允许再试(仍失败则重新记时)
+    r._sandbox_failed_at = time.monotonic() - 61
+    assert r._ensure_sandbox() is None
+    assert _Boom.calls == 2
+    assert r.sandbox_blocked() is True
 
 
 # ===== 超时与结果形状 =====

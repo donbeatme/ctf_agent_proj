@@ -11,7 +11,10 @@ run / run_python 委托 sandbox.exec / sandbox.run_python(容器生命周期、�
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+
+from opslog import ErrorLevel, record_error
 
 _MAX_OUT = 4000   # stdout 截断(工具消息/上下文体积)
 _MAX_ERR = 2000   # stderr 截断
@@ -68,18 +71,33 @@ class CommandRunner:
         self.timeout = timeout
         self.max_out = max_out
         self.max_err = max_err
-        self._sandbox_tried = False
+        self._sandbox_failed_at: float | None = None
+        self._sandbox_retry_delay: float = 60.0
 
     def _ensure_sandbox(self):
-        """懒建 SandboxManager(读 config_sandbox);构造失败返回 None。"""
-        if self.sandbox is None and not self._sandbox_tried:
-            self._sandbox_tried = True
-            try:
-                from sandbox_env import SandboxManager
-                self.sandbox = SandboxManager(max_out=self.max_out, max_err=self.max_err)
-            except Exception:
-                self.sandbox = None
+        """懒建 SandboxManager(读 config_sandbox);构造失败记错误并退避重试。
+
+        持续失败(sandbox_blocked)建模为 probe 供引擎 gate 收口,不再每次命令都重试。
+        """
+        if self.sandbox is not None:
+            return self.sandbox
+        if self._sandbox_failed_at is not None:
+            if time.monotonic() - self._sandbox_failed_at < self._sandbox_retry_delay:
+                return None  # 退避期内,瞬态故障恢复前不再反复尝试
+            self._sandbox_failed_at = None  # 退避期满,允许再试
+        try:
+            from sandbox_env import SandboxManager
+            self.sandbox = SandboxManager(max_out=self.max_out, max_err=self.max_err)
+        except Exception as exc:
+            self._sandbox_failed_at = time.monotonic()
+            record_error("sandbox", "init", exc=exc, level=ErrorLevel.RECOVERABLE,
+                         reason="SandboxManager 构造失败,命令暂不可执行")
+            return None
         return self.sandbox
+
+    def sandbox_blocked(self) -> bool:
+        """沙箱能力探测:曾尝试构造且失败(退避中)仍无沙箱 → 持续不可用。"""
+        return self.sandbox is None and self._sandbox_failed_at is not None
 
     def _unavailable(self, cmd) -> RunOutcome:
         return RunOutcome(

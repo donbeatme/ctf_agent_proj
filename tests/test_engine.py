@@ -19,7 +19,8 @@ import pytest
 from agent.blueprint import Blueprint, Step, StepStatus
 from agent.evaluator import EvalResult, MockEvaluator, Verdict
 from agent.engine import Engine, EngineState
-from agent.executor import MockExecutor
+from agent.executor import MockExecutor, RealExecutor
+from agent.llm_api import ToolResult
 from tests.mock_data import MOCK_TASK
 from agent.planner import Planner
 from agent.schema import (
@@ -1565,3 +1566,108 @@ def test_planner_replan_failure_causes_failed():
     assert engine.scheduler.state == EngineState.FAILED
     assert "LLM replan timeout" in engine.fail_reason
     assert "Planner LLM" in engine.fail_reason
+
+
+# ===== 环境阻塞收口:容器题靶机不可达 → FAILED,不再空转后续步骤 =====
+
+def test_env_blocked_container_fails_run():
+    """开靶失败(如平台 429)→ s1 过后 SCHEDULING 即收口 FAILED,不再跑依赖目标的 s2。"""
+
+    class _FailTargetAdapter:
+        def start_target(self, challenge_id):
+            raise RuntimeError("开靶机失败 HTTP 429: RATE_LIMIT_EXCEEDED")
+
+    def _outcome():
+        from agent.runner import RunOutcome
+        return RunOutcome(ok=True, returncode=0, stdout="ok", stderr="",
+                          cmd=[], target="ssh")
+
+    class _FakeRunner:
+        def run(self, *a, **k):
+            return _outcome()
+
+        def run_python(self, *a, **k):
+            return _outcome()
+
+    def llm(*, system, prompt, tools, tool_exec, **kw):
+        return ToolResult(
+            content="完成",
+            trace=[{"name": "answer", "arguments": '{"text": "无目标"}',
+                    "result": {"answer": "无目标"}}],
+            rounds=1, total_usage={"prompt_tokens": 1, "completion_tokens": 1,
+                                   "total_tokens": 2})
+
+    task = dict(MOCK_TASK)
+    task.update({"challenge_id": "c-env", "has_container": 1})
+    task.pop("target", None)
+    ws = MockWorkspace()
+    executor = RealExecutor(llm_fn=llm, runner=_FakeRunner(), workspace=ws,
+                            adapter=_FailTargetAdapter())
+    planner = ScriptedPlanner(_plan_responses(
+        '[{"id":"s1","instruction":"启动靶机","criterion":"拿到URL","depends_on":[]},'
+        '{"id":"s2","instruction":"侦察","criterion":"清单","depends_on":["s1"]}]',
+        "{}",
+    ))
+    evaluator = MockEvaluator(
+        {"evaluator_plan": seq([EvalResult(Verdict.PASS, "计划可执行")]),
+         "evaluator_step": seq([EvalResult(Verdict.PASS, "s1: 完成")]),
+         "evaluator_task": seq([EvalResult(Verdict.DONE, "反思: 无问题")])},
+    )
+    engine = Engine(planner, executor, evaluator, workspace=ws)
+    engine.run(task)
+    assert engine.scheduler.state == EngineState.FAILED
+    assert "环境阻塞" in (engine.fail_reason or "")
+
+
+def test_capability_blocked_sandbox_fails_run():
+    """沙箱不可用(构造失败,probe 亮起)→ 首步派发前即收口 FAILED,不再空转后续步骤。"""
+
+    def _outcome():
+        from agent.runner import RunOutcome
+        return RunOutcome(ok=True, returncode=0, stdout="ok", stderr="",
+                          cmd=[], target="ssh")
+
+    class _BlockedSandboxRunner:
+        def __init__(self):
+            self.sandbox = None
+            self._sandbox_failed_at = 1.0  # 模拟曾尝试构造且失败
+
+        def run(self, *a, **k):
+            return _outcome()
+
+        def run_python(self, *a, **k):
+            return _outcome()
+
+        def sandbox_blocked(self):
+            return self.sandbox is None and self._sandbox_failed_at is not None
+
+        def _ensure_sandbox(self):
+            return None
+
+    def llm(*, system, prompt, tools, tool_exec, **kw):
+        return ToolResult(
+            content="完成",
+            trace=[{"name": "answer", "arguments": '{"text": "无沙箱"}',
+                    "result": {"answer": "无沙箱"}}],
+            rounds=1, total_usage={"prompt_tokens": 1, "completion_tokens": 1,
+                                   "total_tokens": 2})
+
+    task = dict(MOCK_TASK)
+    task.pop("has_container", None)
+    task.pop("target", None)
+    ws = MockWorkspace()
+    executor = RealExecutor(llm_fn=llm, runner=_BlockedSandboxRunner(), workspace=ws)
+    planner = ScriptedPlanner(_plan_responses(
+        '[{"id":"s1","instruction":"读题","criterion":"拿到文本","depends_on":[]},'
+        '{"id":"s2","instruction":"编码","criterion":"可逆","depends_on":["s1"]}]',
+        "{}",
+    ))
+    evaluator = MockEvaluator(
+        {"evaluator_plan": seq([EvalResult(Verdict.PASS, "计划可执行")]),
+         "evaluator_step": seq([EvalResult(Verdict.PASS, "s1: 完成")]),
+         "evaluator_task": seq([EvalResult(Verdict.DONE, "反思: 无问题")])},
+    )
+    engine = Engine(planner, executor, evaluator, workspace=ws)
+    engine.run(task)
+    assert engine.scheduler.state == EngineState.FAILED
+    assert "环境阻塞" in (engine.fail_reason or "")

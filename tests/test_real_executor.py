@@ -10,6 +10,7 @@
 
 from agent.blueprint import Blueprint, Step
 from agent.engine import Engine, EngineState
+from ctf_platform.errors import DownloadError
 from agent.evaluator import EvalResult, MockEvaluator, Verdict
 from agent.executor import ExecResult, RealExecutor
 from agent.llm_api import ToolResult
@@ -326,6 +327,66 @@ def test_target_resolved_once_per_executor():
 def test_target_none_without_container_no_target():
     prompt = _capture_prompt(task={"challenge_id": "c-1"})   # 非容器、无 target
     assert "# 目标地址(靶机)" not in prompt
+
+
+class _FlakyTargetAdapter:
+    """前 fail_count 次 start_target 抛瞬态错误(模拟平台 429),之后成功。"""
+
+    def __init__(self, fail_count=1, host="tcp.example.com", port=9999):
+        self.starts = []
+        self._remaining = fail_count
+        self._host, self._port = host, port
+
+    def start_target(self, challenge_id):
+        self.starts.append(challenge_id)
+        if self._remaining > 0:
+            self._remaining -= 1
+            raise DownloadError("开靶机失败 HTTP 429: RATE_LIMIT_EXCEEDED")
+        return {"host": self._host, "port": self._port,
+                "access_url": f"{self._host}:{self._port}", "status": "running"}
+
+
+def _target_exe(adapter=None, task=None):
+    ws = MockWorkspace()
+    ws.meta["task"] = task or {}
+    return RealExecutor(llm_fn=lambda **kw: None, runner=_FakeRunner(),
+                        workspace=ws, adapter=adapter)
+
+
+def test_target_failure_not_poisoned_retries():
+    """瞬态 429 不永久毒化:退避后重试成功,目标恢复可用。"""
+    adapter = _FlakyTargetAdapter(fail_count=1)
+    ex = _target_exe(adapter=adapter, task={"challenge_id": "c-1", "has_container": 1})
+    ex._target_retry_delay = 0
+    assert ex._target() is None                     # 首次 start_target 抛 429
+    assert ex.target_blocked() is True
+    assert ex._target() == "tcp.example.com:9999"   # 重试成功
+    assert ex.target_blocked() is False
+    assert adapter.starts == ["c-1", "c-1"]
+
+
+def test_target_failure_throttled_until_delay_elapses():
+    """退避窗口内不重复开靶,避免限流窗口内反复打平台。"""
+    adapter = _FlakyTargetAdapter(fail_count=1)
+    ex = _target_exe(adapter=adapter, task={"challenge_id": "c-1", "has_container": 1})
+    ex._target_retry_delay = 3600
+    assert ex._target() is None      # 失败
+    assert ex._target() is None      # 退避内,不再调 start_target
+    assert adapter.starts == ["c-1"]
+    assert ex.target_blocked() is True
+
+
+def test_target_blocked_false_non_container():
+    ex = _target_exe(task={"challenge_id": "c-1"})   # 非容器
+    ex._target()
+    assert ex.target_blocked() is False
+
+
+def test_target_blocked_true_container_no_adapter():
+    """容器题但无适配器可开靶 → 环境阻塞,引擎据此收口。"""
+    ex = _target_exe(task={"challenge_id": "c-1", "has_container": 1})
+    ex._target()
+    assert ex.target_blocked() is True
 
 
 # ===== cwd 收口:只能指向题目附件目录 =====

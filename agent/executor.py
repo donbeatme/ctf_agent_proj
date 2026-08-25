@@ -8,10 +8,11 @@
 """
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from opslog import emit
+from opslog import ErrorLevel, emit, record_error
 
 from agent.tools import APPLY_TOOL_SPEC, GET_DOC_SPEC, REMOVE_TOOL_SPEC
 from agent.llm_api import ToolLoopError
@@ -244,8 +245,10 @@ class RealExecutor(Executor):
         self.workdir = workdir
         self.adapter = adapter  # 平台 ChallengeAdapter(None=提交仅记录)
         self._llm = llm_fn or self._default_llm()
-        self._target_resolved = False  # 目标地址惰性解析,单 run 只求一次(避免重复开靶)
+        self._target_resolved = False  # 目标地址惰性解析,成功即缓存(避免重复开靶)
         self._target_cache: str | None = None
+        self._target_failed_at: float | None = None  # 上次解析失败时间戳(退避重试依据)
+        self._target_retry_delay: float = 60.0  # 失败后至少隔多久重试一次 start_target
         if self.adapter is not None:
             # 动态 flag 本地判定钩子:adapter._local_verify 重跑已验证脚本推导当前实例 flag
             # (set_procedure_runner 可选的注入缝;测试 fake adapter 无此方法则跳过)
@@ -377,31 +380,41 @@ class RealExecutor(Executor):
             return []
         try:
             return self.adapter.match_procedures(cid) or []
-        except Exception:
+        except Exception as exc:
+            record_error("executor", "experience_match", exc=exc,
+                         level=ErrorLevel.RECOVERABLE, challenge_id=cid)
             return []
 
     # ===== 目标地址(靶机) =====
 
     def _target(self) -> str | None:
-        """解析靶机地址(惰性,单 run 只求一次)。
+        """解析靶机地址(惰性,成功才缓存)。
 
         顺序:task.target_info(理解层已结构化)→ task.target(host:port 串)→
         含容器题 + 有适配器 → 惰性 start_target 开靶(缓存 host:port)。无则 None。
+        失败(如平台 429 限流)不置 resolved,按 _target_retry_delay 退避,后续步骤
+        自动重试——瞬态错误恢复后不再永久锁死整个 run 的目标解析。
         """
         if self._target_resolved:
             return self._target_cache
-        self._target_resolved = True
+        now = time.time()
+        if (self._target_failed_at is not None
+                and now - self._target_failed_at < self._target_retry_delay):
+            return None
         task = (getattr(self.workspace, "meta", {}).get("task") or {}) if self.workspace else {}
         info = task.get("target_info")
         if isinstance(info, dict):
             self._target_cache = self._fmt_target(info) or None
+            self._target_resolved = True
             return self._target_cache
         raw = task.get("target")
         if isinstance(raw, str) and raw.strip():
             self._target_cache = raw.strip()
+            self._target_resolved = True
             return self._target_cache
         cid = self._challenge_id()
         if cid and task.get("has_container") and self.adapter is not None:
+            self._target_failed_at = now
             try:
                 r = self.adapter.start_target(cid)
             except Exception as exc:
@@ -411,7 +424,26 @@ class RealExecutor(Executor):
             host, port = r.get("host") or "", r.get("port")
             if host and port:
                 self._target_cache = f"{host}:{port}"
+                self._target_resolved = True
+                self._target_failed_at = None
+                return self._target_cache
+        if task.get("has_container"):
+            # 容器题但无目标可注入(无适配器 / start_target 未返回 host:port)→ 记失败待重试
+            self._target_failed_at = now
         return self._target_cache
+
+    def target_blocked(self) -> bool:
+        """容器题且靶机不可达(曾尝试解析失败、当前仍无目标)→ True。引擎用于环境阻塞收口。"""
+        task = (getattr(self.workspace, "meta", {}).get("task") or {}) if self.workspace else {}
+        if not task.get("has_container"):
+            return False
+        if self._target_resolved:
+            return not bool(self._target_cache)
+        return self._target_failed_at is not None
+
+    def retry_target(self) -> str | None:
+        """供引擎在派发步骤前复查靶机:按退避再尝试一次解析,返回当前目标(可 None)。"""
+        return self._target()
 
     @staticmethod
     def _fmt_target(info: dict) -> str:

@@ -20,7 +20,7 @@ from typing import Any
 
 import config_adaptor
 
-from opslog import emit
+from opslog import ErrorLevel, emit, record_error
 
 from .base import ChallengeAdapter, ChallengeMeta, SubmitResult
 from .config import StoreSettings
@@ -523,14 +523,20 @@ class Ctf2Adapter(ChallengeAdapter):
         url = f"{self.base_url}/practice/{gid}/challenges/{challenge_id}/target/"
         resp = self._auth_request("DELETE", url, timeout=60)
         if resp.status_code in (401, 403):
-            raise AuthError(
+            err = AuthError(
                 f"鉴权失败(HTTP {resp.status_code})——需要 CTF2_TOKEN 或 CTF2_COOKIE"
             )
+            record_error("adapter", "target_stop", exc=err,
+                         level=ErrorLevel.CLEANUP, challenge_id=challenge_id)
+            raise err
         self.store.set_challenge_target(challenge_id, None)
         emit("adapter", "target_stopped", challenge_id=challenge_id,
              status_code=resp.status_code)
         if resp.status_code == 200:
             return {"ok": True, "message": "靶机已关闭"}
+        record_error("adapter", "target_stop",
+                     level=ErrorLevel.CLEANUP, challenge_id=challenge_id,
+                     status_code=resp.status_code, message=resp.text[:200])
         return {"ok": False, "status_code": resp.status_code,
                 "message": resp.text[:200]}
 
@@ -555,8 +561,8 @@ class Ctf2Adapter(ChallengeAdapter):
                         ) if info.get(k) is not None
                     } or None
             except (AdapterError, AuthError) as e:
-                emit("adapter", "target_auto_start_failed", challenge_id=meta.challenge_id,
-                     error=f"{type(e).__name__}: {e}")
+                record_error("adapter", "target_auto_start", exc=e,
+                             level=ErrorLevel.FATAL, challenge_id=meta.challenge_id)
         return super()._materialize(meta, dest_dir)
 
     @staticmethod

@@ -29,6 +29,8 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from opslog import ErrorLevel, record_error
+
 from agent.blueprint import DONE_STATUSES, Step, StepStatus
 from agent.schema import (
     EvalEvent,
@@ -817,9 +819,43 @@ class Engine:
 
     def _fail(self, reason: str) -> None:
         self.fail_reason = reason
+        record_error("engine", "run_failed", level=ErrorLevel.FATAL, reason=reason)
         self.signals.emit(Signal.FAILED, reason=reason, replans=self.replans,
                           stalls=self._stalls, deadlock_attempts=self._deadlock_attempts)
         self._go(EngineState.FAILED, reason)
+
+    def _capability_blocked(self) -> bool:
+        """能力探测:靶机或沙箱确认不可用(复查一次仍失败)→ True,收口 run。
+
+        持续能力状态(非一次性异常)建模为 probe:失败后先按退避复查一次,
+        瞬态故障恢复可解除阻塞继续执行;仍失败则不再让后续步骤盲目空转烧 token。
+        """
+        if self._probe_target():
+            return True
+        if self._probe_sandbox():
+            return True
+        return False
+
+    def _probe_target(self) -> bool:
+        ex = getattr(self.executor, "target_blocked", None)
+        if not ex or not ex():
+            return False
+        retry = getattr(self.executor, "retry_target", None)
+        if retry is not None:
+            retry()  # 按退避再试一次,瞬态 429 恢复后可解除阻塞继续执行
+        return bool(ex())
+
+    def _probe_sandbox(self) -> bool:
+        runner = getattr(self.executor, "runner", None)
+        probe = getattr(runner, "sandbox_blocked", None)
+        if probe is None:
+            return False
+        if not probe():
+            return False
+        ensure = getattr(runner, "_ensure_sandbox", None)
+        if ensure is not None:
+            ensure()  # 退避期内不真重试,只是按退避策略再查一次
+        return bool(probe())
 
     def _dag_summary_for_goals(self) -> str:
         """为 goal 评估构造世界模型摘要:DAG 中所有步骤的状态、产物、观察。"""
@@ -1037,6 +1073,9 @@ class Engine:
                 else:
                     self._resolve_stuck()
             else:
+                if self._capability_blocked():
+                    self._fail("环境阻塞: 靶机不可达或沙箱不可用(能力探测复查仍失败),后续步骤无法执行")
+                    return
                 self.current = step
                 self._deadlock_attempts = 0
                 self._go(EngineState.EXECUTING, f"step {step.id} ready")
