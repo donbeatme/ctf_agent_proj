@@ -6,6 +6,7 @@
   "LLM_MODEL_EP": "",
   "LLM_MODEL_EE": "",
   "LLM_MODEL_ET": "",
+  "EVALUATOR": "smoke",
   "EVALUATOR_PLAN": "mock",
   "EVALUATOR_STEP": "real",
   "EVALUATOR_TASK": "mock",
@@ -15,6 +16,7 @@
     "max_stalls": 3,
     "max_deadlock_attempts": 3,
     "max_step_attempts": 3,
+    "max_tool_rounds": 24,
     "context_budget_tokens": {
       "planner": null,
       "evaluator_plan": null,

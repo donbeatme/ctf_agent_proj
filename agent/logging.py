@@ -107,8 +107,11 @@ class EngineLogger:
     # ═══════════════════════════════════════════════════════════════════
 
     def _engine(self, text: str):
-        """追加一条 [engine] 根级行(自动关闭当前 agent)。"""
-        self._close_llm()
+        """追加一条 [engine] 根级行(自动关闭当前 agent;不关 LLM 块)。
+
+        执行器工具循环会穿插 sandbox ops 行——若在此 _close_llm,随后的
+        on_llm_response 会被 _cur_llm is None 守卫拦掉,[llm]/use_tool 永不渲染。
+        """
         self._close_agent()
         self._tick_lines.append(f"{_ts()} [engine] {text}")
 
@@ -322,9 +325,9 @@ class EngineLogger:
         """LLM 响应:渲染完整 [llm] 块(含 header + response + tool_calls)。"""
         if self._cur_llm is None:
             return
+        llm = self._cur_llm  # 先捕获:_to_agent 切块时可能 _close_llm 清掉它
         role_v = str(role)
         self._to_agent(role_v)
-        llm = self._cur_llm
         call_num = llm["call_num"]
         ctx_size = llm["ctx_size"]
         sys_size = llm.get("sys_size", 0)
@@ -437,8 +440,6 @@ class EngineLogger:
             return ""
         parts = []
         for k, v in args.items():
-            if isinstance(v, str) and len(v) > 60:
-                v = v[:57] + "..."
             parts.append(f"{k}={v!r}")
         return ", ".join(parts)
 

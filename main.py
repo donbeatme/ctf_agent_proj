@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from agent.evaluator import build_evaluator
+from agent.llm_api import make_compress
 from model_config import get as cfg_get
 from ctf_platform import cli as ctf_cli
 from opslog import attach, detach, emit
@@ -164,6 +165,7 @@ def run_task(args):
             evaluator,
             workspace=ws,
             understander=understander,
+            compress=make_compress(),
         )
         holder["engine"] = engine
         sink = _ops_sink(ws, engine, run_id)
@@ -195,6 +197,7 @@ def run_task(args):
         build_evaluator(ws),
         workspace=ws,
         understander=understander,
+        compress=make_compress(),
     )
     sink = _ops_sink(ws, engine, run_id)
     attach(sink)
@@ -388,6 +391,7 @@ def run_local_challenge(args):
             evaluator,
             workspace=ws,
             understander=understander,
+            compress=make_compress(),
         )
         holder["engine"] = engine
         sink = _ops_sink(ws, engine, run_id)
@@ -415,6 +419,7 @@ def run_local_challenge(args):
         build_evaluator(ws),
         workspace=ws,
         understander=understander,
+        compress=make_compress(),
     )
     sink = _ops_sink(ws, engine, run_id)
     attach(sink)

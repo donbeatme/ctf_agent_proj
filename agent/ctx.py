@@ -789,7 +789,10 @@ class HistoryComponent(CtxComponent):
             "把下面的 PASS 证据(已通过验收的步骤/检查)增量压缩成摘要;"
             "说明哪步过了、关键证据是什么;失败/升级/评审记录不在这里,无需保留。"
         )
-        folded = self._compress(prompt, chunk)
+        try:
+            folded = self._compress(prompt, chunk)
+        except Exception:  # 压缩失败:不推进折叠进度,下轮重试
+            return
         if folded and folded.strip():
             self._summary = f"{self._summary}\n{folded.strip()}".strip()
         self._folded_passes = len(evs)
@@ -1166,7 +1169,10 @@ class TraceComponent(CtxComponent):
             "把下面的工具调用轨迹(本轮执行产出)压缩成摘要;"
             "说明调用了哪些工具、关键输出与异常;保持可读。"
         )
-        folded = self._compress(prompt, chunk)
+        try:
+            folded = self._compress(prompt, chunk)
+        except Exception:  # 压缩失败不炸:摘要留空,render 走 [暂无]
+            folded = ""
         self._summary = folded.strip() if folded and folded.strip() else ""
         self._sig = sig
         self._persist()

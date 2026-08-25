@@ -24,6 +24,7 @@ REVISE 是评审标记,评审通过即清回 PENDING,不会滞留到调度期;
 max_cycles 仅作总调度预算兜底,超限抛 EngineError(引擎结构性失序)。
 """
 
+import json
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -682,6 +683,38 @@ class Engine:
                 step_id=sid,
             )
 
+    def _step_tool_digest(self, step_id: str, max_calls=40, out_chars=200) -> str:
+        """当前步骤 executor 工具调用紧凑摘要:拼进 step_eval 的 observation。
+
+        评估器默认只看到 executor 的观察(如"超 24 轮/350s"),对执行过程两眼一抹黑,
+        意见只能给模板话。这里把该步的 use_tool/tool_result 按时间序折叠成摘要喂给评估器,
+        让它能基于真实过程给出方向性意见。dict 与 dataclass 两种 detail 都兼容。
+        """
+        evs = [e for e in self.workspace.events
+               if e.step_id == step_id
+               and e.kind in (EventKind.USE_TOOL, EventKind.TOOL_RESULT)
+               and e.agent == Role.EXECUTOR]
+        if not evs:
+            return ""
+        lines = []
+        for e in evs[:max_calls]:
+            d = e.detail
+            if isinstance(d, dict):
+                tool, args, output = d.get("tool", "?"), d.get("args", {}), d.get("output", "")
+            else:
+                tool = getattr(d, "tool", "?")
+                args = getattr(d, "args", {})
+                output = getattr(d, "output", "")
+            if e.kind == EventKind.USE_TOOL:
+                arg_s = json.dumps(args, ensure_ascii=False)
+                lines.append(f"#call {tool} {arg_s[:120]}")
+            else:
+                text = str(output).replace("\n", " ")[:out_chars]
+                lines.append(f"#result {tool} -> {text}")
+        head = f"# 步骤 {step_id} 工具轨迹({len(evs)} 条)"
+        tail = f"(仅列前 {max_calls} 条)" if len(evs) > max_calls else ""
+        return "\n".join(x for x in [head, *lines, tail] if x)
+
     @staticmethod
     def _dag_signature(bp) -> tuple:
         """计划结构签名(不含 status/attempts 等运行态):id+指令+验收标准+依赖+技能绑定。"""
@@ -1062,8 +1095,11 @@ class Engine:
             ctx = self._assemble_ctx(
                 Role.EVALUATOR_STEP, step_id=self.current.id,
                 system=self.evaluator.system_for(Role.EVALUATOR_STEP))
-            if self._obs:
-                ctx = f"{ctx}\n\nobservation: {self._obs}".strip()
+            digest = self._step_tool_digest(self.current.id)
+            obs_parts = [p for p in (self._obs, digest) if p]
+            if obs_parts:
+                obs = "\n\n".join(obs_parts).strip()
+                ctx = f"{ctx}\n\nobservation: {obs}".strip()
             t = PhaseTimer("step_eval", deadline_ms=self._phase_deadline("step_eval"))
             with t:
                 res = self._safe_call(

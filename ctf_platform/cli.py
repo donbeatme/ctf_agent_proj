@@ -28,6 +28,15 @@ def register(sub):
     p.set_defaults(func=cmd_challenge_sync)
 
     p = sub.add_parser(
+        "challenge-list", help="查看本地题目单(读 data/ctf_platform.db,需先 sync/fetch 落库)"
+    )
+    p.add_argument("--category", default=None, help="按分类过滤(MISC/REVERSE/CRYPTO/...)")
+    p.add_argument("--difficulty", default=None, help="按难度过滤(Easy/Medium/Hard)")
+    p.add_argument("--platform", default=None, help="按平台过滤(默认 ctf2)")
+    p.add_argument("--limit", type=int, default=200, help="显示条数上限,0 = 全部(默认 200)")
+    p.set_defaults(func=cmd_challenge_list)
+
+    p = sub.add_parser(
         "flag-submit", help="向平台提交 flag;正确则写入本地答案库"
     )
     p.add_argument("id", help="challenge_id 或 friendly_id")
@@ -87,6 +96,51 @@ def cmd_challenge_sync(args) -> None:
         print(f"challenge-sync 失败: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"challenges: total={r['total']} inserted={r['inserted']} updated={r['updated']}")
+
+
+def cmd_challenge_list(args) -> None:
+    """查看本地题目单(读 data/ctf_platform.db)。需先 challenge-sync / challenge-fetch 落库。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+    from .storage import ChallengeStore, connect
+
+    settings = StoreSettings.from_env()
+    if not settings.db_path.exists():
+        print(f"本地库不存在: {settings.db_path}", file=sys.stderr)
+        print("请先运行 challenge-sync 拉取全量,或 challenge-fetch 拉取单题", file=sys.stderr)
+        sys.exit(1)
+    active = [
+        (col, val)
+        for col, val in (
+            ("platform", args.platform),
+            ("category", args.category),
+            ("difficulty", args.difficulty),
+        )
+        if val
+    ]
+    st = ChallengeStore(connect(settings.store_dir))
+    rows = st.query_challenges(
+        **{col: val for col, val in active},
+        limit=args.limit if args.limit > 0 else 10**9,
+    )
+    if not rows:
+        print("本地库中无匹配题目(可调 --category/--difficulty/--limit 放宽,或先 challenge-sync/fetch)")
+        return
+    total_sql = "SELECT COUNT(*) FROM challenges WHERE 1=1" + "".join(
+        f" AND {col}=?" for col, _ in active
+    )
+    total = st.conn.execute(total_sql, [val for _, val in active]).fetchone()[0]
+    width = max(len(str(r["friendly_id"])) for r in rows)
+    print(f"total={total}  shown={len(rows)}")
+    for r in rows:
+        print(
+            f"{str(r['friendly_id']).ljust(width)}  {r['name']}  "
+            f"[{r['category']} / {r['difficulty']}]"
+        )
+    if len(rows) < total:
+        print(f"… 还有 {total - len(rows)} 条未显示(调大 --limit)")
 
 
 def cmd_flag_submit(args) -> None:

@@ -230,12 +230,15 @@ class RealExecutor(Executor):
     system = EXEC_SYSTEM
 
     def __init__(self, llm_fn=None, runner=None, workspace=None,
-                 max_tool_rounds=8, model=None, workdir=None, adapter=None):
+                 max_tool_rounds=None, model=None, workdir=None, adapter=None):
         from agent import llm_api
         from agent.runner import CommandRunner
+        from model_config import get_engine_config
 
         self.runner = runner or CommandRunner()
         self.workspace = workspace
+        if max_tool_rounds is None:
+            max_tool_rounds = get_engine_config().get("max_tool_rounds", 24)
         self.max_tool_rounds = max_tool_rounds
         self.model = model or llm_api.role_model("executor")
         self.workdir = workdir

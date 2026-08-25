@@ -665,6 +665,35 @@ def chat(prompt=None, system=None, *, messages=None, model=None, base_url=None, 
     return resp.choices[0].message.content or ""
 
 
+def make_compress(model=None, max_tokens=1024, temperature=0.2,
+                  fallback_chars=8000):
+    """构造上下文压缩回调 compress(prompt, content) -> str,供 CtxAssembler 溢出压缩用。
+
+    prompt 是组装器算好的压缩提示词,content 是待压内容;返回压缩后文本。
+    LLM 调用失败时兜底截断 content(不抛异常)——assembler 溢出路径本来就会
+    在异常时走机械降级,但 TraceComponent._fold 等同步路径需要回调永不炸。
+    """
+    _system = (
+        "你是上下文压缩器。输入为 [压缩提示词] 与 [待压内容] 两部分。"
+        "严格按提示词要求压缩:保留决策必需的关键事实、数字与结论,删除冗余表述;"
+        "只输出压缩结果本身,不要任何解释或前缀。"
+    )
+
+    def compress(prompt: str, content: str) -> str:
+        try:
+            return chat(
+                system=_system,
+                prompt=f"{prompt}\n\n# 待压内容\n{content}",
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception:
+            return content if len(content) <= fallback_chars else content[:fallback_chars] + "…(压缩失败,截断)"
+
+    return compress
+
+
 def _assistant_message(msg):
     return {
         "role": "assistant",
@@ -693,7 +722,7 @@ def _run_tool(tool_exec, name, arguments):
 
 
 def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools=None,
-                    max_tool_rounds=8, tool_exec=call_tool, model=None, base_url=None,
+                    max_tool_rounds=None, tool_exec=call_tool, model=None, base_url=None,
                     api_key=None, temperature=0.7, max_tokens=None, timeout=DEFAULT_TIMEOUT,
                     max_retries=DEFAULT_MAX_RETRIES, retry_backoff=1.5,
                     stream=None) -> ToolResult:
@@ -708,6 +737,11 @@ def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools
     """
     if stream is None:
         stream = _llm_config().get("llm_stream", False)
+
+    if max_tool_rounds is None:
+        from model_config import get_engine_config
+
+        max_tool_rounds = get_engine_config().get("max_tool_rounds", 24)
 
     if not tools:
         content = chat(prompt=prompt, system=system, messages=messages, docs=docs,
