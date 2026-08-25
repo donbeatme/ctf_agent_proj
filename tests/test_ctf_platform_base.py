@@ -175,6 +175,25 @@ def test_ingest_fails_fast_when_attachment_missing(tmp_path, monkeypatch):
         a.ingest("whatever")
 
 
+def test_ingest_fails_fast_records_materialize_event(tmp_path, monkeypatch):
+    """物化守卫失败:抛 AdapterError 同时进 adapter.materialize_failed(FATAL)。"""
+    from opslog import attach, detach
+
+    a = _adapter(tmp_path, monkeypatch)
+    a.cache.materialize = lambda *a, **k: None
+    seen = []
+    sink = lambda kind, detail: seen.append((kind, detail))
+    attach(sink)
+    try:
+        with pytest.raises(AdapterError, match="附件缺失"):
+            a.ingest("whatever")
+    finally:
+        detach(sink)
+    fail_ev = [d for k, d in seen if k == "adapter.materialize_failed"]
+    assert len(fail_ev) == 1
+    assert fail_ev[0]["level"] == "fatal"
+
+
 def test_adapter_clean_challenge_dir_resolves_by_friendly_id(tmp_path, monkeypatch):
     a = _adapter(tmp_path, monkeypatch)
     dest = a.ingest("whatever")

@@ -120,6 +120,25 @@ def test_cleanup_delegates(tmp_path):
     assert bk.cleaned == [key]
 
 
+def test_exec_event_carries_cmd_and_sync_success(tmp_path):
+    """exec 事件带 cmd 内容;sync 成功也进事件(补审计线缺口)。"""
+    from opslog import attach, detach
+
+    bk = FakeBackend()
+    m = SandboxManager(backend=bk)
+    seen = []
+    sink = lambda kind, detail: seen.append((kind, detail))
+    attach(sink)
+    try:
+        out = m.exec("echo hi", cwd=tmp_path)
+    finally:
+        detach(sink)
+    assert out.ok
+    exec_ev = [d for k, d in seen if k == "sandbox.exec"]
+    assert exec_ev and exec_ev[0]["cmd"] == "echo hi"
+    assert [d for k, d in seen if k == "sandbox.sync"]  # 同步成功也要进事件
+
+
 def test_sync_failure_recorded_not_silent(tmp_path):
     """附件目录同步失败:不阻断本次命令,但必须报错进 log(不能静默吞掉)。"""
     from opslog import attach, detach

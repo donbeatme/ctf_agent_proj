@@ -138,6 +138,8 @@ class SandboxManager:
             # 同步失败不阻断本次命令(远端持久容器可能已有文件),但必须报错进 log,不能静默
             record_error("sandbox", "sync", exc=exc, level=ErrorLevel.RECOVERABLE,
                          cwd=str(work), reason="工作目录同步失败,远端 /work 可能缺失附件")
+        else:
+            emit("sandbox", "sync", cwd=str(work), session_key=key)
         if self.settings.install_auto and tool_id:
             self._ensure_deps(tool_id, key)
         cmd_str = shlex.join(cmd) if isinstance(cmd, list) else str(cmd)
@@ -146,7 +148,7 @@ class SandboxManager:
         out = self._to_outcome(raw, cmd, target or self.backend.name, t0)
         emit("sandbox", "exec", cwd=str(work), session_key=key, tool_id=tool_id,
              target=out.target, ok=out.ok, returncode=out.returncode,
-             timed_out=out.timed_out, elapsed_ms=out.elapsed_ms)
+             timed_out=out.timed_out, elapsed_ms=out.elapsed_ms, cmd=cmd_str)
         return out
 
     def run_python(self, code, *, cwd=None, category=None, tool_id=None,
@@ -163,6 +165,8 @@ class SandboxManager:
         except Exception as exc:
             record_error("sandbox", "sync", exc=exc, level=ErrorLevel.RECOVERABLE,
                          cwd=str(work), reason="工作目录同步失败,远端 /work 可能缺失附件")
+        else:
+            emit("sandbox", "sync", cwd=str(work), session_key=key)
         if self.settings.install_auto and tool_id:
             self._ensure_deps(tool_id, key)
         argv = ["python3", "/work/_ctf_exec.py"]
@@ -171,7 +175,7 @@ class SandboxManager:
         out = self._to_outcome(raw, argv, target or self.backend.name, t0)
         emit("sandbox", "run_python", cwd=str(work), session_key=key, tool_id=tool_id,
              target=out.target, ok=out.ok, returncode=out.returncode,
-             timed_out=out.timed_out, elapsed_ms=out.elapsed_ms)
+             timed_out=out.timed_out, elapsed_ms=out.elapsed_ms, cmd=shlex.join(argv))
         return out
 
     def _ensure_deps(self, tool_id: str, key: str) -> None:

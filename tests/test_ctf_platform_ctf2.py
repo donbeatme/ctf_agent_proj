@@ -164,6 +164,67 @@ def test_download_uses_detail_download_url(tmp_path, monkeypatch):
     assert "Cookie" not in s.requests[1][2].get("headers", {})
 
 
+def test_download_success_and_failure_record_events(tmp_path, monkeypatch):
+    """download 成功/失败都进审计线(补缺口:附件下载曾是静默操作)。"""
+    from opslog import attach, detach
+
+    def _events(a, fn):
+        seen = []
+        sink = lambda kind, detail: seen.append((kind, detail))
+        attach(sink)
+        try:
+            fn()
+        finally:
+            detach(sink)
+        return seen
+
+    s = FakeSession()
+    monkeypatch.setenv("CTF_STORE_DIR", str(tmp_path))
+    monkeypatch.setenv("CTF2_PRACTICE_GROUND_ID", "pg1")
+    a = Ctf2Adapter(StoreSettings.from_env(), session=s)
+    s.add(DETAIL_URL, status=200, json_data=_detail())
+    s.add(CDN, status=200, content=b"DATA")
+    seen = _events(a, lambda: a.download("f1", "c1"))
+    ok_ev = [d for k, d in seen if k == "adapter.download"]
+    assert len(ok_ev) == 1 and ok_ev[0]["size"] == 4
+
+    s2 = FakeSession()
+    a2 = Ctf2Adapter(StoreSettings.from_env(), session=s2)
+    s2.add(DETAIL_URL, status=401)
+    seen2 = []
+    sink2 = lambda kind, detail: seen2.append((kind, detail))
+    attach(sink2)
+    try:
+        with pytest.raises(AuthError):
+            a2.download("f1", "c1")
+    finally:
+        detach(sink2)
+    fail_ev = [d for k, d in seen2 if k == "adapter.download_failed"]
+    assert len(fail_ev) == 1
+    assert "AuthError" in fail_ev[0]["error"]
+
+
+def test_parse_not_found_records_event(tmp_path, monkeypatch):
+    """parse 失败(索引无此 id)→ adapter.parse_failed 进审计线。"""
+    from opslog import attach, detach
+
+    s = FakeSession()
+    monkeypatch.setenv("CTF_STORE_DIR", str(tmp_path))
+    monkeypatch.setenv("CTF2_PRACTICE_GROUND_ID", "pg1")
+    a = Ctf2Adapter(StoreSettings.from_env(), session=s)
+    seen = []
+    sink = lambda kind, detail: seen.append((kind, detail))
+    attach(sink)
+    try:
+        with pytest.raises(Exception, match="索引中无"):
+            a.parse("nope")
+    finally:
+        detach(sink)
+    fail_ev = [d for k, d in seen if k == "adapter.parse_failed"]
+    assert len(fail_ev) == 1
+    assert "索引中无" in fail_ev[0]["error"]
+
+
 def test_download_session_relative_url_prefixes_origin_and_auths(tmp_path, monkeypatch):
     s = FakeSession()
     monkeypatch.setenv("CTF_STORE_DIR", str(tmp_path))

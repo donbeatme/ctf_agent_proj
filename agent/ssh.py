@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from opslog import ErrorLevel, record_error
+
 _IGNORED = {".git", "__pycache__", "_ctf_exec.py"}
 
 
@@ -73,7 +75,9 @@ class SshBackend:
             return ProcOutcome(rc, out, err)
         except TimeoutError:
             return ProcOutcome(None, b"", b"", timed_out=True)
-        except Exception as exc:  # 连接/协议异常 → 失败 observation,不崩引擎
+        except Exception as exc:  # 连接/协议异常 → 失败 observation + 进审计线,不崩引擎
+            record_error("ssh", "exec", exc=exc, level=ErrorLevel.RECOVERABLE,
+                         host=self.host, reason="SSH 传输层异常(区别于命令失败)")
             return ProcOutcome(None, b"", str(exc).encode("utf-8", "replace"))
 
     # ===== 文件同步 =====

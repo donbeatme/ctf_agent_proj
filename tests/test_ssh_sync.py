@@ -12,6 +12,34 @@ from pathlib import Path
 from agent.ssh import SshBackend
 
 
+def test_transport_error_records_event(monkeypatch):
+    """SSH 传输层异常 → ssh.exec_failed 进审计线(区别于命令失败)。"""
+    from opslog import attach, detach
+
+    class _Chan:
+        def open_session(self):
+            raise ConnectionResetError("connection reset by peer")
+
+    class _Client:
+        def get_transport(self):
+            return _Chan()
+
+    monkeypatch.setattr(SshBackend, "_connect", lambda self: _Client())
+    sb = SshBackend(host="vm", user="u", password="p")
+    seen = []
+    sink = lambda kind, detail: seen.append((kind, detail))
+    attach(sink)
+    try:
+        out = sb.exec("ls", timeout=5)
+    finally:
+        detach(sink)
+    assert out.returncode is None
+    fail_ev = [d for k, d in seen if k == "ssh.exec_failed"]
+    assert len(fail_ev) == 1
+    assert "ConnectionResetError" in fail_ev[0]["error"]
+    assert fail_ev[0]["host"] == "vm"
+
+
 class _Stat:
     def __init__(self, size, mtime):
         self.st_size = size

@@ -80,6 +80,31 @@ def test_cleanup_removes_container():
     assert any("docker rm -f ctf-k1" in c for c, _ in ssh.execs)
 
 
+def test_cleanup_failure_records_cleanup_event():
+    """docker rm 失败:记 container_removed_failed(CLEANUP),不再无条件报 removed。"""
+    from opslog import attach, detach
+
+    class _FailRm(FakeSsh):
+        def exec(self, cmd_str, timeout=None):
+            self.execs.append((cmd_str, timeout))
+            if cmd_str.startswith("docker rm -f"):
+                return ProcOutcome(1, b"", b"Error: No such container")
+            return super().exec(cmd_str, timeout)
+
+    bk = _backend(ssh=_FailRm())
+    seen = []
+    sink = lambda kind, detail: seen.append((kind, detail))
+    attach(sink)
+    try:
+        bk.cleanup("k1")
+    finally:
+        detach(sink)
+    fail_ev = [d for k, d in seen if k == "sandbox.container_removed_failed"]
+    assert len(fail_ev) == 1
+    assert fail_ev[0]["level"] == "cleanup"
+    assert "docker rm 失败" in fail_ev[0]["reason"]
+
+
 def test_is_ready_requires_host():
     assert SshSandboxBackend(SandboxSettings(), ssh=FakeSsh()).is_ready() is False
     assert SshSandboxBackend(SandboxSettings(ssh_host="vm"), ssh=FakeSsh()).is_ready() is True

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import yaml
 
-from opslog import emit
+from opslog import ErrorLevel, emit, record_error
 
 from .config import StoreSettings
 from .errors import AdapterError
@@ -183,7 +183,10 @@ class ChallengeAdapter(ABC):
         self._write_metadata(meta, dest)
         problems = verify_challenge_dir(dest, [f.rel_path for f in meta.files])
         if problems:
-            raise AdapterError("物化结果不完整: " + "; ".join(problems))
+            err = AdapterError("物化结果不完整: " + "; ".join(problems))
+            record_error("adapter", "materialize", exc=err, level=ErrorLevel.FATAL,
+                         challenge_id=meta.challenge_id, problems=problems)
+            raise err
         return dest
 
     def _write_metadata(self, meta: ChallengeMeta, dest: Path) -> None:

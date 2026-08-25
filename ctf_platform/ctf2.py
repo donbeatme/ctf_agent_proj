@@ -139,6 +139,14 @@ class Ctf2Adapter(ChallengeAdapter):
     # ---- 能力 1: parse ----
 
     def parse(self, source) -> ChallengeMeta:
+        try:
+            return self._parse(source)
+        except Exception as exc:
+            record_error("adapter", "parse", exc=exc, level=ErrorLevel.RECOVERABLE,
+                         source=str(source)[:200])
+            raise
+
+    def _parse(self, source) -> ChallengeMeta:
         if isinstance(source, dict):
             return self._parse_json(source)
         s = str(source).strip()
@@ -239,6 +247,17 @@ class Ctf2Adapter(ChallengeAdapter):
     def download(self, file_id: str, challenge_id: str) -> bytes:
         """详情 → download_url 直下。相对 URL 前缀 origin;同源会话端点经 _auth_request
         带 Bearer(可自动续期);CDN(第三方域名)绝不带凭证头,防 token 外泄。"""
+        try:
+            content = self._download(file_id, challenge_id)
+        except Exception as exc:
+            record_error("adapter", "download", exc=exc, level=ErrorLevel.RECOVERABLE,
+                         challenge_id=challenge_id, file_id=file_id)
+            raise
+        emit("adapter", "download", challenge_id=challenge_id, file_id=file_id,
+             size=len(content))
+        return content
+
+    def _download(self, file_id: str, challenge_id: str) -> bytes:
         url = self._resolve_download_url(file_id, challenge_id)
         if url.startswith("/"):
             url = self.origin.rstrip("/") + url

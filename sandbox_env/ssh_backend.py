@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import shlex
 
-from opslog import emit
+from opslog import ErrorLevel, emit, record_error
 
 from .base import ExecOutcome, SandboxBackend, container_name_for
 from .config import SandboxSettings
@@ -96,9 +96,17 @@ class SshSandboxBackend(SandboxBackend):
         key = session_key or "default"
         name = container_name_for(key)
         try:
-            self.ssh.exec(f"docker rm -f {name}", timeout=60)
-        except Exception:
-            pass
+            out = self.ssh.exec(f"docker rm -f {name}", timeout=60)
+            if out.returncode != 0:
+                record_error("sandbox", "container_removed", level=ErrorLevel.CLEANUP,
+                             session_key=key, container=name,
+                             reason=f"docker rm 失败 rc={out.returncode}: "
+                                    f"{out.stderr.decode('utf-8', 'replace')[:200]}")
+                return
+        except Exception as exc:  # noqa: BLE001 — 连接异常也记 CLEANUP,不静默
+            record_error("sandbox", "container_removed", exc=exc, level=ErrorLevel.CLEANUP,
+                         session_key=key, container=name)
+            return
         emit("sandbox", "container_removed", session_key=key, container=name)
         self._created.discard(name)
 
