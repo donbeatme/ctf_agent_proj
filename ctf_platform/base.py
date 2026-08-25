@@ -33,6 +33,7 @@ __all__ = [
     "ChallengeMeta",
     "FileRecord",
     "SubmitResult",
+    "verify_challenge_dir",
 ]
 
 
@@ -71,6 +72,37 @@ def clean_challenge_dir(
         except OSError:
             pass
     return removed
+
+
+def verify_challenge_dir(
+    challenge_dir: str | Path, files: list[str] | None = None
+) -> list[str]:
+    """物化完整性守卫:返回问题列表(空 = 就绪)。
+
+    检查目录存在、metadata.yml 可解析且含 id/name、声明的附件已落盘。
+    缺任一项即返回具体错误;调用方应 fail-fast,避免 run 已启动后沙箱
+    /work 里缺附件才暴露(附件同步失败仅记 recoverable,不阻断命令)。
+    """
+    root = Path(challenge_dir)
+    problems: list[str] = []
+    if not root.is_dir():
+        return [f"挑战目录不存在或不是目录: {root}"]
+    meta = root / "metadata.yml"
+    if not meta.is_file():
+        problems.append(f"缺少 metadata.yml: {meta}")
+    else:
+        try:
+            data = yaml.safe_load(meta.read_text(encoding="utf-8"))
+        except Exception as exc:
+            problems.append(f"metadata.yml 解析失败: {exc}")
+            data = None
+        if not isinstance(data, dict) or not data.get("id") or not data.get("name"):
+            problems.append(f"metadata.yml 缺少 id/name 字段: {meta}")
+    for rel in files or []:
+        p = root / "distfiles" / rel
+        if not p.is_file():
+            problems.append(f"附件缺失: {p}")
+    return problems
 
 
 def build_summary(
@@ -149,6 +181,9 @@ class ChallengeAdapter(ABC):
             )
         self.cache.materialize(meta.challenge_id, dest / "distfiles")
         self._write_metadata(meta, dest)
+        problems = verify_challenge_dir(dest, [f.rel_path for f in meta.files])
+        if problems:
+            raise AdapterError("物化结果不完整: " + "; ".join(problems))
         return dest
 
     def _write_metadata(self, meta: ChallengeMeta, dest: Path) -> None:

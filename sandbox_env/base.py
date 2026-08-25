@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from opslog import emit
+from opslog import ErrorLevel, emit, record_error
 
 from .config import SandboxSettings
 from .errors import SandboxUnavailableError
@@ -134,8 +134,10 @@ class SandboxManager:
         self.backend.ensure(key)
         try:
             self.backend.sync(work, session_key=key)
-        except Exception:
-            pass  # 同步失败不致命:远端工作区可能已有文件
+        except Exception as exc:
+            # 同步失败不阻断本次命令(远端持久容器可能已有文件),但必须报错进 log,不能静默
+            record_error("sandbox", "sync", exc=exc, level=ErrorLevel.RECOVERABLE,
+                         cwd=str(work), reason="工作目录同步失败,远端 /work 可能缺失附件")
         if self.settings.install_auto and tool_id:
             self._ensure_deps(tool_id, key)
         cmd_str = shlex.join(cmd) if isinstance(cmd, list) else str(cmd)
@@ -158,8 +160,9 @@ class SandboxManager:
         self.backend.ensure(key)
         try:
             self.backend.sync(work, session_key=key)
-        except Exception:
-            pass
+        except Exception as exc:
+            record_error("sandbox", "sync", exc=exc, level=ErrorLevel.RECOVERABLE,
+                         cwd=str(work), reason="工作目录同步失败,远端 /work 可能缺失附件")
         if self.settings.install_auto and tool_id:
             self._ensure_deps(tool_id, key)
         argv = ["python3", "/work/_ctf_exec.py"]

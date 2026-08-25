@@ -120,6 +120,29 @@ def test_cleanup_delegates(tmp_path):
     assert bk.cleaned == [key]
 
 
+def test_sync_failure_recorded_not_silent(tmp_path):
+    """附件目录同步失败:不阻断本次命令,但必须报错进 log(不能静默吞掉)。"""
+    from opslog import attach, detach
+
+    class _BoomSync(FakeBackend):
+        def sync(self, local_dir, session_key=None):
+            raise FileNotFoundError("distfiles 缺失(本地挑战目录未就绪)")
+
+    m = SandboxManager(backend=_BoomSync())
+    seen = []
+    sink = lambda kind, detail: seen.append((kind, detail))
+    attach(sink)
+    try:
+        out = m.exec("ls", cwd=tmp_path)
+    finally:
+        detach(sink)
+    assert out.ok  # RECOVERABLE: 记录后继续,不阻断命令
+    sync_events = [d for k, d in seen if k == "sandbox.sync_failed"]
+    assert len(sync_events) == 1
+    assert sync_events[0]["level"] == "recoverable"
+    assert "distfiles 缺失" in sync_events[0]["error"]
+
+
 def test_manager_without_ssh_raises():
     with pytest.raises(SandboxUnavailableError, match="CTF_SSH_HOST"):
         SandboxManager(settings=SandboxSettings())  # 无 host → 拒绝构造 SshSandboxBackend

@@ -2,7 +2,16 @@
 
 from pathlib import Path
 
-from ctf_platform.base import ChallengeAdapter, SubmitResult, clean_challenge_dir
+import pytest
+import yaml
+
+from ctf_platform.base import (
+    AdapterError,
+    ChallengeAdapter,
+    SubmitResult,
+    clean_challenge_dir,
+    verify_challenge_dir,
+)
 from ctf_platform.config import StoreSettings
 from ctf_platform.storage import ChallengeMeta, FileRecord
 
@@ -115,6 +124,55 @@ def test_clean_challenge_dir_keeps_metadata_and_distfiles(tmp_path):
 
 def test_clean_challenge_dir_missing_dir_returns_empty(tmp_path):
     assert clean_challenge_dir(tmp_path / "nope") == []
+
+
+# ── 物化完整性守卫:run 启动前 fail-fast ─────────────────────────────
+
+def test_verify_challenge_dir_ready(tmp_path):
+    """目录 + metadata.yml + 附件齐全 → 无问题(空列表)。"""
+    root = tmp_path / "ch"
+    (root / "distfiles").mkdir(parents=True)
+    (root / "distfiles" / "x.bin").write_bytes(b"data")
+    (root / "metadata.yml").write_text(
+        yaml.safe_dump({"id": "c1", "name": "n"}), encoding="utf-8"
+    )
+    assert verify_challenge_dir(root, ["x.bin"]) == []
+
+
+def test_verify_challenge_dir_missing_dir(tmp_path):
+    assert "不存在" in verify_challenge_dir(tmp_path / "nope")[0]
+
+
+def test_verify_challenge_dir_missing_metadata(tmp_path):
+    root = tmp_path / "ch"
+    root.mkdir()
+    assert "metadata.yml" in verify_challenge_dir(root)[0]
+
+
+def test_verify_challenge_dir_bad_metadata(tmp_path):
+    root = tmp_path / "ch"
+    root.mkdir()
+    (root / "metadata.yml").write_text("id: 只有一半", encoding="utf-8")
+    problems = verify_challenge_dir(root)
+    assert any("id/name" in p for p in problems)
+
+
+def test_verify_challenge_dir_missing_attachment(tmp_path):
+    root = tmp_path / "ch"
+    (root / "distfiles").mkdir(parents=True)
+    (root / "metadata.yml").write_text(
+        yaml.safe_dump({"id": "c1", "name": "n"}), encoding="utf-8"
+    )
+    problems = verify_challenge_dir(root, ["x.bin"])
+    assert any("x.bin" in p and "附件缺失" in p for p in problems)
+
+
+def test_ingest_fails_fast_when_attachment_missing(tmp_path, monkeypatch):
+    """声明的附件没落盘(物化不完整)→ ingest 抛 AdapterError,不启动 run。"""
+    a = _adapter(tmp_path, monkeypatch)
+    a.cache.materialize = lambda *a, **k: None  # 附件没写进 distfiles/
+    with pytest.raises(AdapterError, match="附件缺失"):
+        a.ingest("whatever")
 
 
 def test_adapter_clean_challenge_dir_resolves_by_friendly_id(tmp_path, monkeypatch):
