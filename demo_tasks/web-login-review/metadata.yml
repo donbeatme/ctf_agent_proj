@@ -15,5 +15,5 @@ expected_outputs:
   - 参数与认证风险分析
   - 可复核验证步骤
   - 成果审核摘要
-sandbox_image: ops-pi-web:0.1.0
+sandbox_runtime: ssh-sandbox-unified
 status: tested

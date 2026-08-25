@@ -55,9 +55,9 @@ const CTF_TYPE_LABEL = {
 
 const AGENT_ROLE_ITEMS = [
   { id: "intake", type: "输入", title: "任务情报感知", badge: "wired", value: "Text / URL / JSON / Files", desc: "统一接入任务情报、附件、远程地址和平台 JSON。", detail: "输入层负责把用户投递的多源信息规范成行动任务，保留附件、目标 URL、成果口令格式和平台元数据。" },
-  { id: "understander", type: "理解", title: "RealTaskUnderstander", badge: "wired", value: "真实任务解析", desc: "读取本地任务目录、metadata、附件并生成目标列表。", detail: "输出场景类型、置信度、目标列表、artifacts、target_info，为能力检索、沙箱匹配和模型提示词提供结构化上下文。" },
+  { id: "understander", type: "理解", title: "RealTaskUnderstander", badge: "wired", value: "真实任务解析", desc: "读取本地任务目录、metadata、附件并生成目标列表。", detail: "输出场景类型、置信度、目标列表、artifacts、target_info，为能力检索、工具筛选和模型提示词提供结构化上下文。" },
   { id: "planner", type: "规划", title: "Planner", badge: "wired", value: "真实 LLM", desc: "召回能力库，生成可解释 DAG。", detail: "Planner 将行动目标拆成步骤，标注依赖、验收标准、能力引用和重试策略。" },
-  { id: "executor", type: "执行", title: "RealExecutor", badge: "wired", value: "可接沙箱", desc: "CommandRunner、工具调用、沙箱执行、文件产物通道。", detail: "执行层已具备 RealExecutor / CommandRunner；Web 默认保守走 mock，可扩展为显式选择 Pi/SSH 沙箱执行。" },
+  { id: "executor", type: "执行", title: "Executor", badge: "wired", value: "Web 演示 / CLI 真实", desc: "Web 当前展示 MockExecutor；命令行可通过 RealExecutor 连接 SSH 沙箱。", detail: "真实执行链路为 python main.py run-local-challenge --executor real，前置条件是可 SSH 的统一沙箱环境；Web 后端当前仍为 MockExecutor 演示链路。" },
   { id: "evaluator", type: "验收", title: "Evaluator + Platform Submit", badge: "wired", value: "本地核验/平台提交", desc: "验证证据、候选成果口令、失败反思。", detail: "Evaluator 负责 step_eval、review、reflect、eval_goals；成果审核入口已接平台适配器的本地核验与提交能力。" },
 ];
 
@@ -83,14 +83,14 @@ const USAGE_ITEMS = [
 ];
 
 const MCP_ITEMS = [
-  { id: "terminal.exec", type: "核心", title: "terminal.exec", badge: "synced", value: "ready", desc: "容器内命令执行。", detail: "核心执行通道，供 Agent 在沙箱或工作区内运行命令并回收 stdout/stderr。" },
+  { id: "terminal.exec", type: "核心", title: "terminal.exec", badge: "synced", value: "ready", desc: "命令执行通道。", detail: "真实执行时供 Agent 在 SSH 沙箱工作区内运行命令并回收 stdout/stderr；Web 演示链路当前不直接触发真实命令。" },
   { id: "file.workspace", type: "核心", title: "file.workspace", badge: "synced", value: "ready", desc: "attachments / artifacts / report。", detail: "文件工作区负责任务附件、生成脚本、证据产物和 REPORT.md。" },
   { id: "ctf.platform", type: "平台", title: "platform.bridge", badge: "synced", value: "ingest/submit", desc: "平台任务拉取、开靶、提交成果口令。", detail: "对应平台适配器：sync、ingest、start_target、stop_target、submit 与本地缓存索引。" },
-  { id: "sandbox.manager", type: "沙箱", title: "sandbox.manager", badge: "synced", value: "runtime", desc: "Pi/SSH 沙箱运行时与工具冲突检测。", detail: "对应 sandbox_env.SandboxManager / ToolManager：检查 SSH 配置、镜像、工作目录、工具依赖与冲突。" },
+  { id: "sandbox.manager", type: "沙箱", title: "sandbox.manager", badge: "synced", value: "runtime", desc: "SSH 沙箱运行时与工具冲突检测。", detail: "对应 sandbox_env.SandboxManager / ToolManager：检查 SSH 配置、统一镜像、工作目录、工具依赖与冲突。" },
   { id: "understander.real", type: "理解", title: "understander.real", badge: "synced", value: "task_dir", desc: "真实任务目录理解。", detail: "对应真实任务理解器：读取 metadata.yml、distfiles、target、access、artifacts，生成结构化任务输入。" },
   { id: "browser.web", type: "Web", title: "browser.web", badge: "neutral", value: "optional", desc: "Web 场景交互与截图。", detail: "用于登录、点击、截图、表单测试、XSS/SSRF 交互确认等 Web 攻防场景。" },
-  { id: "crypto.sage", type: "密码安全", title: "crypto.sage", badge: "neutral", value: "image", desc: "密码安全专项镜像工具。", detail: "对应 SageMath、Z3、LLL、PyCryptodome 等数论和约束求解能力。" },
-  { id: "pwn.gdb", type: "二进制攻防", title: "binary.debug", badge: "neutral", value: "image", desc: "二进制调试工具链。", detail: "对应 GDB、pwndbg、pwntools、ROPgadget、QEMU 和 seccomp-tools。" },
+  { id: "crypto.sage", type: "密码安全", title: "crypto.sage", badge: "neutral", value: "toolset", desc: "密码安全工具目录能力。", detail: "对应 SageMath、Z3、LLL、PyCryptodome 等数论和约束求解能力，由 executor 按任务申请工具。" },
+  { id: "pwn.gdb", type: "二进制攻防", title: "binary.debug", badge: "neutral", value: "toolset", desc: "二进制调试工具链。", detail: "对应 GDB、pwndbg、pwntools、ROPgadget、QEMU 和 seccomp-tools，由 executor 按任务申请工具。" },
   { id: "reverse.ghidra", type: "逆向分析", title: "reverse.ghidra", badge: "reserved", value: "planned", desc: "反编译/静态分析。", detail: "后续接入 Ghidra headless、radare2、Frida、angr、apktool 等逆向工具。" },
 ];
 
@@ -485,7 +485,7 @@ function dashboardTipFor(target) {
   const lowCategory = snap.categories.reduce((a, b) => (b[1] < a[1] ? b : a), snap.categories[0]);
   const tips = {
     running: `运行槽 ${snap.running}/5，${snap.running >= 4 ? "容量接近上限" : "仍有调度余量"}。若队列继续增长，优先处理长时间运行任务或待审核成果。`,
-    queued: `当前排队 ${snap.queued} 个，${snap.queued >= 5 ? "调度压力偏高" : "队列压力可控"}。建议关注镜像准备、模型配额和人工审核是否阻塞。`,
+    queued: `当前排队 ${snap.queued} 个，${snap.queued >= 5 ? "调度压力偏高" : "队列压力可控"}。建议关注 SSH 沙箱、模型配额和人工审核是否阻塞。`,
     done: `${label} 已完成 ${snap.solvedTotal} 次攻防研判，峰值出现在 ${peakSolved.label}（${peakSolved.value} 次）。这些任务会进入复盘和证据归档。`,
     review: `待审成果 ${snap.review} 个，候选到审核通过转化率 ${pct(snap.funnelApproved, snap.funnelCandidate)}。优先补齐命令输出、截图或日志片段。`,
     accuracy: `${label} 正确率 ${snap.accuracyRate}，完成 ${snap.solvedTotal} / 尝试 ${snap.attemptsTotal}。低于 70% 时建议先复核候选成果证据链。`,
@@ -870,15 +870,15 @@ function inferToolCategory(tool) {
 
 function sandboxProfile(category, probe = {}) {
   const profiles = {
-    "ctf-web": ["ops-pi-web:0.1.0", "HTTP 调试 / 扫描 / Web Exploit", "通用网络隔离"],
-    "ctf-pwn": ["ops-pi-pwn:0.1.0", "GDB / Pwntools / QEMU / ROP", "已有专项沙箱"],
-    "ctf-crypto": ["ops-pi-crypto:0.1.0", "Sage / Z3 / PyCryptodome / LLL", "通用计算隔离"],
-    "ctf-reverse": ["ops-pi-reverse:0.1.0", "Ghidra / Radare2 / Frida / Emulation", "已有专项沙箱"],
-    "ctf-forensics": ["ops-pi-forensics:0.1.0", "Volatility / TShark / Binwalk / SleuthKit", "证据只读挂载"],
-    "ctf-misc": ["ops-pi-misc:0.1.0", "PyJail / BashJail / Encoding / VM", "通用攻防沙箱"],
-    "ctf-osint": ["ops-pi-osint:0.1.0", "DNS / Whois / Shodan / Media", "网络访问受控"],
-    "ctf-malware": ["ops-pi-malware:0.1.0", "YARA / PE / C2 / 动态样本", "已有专项沙箱"],
-    "ctf-ai-ml": ["ops-pi-ai:0.1.0", "Notebook / Model Inspect / Adversarial", "GPU 可选"],
+    "ctf-web": ["统一 SSH 沙箱", "HTTP 调试 / 扫描 / Web Exploit", "Web 工具视图"],
+    "ctf-pwn": ["统一 SSH 沙箱", "GDB / Pwntools / QEMU / ROP", "二进制工具视图"],
+    "ctf-crypto": ["统一 SSH 沙箱", "Sage / Z3 / PyCryptodome / LLL", "密码工具视图"],
+    "ctf-reverse": ["统一 SSH 沙箱", "Ghidra / Radare2 / Frida / Emulation", "逆向工具视图"],
+    "ctf-forensics": ["统一 SSH 沙箱", "Volatility / TShark / Binwalk / SleuthKit", "取证工具视图"],
+    "ctf-misc": ["统一 SSH 沙箱", "PyJail / BashJail / Encoding / VM", "综合工具视图"],
+    "ctf-osint": ["统一 SSH 沙箱", "DNS / Whois / Shodan / Media", "情报工具视图"],
+    "ctf-malware": ["统一 SSH 沙箱", "YARA / PE / C2 / 动态样本", "恶意样本工具视图"],
+    "ctf-ai-ml": ["统一 SSH 沙箱", "Notebook / Model Inspect / Adversarial", "AI 安全工具视图"],
   };
   const p = profiles[category] || profiles["ctf-misc"];
   return {
@@ -966,7 +966,7 @@ function renderToolMatrix() {
   renderTypeTabs("tool-category-tabs", state.toolCategory);
   const items = state.toolCategory ? state.tools.filter((t) => t.category === state.toolCategory) : state.tools;
   $("tool-active-category").textContent = state.toolCategory ? categoryLabel(state.toolCategory) : "全部";
-  $("tool-status").textContent = `${items.length} 个工具已按场景类型编组`;
+  $("tool-status").textContent = `${items.length} 个工具已按场景类型编组，真实执行时由 executor 从固定工具目录按需申请`;
   $("tool-list").innerHTML = items.length ? items.map((tool) => {
     const id = escapeHtml(tool.tool_id);
     const method = escapeHtml(tool.install_method || "manual");
@@ -1014,7 +1014,7 @@ function renderSandboxMatrix(note = "") {
   renderTypeTabs("sandbox-category-tabs", state.sandboxCategory);
   const items = state.sandboxCategory ? state.sandboxItems.filter((s) => s.category === state.sandboxCategory) : state.sandboxItems;
   $("sandbox-active-category").textContent = state.sandboxCategory ? categoryLabel(state.sandboxCategory) : "全部";
-  $("sandbox-status").textContent = note || `${items.length} 类攻防场景沙箱能力已加载`;
+  $("sandbox-status").textContent = note || `${items.length} 类攻防场景工具视图已加载；真实执行共用 SSH 沙箱`;
   $("sandbox-report").innerHTML = items.map((s) => {
     const status = s.needed ? (s.available ? "运行时可用" : "运行时缺失") : "通用/待扩展";
     const cls = s.needed ? (s.available ? "ready" : "missing") : "planned";
@@ -1033,7 +1033,7 @@ function renderSandboxMatrix(note = "") {
       <div class="skill-card-meta">
         <span>沙箱策略</span>
         <strong>${escapeHtml(s.mode)}</strong>
-        <small>独立工作目录 · 证据挂载 · 结束后可销毁</small>
+        <small>统一 SSH 沙箱 · 独立工作目录 · 结束后可销毁</small>
       </div>
       <div class="skill-card-actions">
         <button type="button" class="skill-action primary" data-action="sandbox-detail" data-id="${escapeHtml(s.category)}">查看详情</button>
@@ -1050,7 +1050,7 @@ async function probeSandbox() {
     const runtime = await api("/api/sandbox/runtime?probe=1");
     state.sandboxItems = state.sandboxItems.map((item) => ({ ...item, runtime }));
     updateSandboxRuntimeStatus(runtime);
-    $("sandbox-status").textContent = "沙箱运行时探测完成";
+    $("sandbox-status").textContent = "SSH 沙箱运行时探测完成";
   } catch (e) {
     $("sandbox-status").textContent = e.message;
   }
@@ -1087,16 +1087,16 @@ function openSandboxDetail(category) {
   const item = state.sandboxItems.find((s) => s.category === category);
   if (!item) return;
   $("sandbox-detail").classList.remove("hidden");
-  $("sandbox-detail-title").textContent = `${categoryLabel(item.category)} 沙箱`;
+  $("sandbox-detail-title").textContent = `${categoryLabel(item.category)} 工具视图`;
   $("sandbox-detail-body").textContent = JSON.stringify({
     category: item.category,
-    image: item.image,
+    runtime_model: item.image,
     stack: item.stack,
-    sandbox_mode: item.mode,
+    sandbox_mode: "统一 SSH 沙箱；场景类型仅用于工具筛选",
     declared_in_backend: item.needed,
     runtime_available: item.available,
     runtime: item.runtime || {},
-    lifecycle: ["创建独立工作目录", "挂载任务附件与证据目录", "Agent 调用工具执行", "回收并销毁临时沙箱"],
+    lifecycle: ["命令行指定 --executor real", "连接可 SSH 沙箱", "创建独立工作目录", "executor 按任务申请工具", "回收并销毁临时工作区"],
   }, null, 2);
 }
 
@@ -1384,13 +1384,13 @@ function invalidateParse() {
 function challengeVisualProfile(type) {
   const key = String(type || "ctf-misc");
   const profiles = {
-    "ctf-web": { accent: "WEB", scene: "目标服务", fields: [["Target", "http://target.local:8080"], ["入口", "/login · /upload · /api"], ["风险点", "SQLi / SSRF / File Upload"], ["推荐镜像", "ops-pi-web:0.1.0"]], process: ["指纹识别", "目录/参数发现", "漏洞验证", "构造利用", "成果审核"] },
-    "ctf-pwn": { accent: "PWN", scene: "二进制靶机", fields: [["Arch", "amd64"], ["保护", "NX on · Canary ? · PIE ?"], ["远程", "nc target.local 31337"], ["推荐镜像", "ops-pi-pwn:0.1.0"]], process: ["保护检查", "逆向输入点", "调试验证", "风险复现", "远程打通"] },
-    "ctf-crypto": { accent: "CRY", scene: "密码参数", fields: [["Primitive", "RSA / Lattice / Stream"], ["已知量", "n, e, c / samples"], ["攻击路径", "低指数 / LLL / Oracle"], ["推荐镜像", "ops-pi-crypto:0.1.0"]], process: ["抽取参数", "识别原语", "推导攻击", "脚本求解", "校验成果"] },
-    "ctf-reverse": { accent: "REV", scene: "逆向样本", fields: [["Format", "ELF / PE / APK"], ["保护", "混淆 / 反调试 / VM"], ["工具", "Ghidra · r2 · Frida"], ["推荐镜像", "ops-pi-reverse:0.1.0"]], process: ["文件识别", "静态反编译", "动态跟踪", "算法还原", "生成解密器"] },
-    "ctf-forensics": { accent: "FOR", scene: "证据包", fields: [["Artifacts", "pcap / image / memory / disk"], ["线索", "metadata · strings · timeline"], ["工具", "tshark · volatility · binwalk"], ["推荐镜像", "ops-pi-forensics:0.1.0"]], process: ["证据登记", "元数据扫描", "时间线还原", "隐藏数据提取", "证据归档"] },
+    "ctf-web": { accent: "WEB", scene: "目标服务", fields: [["Target", "http://target.local:8080"], ["入口", "/login · /upload · /api"], ["风险点", "SQLi / SSRF / File Upload"], ["执行环境", "统一 SSH 沙箱 + Web 工具"]], process: ["指纹识别", "目录/参数发现", "漏洞验证", "构造利用", "成果审核"] },
+    "ctf-pwn": { accent: "PWN", scene: "二进制靶机", fields: [["Arch", "amd64"], ["保护", "NX on · Canary ? · PIE ?"], ["远程", "nc target.local 31337"], ["执行环境", "统一 SSH 沙箱 + 二进制工具"]], process: ["保护检查", "逆向输入点", "调试验证", "风险复现", "远程打通"] },
+    "ctf-crypto": { accent: "CRY", scene: "密码参数", fields: [["Primitive", "RSA / Lattice / Stream"], ["已知量", "n, e, c / samples"], ["攻击路径", "低指数 / LLL / Oracle"], ["执行环境", "统一 SSH 沙箱 + 密码工具"]], process: ["抽取参数", "识别原语", "推导攻击", "脚本求解", "校验成果"] },
+    "ctf-reverse": { accent: "REV", scene: "逆向样本", fields: [["Format", "ELF / PE / APK"], ["保护", "混淆 / 反调试 / VM"], ["工具", "Ghidra · r2 · Frida"], ["执行环境", "统一 SSH 沙箱 + 逆向工具"]], process: ["文件识别", "静态反编译", "动态跟踪", "算法还原", "生成解密器"] },
+    "ctf-forensics": { accent: "FOR", scene: "证据包", fields: [["Artifacts", "pcap / image / memory / disk"], ["线索", "metadata · strings · timeline"], ["工具", "tshark · volatility · binwalk"], ["执行环境", "统一 SSH 沙箱 + 取证工具"]], process: ["证据登记", "元数据扫描", "时间线还原", "隐藏数据提取", "证据归档"] },
   };
-  return profiles[key] || { accent: skillGlyph(key), scene: "综合攻防任务", fields: [["类型", categoryLabel(key)], ["线索", "任务情报 / 附件 / 远程"], ["策略", "先识别再派发"], ["推荐镜像", "自动匹配场景镜像"]], process: ["归一化输入", "场景判定", "能力召回", "工具验证", "结果审核"] };
+  return profiles[key] || { accent: skillGlyph(key), scene: "综合攻防任务", fields: [["类型", categoryLabel(key)], ["线索", "任务情报 / 附件 / 远程"], ["策略", "先识别再派发"], ["执行环境", "统一 SSH 沙箱 + 按需工具"]], process: ["归一化输入", "场景判定", "能力召回", "工具验证", "结果审核"] };
 }
 
 function renderChallengeDossier(data) {

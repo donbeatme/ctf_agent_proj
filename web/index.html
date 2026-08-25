@@ -11,7 +11,7 @@
       <div class="auth-hero">
         <p class="eyebrow">Offensive Agent Platform</p>
         <h1>登录攻防作战中枢</h1>
-        <p>每个队伍拥有独立工作区、Pi 沙箱、模型用量、成果审核和复盘资产。登录后进入比赛控制台。</p>
+        <p>每个队伍拥有独立工作区、SSH 沙箱、模型用量、成果审核和复盘资产。登录后进入比赛控制台。</p>
         <div class="auth-highlights">
           <span>单任务独立可销毁沙箱</span>
           <span>Agent 可解释执行</span>
@@ -108,10 +108,10 @@
               <div class="step-heading">
                 <p class="section-kicker">Mission Control</p>
                 <h2 class="step-title">战情总览</h2>
-                <p class="step-desc">对标攻防智能体参考系统的系统概览：在线任务进度、单任务独立可销毁 Pi 沙箱、专项镜像、模型连接、执行链路和审核状态一屏可见。</p>
+                <p class="step-desc">对标攻防智能体参考系统的系统概览：在线任务进度、单任务独立可销毁 SSH 沙箱、统一镜像、模型连接、执行链路和审核状态一屏可见。</p>
                 <div class="mission-grid">
-                  <article class="metric-card hot" data-tip-key="running" data-tip="当前占用的攻防研判槽位 / 最大并发槽位；每个运行任务绑定独立 Pi 沙箱。"><span>运行中任务</span><strong id="dash-running">3 / 5</strong><small>Pi 沙箱容量：单任务独立容器，结束后可销毁</small></article>
-                  <article class="metric-card" data-tip-key="queued" data-tip="排队任务通常在等待镜像、模型配额、人工审核或 Worker 空闲。"><span>排队中</span><strong id="dash-queued">4</strong><small>等待镜像拉取、模型配额或 Worker 空闲</small></article>
+                  <article class="metric-card hot" data-tip-key="running" data-tip="当前占用的攻防研判槽位 / 最大并发槽位；真实执行需要绑定独立 SSH 沙箱。"><span>运行中任务</span><strong id="dash-running">3 / 5</strong><small>真实执行：单任务独立工作区，结束后可销毁</small></article>
+                  <article class="metric-card" data-tip-key="queued" data-tip="排队任务通常在等待沙箱、模型配额、人工审核或 Worker 空闲。"><span>排队中</span><strong id="dash-queued">4</strong><small>等待 SSH 沙箱、模型配额或 Worker 空闲</small></article>
                   <article class="metric-card" data-tip-key="done" data-tip="已完成任务会归档事件、证据、产物和 复盘报告，用于赛后复盘。"><span>已完成</span><strong id="dash-done">27</strong><small>成功任务会自动归档证据与 REPORT</small></article>
                   <article class="metric-card warn" data-tip-key="review" data-tip="Agent 命中疑似口令后不会直接提交，会进入证据审查队列。"><span>成果待审</span><strong id="dash-review">2</strong><small>命中候选成果后进入人工/自动审核</small></article>
                   <article class="metric-card hot" data-tip-key="accuracy" data-tip="按提交通过数 / 总提交数估算，Mock 数据会随时间窗口动态刷新。"><span>正确率</span><strong id="dash-accuracy">81%</strong><small>近 7 天提交通过率与复盘修正后统计</small></article>
@@ -143,7 +143,7 @@
                     <div class="chart-head"><span>正确率与提交量</span><strong>Accuracy</strong></div>
                     <canvas id="chart-accuracy" width="420" height="260"></canvas>
                   </article>
-                  <article class="chart-panel chart-wide" data-tip-key="usage" data-tip="绿色趋势表示模型 token 使用，琥珀趋势表示 Pi 沙箱占用。">
+                  <article class="chart-panel chart-wide" data-tip-key="usage" data-tip="绿色趋势表示模型 token 使用，琥珀趋势表示沙箱占用。">
                     <div class="chart-head"><span>模型与沙箱使用</span><strong>Tokens / Pi Sandbox</strong></div>
                     <canvas id="chart-usage" width="900" height="260"></canvas>
                   </article>
@@ -160,7 +160,7 @@
                 <div id="dashboard-tooltip" class="dashboard-tooltip hidden"></div>
               </section>
               <section class="panel overview-wide">
-                <h2>在线任务与 Pi 沙箱</h2>
+                <h2>在线任务与 SSH 沙箱</h2>
                 <div class="progress-board">
                   <div class="progress-ring" style="--p: 0%"><strong>0/5</strong><span>运行槽</span></div>
                   <div class="queue-lanes">
@@ -170,9 +170,9 @@
                     <div><span>PAUSED</span><strong>0</strong><small>人工暂停</small></div>
                   </div>
                   <div class="sandbox-list">
-                    <div><strong>web-pi-001</strong><span class="state-pill neutral">空闲</span><small>ops-pi-web:0.1.0 · Nmap / SQLMap / Gobuster</small></div>
-                    <div><strong>crypto-pi-001</strong><span class="state-pill neutral">空闲</span><small>密码安全镜像 · SymPy / Z3 / PyCryptodome</small></div>
-                    <div><strong>binary-pi-001</strong><span class="state-pill neutral">空闲</span><small>二进制攻防镜像 · GDB / QEMU / Pwntools</small></div>
+                    <div><strong>ssh-sandbox-001</strong><span class="state-pill neutral">待配置</span><small>统一沙箱镜像 · executor 按任务申请工具</small></div>
+                    <div><strong>tool-catalog</strong><span class="state-pill neutral">固定目录</span><small>Web / 密码 / 二进制 / 逆向 / 取证工具按需调用</small></div>
+                    <div><strong>cli-real-run</strong><span class="state-pill neutral">命令行</span><small>main.py run-local-challenge --executor real</small></div>
                   </div>
                 </div>
               </section>
@@ -211,7 +211,7 @@
                 <div class="pipeline">
                   <div><span>1</span><strong>攻防任务接入</strong><small>任务情报/附件/URL/JSON</small></div>
                   <div><span>2</span><strong>场景类型识别</strong><small>任务理解器</small></div>
-                  <div><span>3</span><strong>Pi 沙箱</strong><small>按场景类型挂载镜像</small></div>
+                  <div><span>3</span><strong>SSH 沙箱</strong><small>统一镜像，按任务申请工具</small></div>
                   <div><span>4</span><strong>Agent 思考</strong><small>计划、工具、证据</small></div>
                   <div><span>5</span><strong>成果审核</strong><small>提交前复核</small></div>
                 </div>
@@ -222,7 +222,7 @@
                 <pre id="engine-budget" class="doc muted">加载中…</pre>
               </section>
               <section class="panel env-health-panel">
-                <h2>本机工具与镜像健康</h2>
+                <h2>本机工具与沙箱健康</h2>
                 <p class="panel-desc">只读：<code>SkillEnvProbe.probe_manifest()</code>。不安装依赖，结果与 run 起始 <code>ENV_CHECK</code> 同源。</p>
                 <div class="row">
                   <button type="button" id="btn-env-check" class="primary">探测本机工具</button>
@@ -236,7 +236,7 @@
               <div class="step-heading">
                 <p class="section-kicker">Arsenal</p>
                 <h2 class="step-title">技能军火库</h2>
-                <p class="step-desc">把 Web 安全、二进制攻防、密码安全、逆向分析、取证分析、情报研判等能力做成可检索战术库。比赛中不是让用户“配置技能”，而是让 Agent 快速调用对应打法、工具与沙箱能力。</p>
+                <p class="step-desc">把 Web 安全、二进制攻防、密码安全、逆向分析、取证分析、情报研判等能力做成可检索战术库。比赛中不是让用户“配置技能”，而是让 Agent 在统一沙箱中按任务申请对应打法和工具。</p>
               </div>
               <section class="panel skills-doc-panel">
                 <div class="skills-library-head">
@@ -308,15 +308,15 @@
                 <div class="arsenal-panel-head">
                   <div>
                     <p class="panel-kicker">Target Sandbox</p>
-                    <h2>靶场沙箱</h2>
-                    <p class="panel-desc">按攻防任务类型展示可用专项沙箱：已有沙箱来自 <code>SANDBOX_CATEGORIES</code>，运行时探测来自 <code>SkillEnvProbe.probe_sandbox</code>。</p>
+                    <h2>真实执行沙箱</h2>
+                    <p class="panel-desc">当前真实执行依赖可 SSH 的统一沙箱环境；场景类型用于筛选工具视图，不代表后端会为不同题目自动分配不同镜像。</p>
                   </div>
                   <button type="button" id="btn-sandbox" class="skill-toolbar-btn primary">探测沙箱运行时</button>
                 </div>
                 <div class="skill-filter-bar arsenal-filter-bar">
                   <div class="skill-tabs" id="sandbox-category-tabs" aria-label="沙箱场景类型"></div>
                   <div class="arsenal-search-slot">
-                    <span>专项沙箱</span>
+                    <span>工具视图</span>
                     <strong id="sandbox-active-category">全部</strong>
                   </div>
                 </div>
@@ -359,7 +359,7 @@
                   <div class="agent-node node-executor">
                     <span>X</span>
                     <strong>Executor</strong>
-                    <small>工具调用 · 沙箱执行</small>
+                    <small>Web 演示为 MockExecutor · 命令行可接真实沙箱</small>
                   </div>
                   <div class="agent-node node-evaluator">
                     <span>E</span>
@@ -378,7 +378,7 @@
                 <div class="agent-radar-grid">
                   <div class="radar-card"><span style="--v: 88%"></span><strong>场景类型理解</strong><small>关键词、附件、目标 URL 综合判别</small></div>
                   <div class="radar-card"><span style="--v: 76%"></span><strong>规划能力</strong><small>LLM 规划 + get_doc 战术召回</small></div>
-                  <div class="radar-card warn"><span style="--v: 42%"></span><strong>执行接线</strong><small>当前为 MockExecutor 接口桩</small></div>
+                  <div class="radar-card warn"><span style="--v: 42%"></span><strong>执行接线</strong><small>Web 当前为 MockExecutor；真实执行走命令行 --executor real</small></div>
                   <div class="radar-card"><span style="--v: 68%"></span><strong>交付链路</strong><small>events、DAG、product、report 汇总</small></div>
                 </div>
               </section>
@@ -600,13 +600,11 @@
                   </select>
                 </label>
                 <div class="create-task-grid">
-                  <label>专项镜像
+                  <label>沙箱执行方式
                     <select>
-                      <option>自动匹配场景类型镜像</option>
-                      <option>ops-pi-web:0.1.0</option>
-                      <option>ops-pi-crypto:0.1.0</option>
-                      <option>ops-pi-pwn:0.1.0</option>
-                      <option>ops-pi-reverse:0.1.0</option>
+                      <option>Web 演示执行（MockExecutor）</option>
+                      <option>命令行真实执行（需 SSH 沙箱）</option>
+                      <option>统一沙箱镜像 + 固定工具目录</option>
                     </select>
                   </label>
                   <label>模型策略
@@ -700,7 +698,7 @@
                       <li><span>理解任务情报</span><strong>抽取目标、成果口令格式、远程地址与附件线索</strong></li>
                       <li><span>选择战术</span><strong>按场景类型召回 Web 安全、二进制攻防、密码安全、逆向分析、取证分析技能</strong></li>
                       <li><span>生成计划</span><strong>输出 DAG，标注依赖、验收标准与重试次数</strong></li>
-                      <li><span>工具执行</span><strong>在 Pi 沙箱内运行命令，产物写入 artifacts</strong></li>
+                      <li><span>工具执行</span><strong>Web 展示演示执行；真实执行需命令行连接 SSH 沙箱，产物写入 artifacts</strong></li>
                     </ol>
                   </div>
                   <div class="tool-status-board">
@@ -715,7 +713,7 @@
                     <pre class="doc muted">/workspace/task_xxx
 ├── attachments/
 ├── artifacts/
-├── .pi-sessions/
+├── .sandbox-sessions/
 └── REPORT.md
 
 等待 Agent 启动后同步终端输出、生成文件和中文可复现报告。</pre>

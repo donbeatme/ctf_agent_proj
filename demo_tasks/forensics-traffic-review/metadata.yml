@@ -16,5 +16,5 @@ expected_outputs:
   - 会话与文件传输线索
   - 可疑载荷还原结果
   - 成果审核摘要
-sandbox_image: ops-pi-forensics:0.1.0
+sandbox_runtime: ssh-sandbox-unified
 status: tested
