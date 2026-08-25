@@ -23,6 +23,7 @@ import requests
 
 from model_config import get, require, get_engine_config
 from agent.tools import call_tool
+from opslog import get_run_context, set_run_context
 
 def current_base_url():
     """每次调用现读配置,前端改 model_config 后无需重启进程。"""
@@ -761,28 +762,34 @@ def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools
     msgs = _with_docs(_build_messages(prompt, system, messages), docs)
     trace = []
 
-    for rnd in range(1, max_tool_rounds + 1):
-        resp = _request(client, msgs, model=model, temperature=temperature,
-                        max_tokens=max_tokens, tools=tools,
-                        max_retries=max_retries, retry_backoff=retry_backoff,
-                        stream=stream)
-        msg = resp.choices[0].message
-        if not msg.tool_calls:
-            usage_log = pop_token_log()
-            return ToolResult(
-                content=msg.content or "", trace=trace, rounds=rnd,
-                total_usage=_sum_usage(usage_log) if usage_log else None,
-            )
-        msgs.append(_assistant_message(msg))
-        for tc in msg.tool_calls:
-            name = tc.function.name
-            result = _run_tool(tool_exec, name, tc.function.arguments)
-            trace.append({"name": name, "arguments": tc.function.arguments, "result": result})
-            msgs.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": json.dumps(result, ensure_ascii=False),
-            })
+    prev = get_run_context()
+    try:
+        for rnd in range(1, max_tool_rounds + 1):
+            set_run_context(round=rnd)  # 本轮内所有 opslog 事件自动带 round 定位
+            resp = _request(client, msgs, model=model, temperature=temperature,
+                            max_tokens=max_tokens, tools=tools,
+                            max_retries=max_retries, retry_backoff=retry_backoff,
+                            stream=stream)
+            msg = resp.choices[0].message
+            if not msg.tool_calls:
+                usage_log = pop_token_log()
+                return ToolResult(
+                    content=msg.content or "", trace=trace, rounds=rnd,
+                    total_usage=_sum_usage(usage_log) if usage_log else None,
+                )
+            msgs.append(_assistant_message(msg))
+            for tc in msg.tool_calls:
+                name = tc.function.name
+                result = _run_tool(tool_exec, name, tc.function.arguments)
+                trace.append({"name": name, "arguments": tc.function.arguments,
+                              "result": result, "round": rnd})
+                msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, ensure_ascii=False),
+                })
+    finally:
+        set_run_context(round=prev.get("round"))  # 恢复调用方 round(如步骤 attempt)
     raise ToolLoopError(f"工具循环超过上限 {max_tool_rounds} 轮", trace=trace)
 
 

@@ -78,28 +78,38 @@ def _deterministic_goal_eval(ctx, goals, dag_summary):
 
 
 def _ops_sink(ws, engine, run_id):
-    """把 opslog 事件(adapter/sandbox/engine)转进 workspace.events.jsonl + run.log。
+    """把 canonical 流(ops.log)投影进 workspace.events.jsonl + run.log。
 
-    events.jsonl 得到 run 作用域的结构化历史;run.log 得到 [ops] 人类可读行,
-    与 agent 行为在同一份日志里可交叉定位。带 run_id 便于多 run 区分。
+    事件源合一后,adapter/sandbox/ssh 等外围事件已由 opslog.emit 写 canonical 流;
+    这里只做投影,不再 re-emit:
+    - ws.* 决策链事件:workspace.add_event 自身已落 events.jsonl,run.log 由 EngineLogger
+      渲染,这里跳过防双写。
+    - engine.* 信号:EngineLogger 渲染 run.log;只把生命周期 run_started/run_ended
+      投影进 events.jsonl(其余 engine 信号量大,留在 canonical 流 + run.log)。
+    - 其余外围事件:经 ws.ingest_external 投影 events.jsonl(run 账本跨域链路)+
+      run.log [ops] 行。
     """
-    from agent.schema import Role
-
     def sink(kind: str, detail: dict) -> None:
+        domain = detail.get("domain")
+        if domain == "ws":
+            return
         rec = dict(detail)
-        rec["run_id"] = run_id
-        try:
-            ws.add_event(Role.SYSTEM, kind, **rec)
-        except Exception:
-            pass
-        try:
-            fields = "  ".join(
-                f"{k}={v}" for k, v in rec.items()
-                if k not in ("ts", "domain", "event", "run_id")
-            )
-            engine._log.engine_action(f"ops[{kind}] run_id={run_id}  {fields}")
-        except Exception:
-            pass
+        rec.setdefault("run_id", run_id)
+        if not (domain == "engine" and kind not in ("engine.run_started", "engine.run_ended")):
+            try:
+                ws.ingest_external(kind, rec)
+            except Exception:
+                pass
+        if domain not in ("engine", "ws"):
+            try:
+                fields = "  ".join(
+                    f"{k}={v}" for k, v in rec.items()
+                    if k not in ("ts", "domain", "event", "run_id", "seq",
+                                 "node_id", "round", "_uuid")
+                )
+                engine._log.engine_action(f"ops[{kind}] run_id={run_id}  {fields}")
+            except Exception:
+                pass
 
     return sink
 

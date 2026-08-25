@@ -294,10 +294,10 @@ class CtxAssembler:
         if ws is None:
             return
         for call in tool_calls or []:
-            tool, args, output = self._tool_call_fields(call)
-            ws.record_tool_call(step_id, tool, args)
+            tool, args, output, rnd = self._tool_call_fields(call)
+            ws.record_tool_call(step_id, tool, args, round=rnd)
             if output is not None:
-                ws.record_tool_result(step_id, tool, output, args=args)
+                ws.record_tool_result(step_id, tool, output, args=args, round=rnd)
         if result is not None and step_id and ws.blueprint is not None:
             step = ws.blueprint.steps.get(step_id)
             if step is not None:
@@ -305,14 +305,17 @@ class CtxAssembler:
 
     @staticmethod
     def _tool_call_fields(call) -> tuple:
-        """归一工具调用条目 → (tool, args, output):dict 取 tool/name、args、result/output,对象取同名属性。"""
+        """归一工具调用条目 → (tool, args, output, round):dict 取 tool/name、args、
+        result/output、round(事件编码定位字段,可缺省);对象取同名属性。"""
         if isinstance(call, dict):
             return (call.get("tool", call.get("name")),
                     call.get("args", {}),
-                    call.get("result", call.get("output")))
+                    call.get("result", call.get("output")),
+                    call.get("round"))
         return (getattr(call, "tool", None),
                 getattr(call, "args", {}),
-                getattr(call, "result", getattr(call, "output", None)))
+                getattr(call, "result", getattr(call, "output", None)),
+                getattr(call, "round", None))
 
     def _ingest_evaluator_plan(self, **kw):
         self._ingest_eval(EvalSource.PLAN_REVIEW, **kw)

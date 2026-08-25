@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from model_config import get as _cfg
+from opslog import emit as _emit_ops
 
 from agent.blueprint import Blueprint
 from agent.ctx import (
@@ -83,7 +84,12 @@ class StepResult:
 
 @dataclass
 class Event:
-    """一条历史记录(审计/上下文投影的原子单元)。uuid 为全局索引。"""
+    """一条历史记录(审计/上下文投影的原子单元)。uuid 为全局索引。
+
+    node_id / round 是事件编码的定位字段(与 opslog canonical 流的字段对齐):
+    node_id=DAG 步骤 id(等价 step_id),round=执行轮次(步骤 attempt 或工具调用轮)。
+    兼容旧账本:缺省 None,Workspace.load 读旧 events.jsonl 行不受影响。
+    """
 
     uuid: str
     agent: str | None    # 哪个 agent 发的;system = 引擎系统行为(如调度器置 ready)
@@ -92,6 +98,8 @@ class Event:
     verdict: str | None = None
     detail: dict = field(default_factory=dict)
     ts: str = ""
+    node_id: str | None = None
+    round: int | None = None
 
 
 class Workspace:
@@ -378,14 +386,53 @@ class Workspace:
         审计/断点续跑仍保留原文。非持久化(MockWorkspace)仅内存态,不写 events.jsonl。
         detail 按 EVENT_SCHEMA 校验:已注册 kind → dataclass(漏字段/类型错当场炸);
         未注册 kind → 退化 dict 通道(日志警告)。
+
+        事件源合一:持久化实例把该决策链事件镜像进 opslog canonical 流(domain=ws,
+        kind 原样),带 node_id(默认=step_id)与 round(可经 kw 传入,如工具调用轮次);
+        events.jsonl 是断点续跑的投影,不重复成源。node_id/round 也落在 Event 顶层。
         """
+        node_id = kw.pop("node_id", None)
+        rnd = kw.pop("round", None)
         schema = EVENT_SCHEMA.get(kind)
         if schema is not None:
             detail = schema(**kw)
         else:
             detail = kw
+        if node_id is None:
+            node_id = step_id
         ev = Event(uuid=uuid.uuid4().hex, agent=agent, kind=kind,
-                   step_id=step_id, verdict=verdict, detail=detail, ts=_now())
+                   step_id=step_id, verdict=verdict, detail=detail, ts=_now(),
+                   node_id=node_id, round=rnd)
+        self.events.append(ev)
+        if self._persist:
+            d = detail if isinstance(detail, dict) else asdict(detail)
+            _emit_ops("ws", kind, run_id=self.run_id,
+                      agent=str(agent) if hasattr(agent, "value") else agent,
+                      step_id=step_id, verdict=verdict, node_id=node_id, round=rnd,
+                      **{k: v for k, v in d.items()
+                         if k not in ("run_id", "node_id", "round", "domain", "event",
+                                      "ts", "seq", "agent", "step_id", "verdict")})
+            self._ensure_dir()
+            with (self.root / "events.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(asdict(ev), ensure_ascii=False) + "\n")
+                fh.flush()
+        return ev
+
+    def ingest_external(self, kind: str, rec: dict) -> Event:
+        """外围 ops 事件投影进事件账本(events.jsonl):canonical 已由 opslog.emit
+        写入,这里只落投影,不 re-emit。供 main._ops_sink 转发 adapter/sandbox/ssh
+        等事件,使 run 账本包含跨域链路。node_id/round 从 canonical 记录落到
+        Event 顶层(step_id 映射 node_id,支持按步查询)。
+        """
+        d = {k: v for k, v in rec.items()
+             if k not in ("seq", "ts", "run_id", "node_id", "round",
+                          "domain", "event", "_uuid")}
+        ev = Event(uuid=rec.get("_uuid") or uuid.uuid4().hex,
+                   agent=Role.SYSTEM, kind=kind,
+                   step_id=rec.get("node_id"),
+                   verdict=rec.get("verdict"),
+                   detail=d, ts=rec.get("ts") or _now(),
+                   node_id=rec.get("node_id"), round=rec.get("round"))
         self.events.append(ev)
         if self._persist:
             self._ensure_dir()

@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from opslog import ErrorLevel, record_error
+from opslog import ErrorLevel, record_error, set_run_context
 
 from agent.blueprint import DONE_STATUSES, Step, StepStatus
 from agent.schema import (
@@ -230,6 +230,8 @@ class Engine:
 
     def run(self, raw_content: dict):
         self._init_run(raw_content)
+        # 事件源合一:run 作用域上下文(run_id),外围/决策链事件经 opslog 自动带归属
+        set_run_context(run_id=self.workspace.run_id)
         self.signals.emit(Signal.RUN_STARTED,
                           task=raw_content, max_cycles=self.max_cycles,
                           max_replans=self.max_replans, max_stalls=self.max_stalls,
@@ -271,6 +273,7 @@ class Engine:
         finally:
             run_timer.__exit__()
             self._log.close()
+            set_run_context(run_id=None)
 
     def _init_run(self, raw_content):
         """重置运行态(每次 run 前调用)。
@@ -294,6 +297,7 @@ class Engine:
         self.bp = None
         self.turn = []
         self.current = None
+        set_run_context(node_id=None, round=None)  # 清上一步的定位字段
         self._obs = None
         self.replans = 0
         self._stalls = 0
@@ -656,12 +660,13 @@ class Engine:
                               f"  skill: \"{old_s.skill_id}\"  \"{new_s.skill_id}\"")
 
     def _record_step(self, verdict, is_completed=False):
-        """每步验收落账:写 ws.steps + 打 step_record 事件(审计/history 投影)。"""
+        """每步验收落账:写 ws.steps + 打 step_record 事件(审计/history 投影)。
+        round=当前步骤 attempt,事件编码定位字段与节点一致。"""
         if hasattr(self.workspace, "record_step"):
             self.workspace.record_step(
                 self.current.id, verdict, self._obs or "",
                 result=self.current.result, attempts=self.current.attempts,
-                is_completed=is_completed)
+                is_completed=is_completed, round=self.current.attempts)
 
     def _record_opinion(self, source: EvalSource, res, step_id=None):
         """评估意见落事件流(agent_comm 通道投影源;pass 是闸门,引擎只在非 pass 时调用)。
@@ -1077,11 +1082,13 @@ class Engine:
                     self._fail("环境阻塞: 靶机不可达或沙箱不可用(能力探测复查仍失败),后续步骤无法执行")
                     return
                 self.current = step
+                set_run_context(node_id=step.id)
                 self._deadlock_attempts = 0
                 self._go(EngineState.EXECUTING, f"step {step.id} ready")
         elif s == EngineState.EXECUTING:
             self.bp.set_status(self.current.id, StepStatus.RUNNING)
             self.current.attempts += 1
+            set_run_context(node_id=self.current.id, round=self.current.attempts)
             self.signals.emit(Signal.STEP_STARTED, step_id=self.current.id,
                               attempt=self.current.attempts,
                               max_attempts=self.current.max_attempts)
@@ -1191,6 +1198,7 @@ class Engine:
                 # 步骤通过后,评估 goal list:比对未完成 goal 与当前世界模型(DAG)
                 self._eval_goals_after_pass(ctx)
                 self.current = None
+                set_run_context(node_id=None, round=None)
                 self._go(EngineState.SCHEDULING, "step passed")
             else:
                 self.bp.set_status(self.current.id, StepStatus.ESCALATED)
@@ -1292,6 +1300,7 @@ class Engine:
         self._record_plan(reason=reason, source=source.value, changes=changes)
         self._log_dag_change(prev_bp, reason=reason, changes=changes)
         self.current = None
+        set_run_context(node_id=None, round=None)
         if self._dag_signature(self.bp) == prev_sig:
             self._stalls += 1
         else:

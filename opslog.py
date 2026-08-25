@@ -1,13 +1,21 @@
-"""统一操作日志(ops.log):adapter/sandbox 等外围组件事件,落盘 + 可转发。
+"""统一操作日志:单事件源。所有事件(外围组件 / 引擎信号 / agent 决策链)统一经
+emit 写 canonical 流(ops.log),带全进程单调 seq 与 run_id/node_id/round 字段;
+run.log(人类可读)与 workspace.events.jsonl(断点续跑账本)是它的投影,不再各自
+独立成源。一次一行 JSON,不随 run 生命周期消失,解完题仍可复查。引擎 run 期间
+经 attach() 把事件投影进 workspace.events.jsonl 与 run.log,形成统一审计链。
 
-分工:run.log(EngineLogger,人类可读)与 workspace.events.jsonl(agent 决策链)归主
-循环;ops.log 是外围组件(平台适配器/沙箱/工具依赖/引擎运行)的操作审计线,一次
-一行 JSON,不随 run 生命周期消失,解完题仍可复查。引擎 run 期间经 attach() 把
-事件转进 workspace.events.jsonl 与 run.log,形成统一审计链。
+事件编码三字段(用户要求 node_id + round 两个字段):
+- seq     全进程单调序号,ops.log 追加顺序即事件顺序(事件源重放的索引)
+- node_id DAG 步骤 id(引擎当前 step),未进入步骤时省略
+- round   执行轮次(步骤 attempt 或步骤内工具调用轮),未进入执行轮时省略
+node_id/round 通常经 set_run_context 以线程环境自动落到每条事件,也可在 emit
+显式传参覆盖(显式 None 省略该字段)。
 
 用法:
-    from opslog import emit
-    emit("adapter", "submit", challenge_id=..., verdict=...)
+    from opslog import emit, set_run_context
+    set_run_context(run_id="run-...", node_id="s1", round=1)
+    emit("adapter", "submit", challenge_id=...)   # 自动带 run_id/node_id/round
+    emit("engine", "llm_call_start", role="planner", round=3)  # 覆盖环境值
 
 写入路径:默认 ./data/ops.log,CTF_OPS_LOG 可覆盖(env 优先,model_config.json 兜底)。绝不抛异常。
 """
@@ -26,7 +34,11 @@ from model_config import get as _cfg
 _log_path = Path(_cfg("CTF_OPS_LOG") or "data/ops.log")
 _lock = threading.Lock()
 _sinks: list = []
-_MAX_FIELD = 500
+_MAX_FIELD = 500          # 标量字段截断(短字段)
+_MAX_DETAIL = 64 * 1024   # 结构化 payload(dict/list)截断(长 detail 保留足够保真)
+_seq = 0                  # 全进程单调序号(单源有序流)
+_ctx = threading.local()  # run 作用域环境:run_id / node_id / round
+_UNSET = object()         # 区分"未传(用环境)"与"显式 None(省略该字段)"
 
 
 class ErrorLevel(str, Enum):
@@ -59,22 +71,69 @@ def detach(sink) -> None:
         _sinks.remove(sink)
 
 
+def set_run_context(*, run_id=_UNSET, node_id=_UNSET, round=_UNSET) -> None:
+    """设置当前线程的 run 作用域环境:此后 emit 未显式指定的 run_id/node_id/round
+    自动落到这些值。显式 None 清除对应字段;run_id 置 None 结束 run 作用域。
+    引擎在 run 开始/步骤切换/执行轮切换时调用,使外围事件自动携带归属。
+    """
+    if run_id is not _UNSET:
+        _ctx.run_id = run_id
+    if node_id is not _UNSET:
+        _ctx.node_id = node_id
+    if round is not _UNSET:
+        _ctx.round = round
+
+
+def get_run_context() -> dict:
+    """当前线程的 run 作用域环境(保存/恢复、测试断言用)。"""
+    return {
+        "run_id": getattr(_ctx, "run_id", None),
+        "node_id": getattr(_ctx, "node_id", None),
+        "round": getattr(_ctx, "round", None),
+    }
+
+
 def reset() -> None:
-    """清空转发器(测试隔离)。"""
+    """清空转发器与序号、run 作用域环境(测试隔离)。"""
+    global _seq
     _sinks.clear()
+    _seq = 0
+    _ctx.run_id = None
+    _ctx.node_id = None
+    _ctx.round = None
 
 
-def emit(domain: str, event: str, **fields) -> None:
-    """写一条 ops 事件:JSONL 落盘 + 转发到已注册 sinks。绝不抛异常。"""
+def emit(domain: str, event: str, *, run_id=_UNSET, node_id=_UNSET,
+         round=_UNSET, **fields) -> None:
+    """写一条事件:唯一 canonical 流(ops.log)追加带 seq 的 JSON 行 + 转发 sinks。
+
+    run_id/node_id/round:显式传值覆盖线程环境;未传回落到环境;显式 None 省略该字段。
+    绝不抛异常。
+    """
+    if run_id is _UNSET:
+        run_id = getattr(_ctx, "run_id", None)
+    if node_id is _UNSET:
+        node_id = getattr(_ctx, "node_id", None)
+    if round is _UNSET:
+        round = getattr(_ctx, "round", None)
     record = {
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "domain": domain,
         "event": event,
     }
+    if run_id is not None:
+        record["run_id"] = _scalar(run_id)
+    if node_id is not None:
+        record["node_id"] = _scalar(node_id)
+    if round is not None:
+        record["round"] = round
     for k, v in fields.items():
         record[k] = _scalar(v)
-    line = json.dumps(record, ensure_ascii=False)
     with _lock:
+        global _seq
+        _seq += 1
+        record = {"seq": _seq, **record}
+        line = json.dumps(record, ensure_ascii=False)
         try:
             _log_path.parent.mkdir(parents=True, exist_ok=True)
             with _log_path.open("a", encoding="utf-8") as fh:
@@ -106,5 +165,8 @@ def _scalar(v):
         return v[:_MAX_FIELD] if len(v) > _MAX_FIELD else v
     if isinstance(v, (dict, list)):
         s = json.dumps(v, ensure_ascii=False, default=str)
-        return s[:_MAX_FIELD] if len(s) > _MAX_FIELD else s
-    return v
+        return s[:_MAX_DETAIL] if len(s) > _MAX_DETAIL else s
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    s = str(v)  # 任意对象(异常/自定义类型)→ 字符串,保证 record 可 JSON 序列化
+    return s[:_MAX_FIELD] if len(s) > _MAX_FIELD else s

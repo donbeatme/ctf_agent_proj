@@ -204,12 +204,15 @@ def _normalize_trace(src) -> tuple[list[dict], dict]:
     raw = getattr(src, "trace", None)
     if raw is None:
         raw = src if isinstance(src, list) else []
-    trace = [
-        {"tool": t.get("name"), "args": _parse_args(t.get("arguments")),
-         "result": t.get("result")}
-        for t in raw
-        if isinstance(t, dict) and t.get("name")
-    ]
+    trace = []
+    for t in raw:
+        if not (isinstance(t, dict) and t.get("name")):
+            continue
+        entry = {"tool": t.get("name"), "args": _parse_args(t.get("arguments")),
+                 "result": t.get("result")}
+        if t.get("round") is not None:
+            entry["round"] = t["round"]  # 工具调用轮次(事件编码字段,可缺省)
+        trace.append(entry)
     result: dict = {}
     for t in trace:
         if t["tool"] == "submit_flag" and t["args"].get("flag"):
