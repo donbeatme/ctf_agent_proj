@@ -174,6 +174,12 @@ class Engine:
         self._stalls = 0
         self._deadlock_attempts = 0
         self._retry_mode: str | None = None  # 下一步 EXECUTING 的 ctx 档位(raw/compressed),STEP_EVAL 分流后设置
+        # 中断原语运行时状态(每 run 在 _run_loop 重建;cancel_current 线程安全请求)
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._cancel_evt: asyncio.Event | None = None
+        self._cancel_requested = False
+        self._cancel_step_id: str | None = None
+        self._cancel_reason: str | None = None
         self.task_completed = False
         self.submitted_flag: str | None = None  # 已提交的 flag(执行层报告后填充,审计/反思用)
         self.goals: list[Goal] = []            # 任务理解层下发的固定目标(仅 id)
@@ -219,9 +225,45 @@ class Engine:
             self.signals.subscribe(sub)
 
     def request_stop(self, reason="用户停止"):
-        """协作式停跑:主循环下一拍检查后转 FAILED。前端/CLI 预留接口。"""
+        """协作式停跑:主循环下一拍检查后转 FAILED。前端/CLI 预留接口。
+        顺带中断当前执行中的步骤(不再等长沙箱跑完),中断路径落 SKIPPED + step_cancel 事件。"""
         self._stop_requested = True
         self._stop_reason = reason
+        self.cancel_current(reason)
+
+    def cancel_current(self, reason="中断"):
+        """中断当前执行中的步骤(线程安全;并行模式 replan 重建 RUNNING 实例的硬前提)。
+
+        请求落 _cancel_requested + asyncio.Event(经 loop.call_soon_threadsafe 送进
+        run 线程);EXECUTING 分支在子任务 wait 上唤醒 → task.cancel 硬中断 → 落
+        SKIPPED + step_cancel 事件 + 抑制 step_record。current 为空时空转。
+        """
+        if self.current is None:
+            return
+        self._cancel_requested = True
+        self._cancel_reason = reason
+        self._cancel_step_id = self.current.id
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._cancel_evt.set)
+
+    def _finish_cancelled_step(self):
+        """取消落账:SKIPPED + step_cancel 事件 + STEP_ENDED,抑制 step_record(运行时纪律)。"""
+        sid, attempts = self.current.id, self.current.attempts
+        reason = self._cancel_reason or "中断"
+        self.bp.set_status(sid, StepStatus.SKIPPED, force=True)
+        ws = self.workspace
+        if hasattr(ws, "add_event"):
+            ws.add_event(Role.SYSTEM, EventKind.STEP_CANCEL, step_id=sid, reason=reason)
+        self.signals.emit(Signal.STEP_ENDED, step_id=sid, verdict="skipped",
+                          observation="", attempts=attempts)
+        self._cancel_requested = False
+        self._cancel_step_id = None
+        self._cancel_reason = None
+        if self._cancel_evt is not None:
+            self._cancel_evt.clear()
+        # 状态机约束:EXECUTING 只许转 FAILED/STEP_EVAL。转 STEP_EVAL 由分支守卫
+        # 检测 SKIPPED current 跳到 SCHEDULING;request_stop 场景下一拍 _check_stop 即 FAILED。
+        self._go(EngineState.STEP_EVAL, f"step {sid} cancelled")
 
     def _check_stop(self) -> bool:
         """若已 request_stop,转 FAILED 并返回 False。"""
@@ -259,6 +301,12 @@ class Engine:
         """主循环(初始 run 与 resume 共用):逐拍 _dispatch 直至终态,
         统一收尾 RUN_END + 持久化 + 结果聚合。PLANNING 是第一类 dispatch 状态,
         Scheduler 初始态即 PLANNING,无需 _go 自迁移。"""
+        # 中断原语运行时状态:每次 run/resume 独立事件循环,干净重建(防跨 run 残留)
+        self._loop = asyncio.get_running_loop()
+        self._cancel_evt = asyncio.Event()
+        self._cancel_requested = False
+        self._cancel_step_id = None
+        self._cancel_reason = None
         run_timer = PhaseTimer("run", deadline_ms=self._run_timeout_ms)
         run_timer.__enter__()
         try:
@@ -1074,6 +1122,11 @@ class Engine:
                 self._deadlock_attempts = 0
                 self._go(EngineState.EXECUTING, f"step {step.id} ready")
         elif s == EngineState.EXECUTING:
+            if (self._cancel_requested and self.current is not None
+                    and self.current.id == self._cancel_step_id):
+                # 步骤刚调度即被取消(如 SCHEDULING 与 EXECUTING 之间 request_stop):不启动执行
+                self._finish_cancelled_step()
+                return
             self.bp.set_status(self.current.id, StepStatus.RUNNING)
             self.current.attempts += 1
             set_run_context(node_id=self.current.id, round=self.current.attempts)
@@ -1098,14 +1151,28 @@ class Engine:
                                            system=self.executor.system, start_levels=start_levels)
             t = PhaseTimer("executing", deadline_ms=self._phase_deadline("executing"))
             with t:
-                res: ExecResult = await self._safe_call(
-                    lambda: self._llm_wrap(Role.EXECUTOR,
-                        lambda: self.executor.run(self.current, ctx,
-                                                  tool_exec=self._tool_registry.call_tool),
-                        ctx_size=count_tokens(ctx)),
-                    lambda exc: ExecResult(
-                        observation=f"执行异常: {type(exc).__name__}: {exc}"),
-                )
+                # executor 跑子任务 + 主循环 wait cancel 事件:request_stop/cancel_current
+                # 触发 → task.cancel 硬中断(含长 ssh.exec),取消路径落 SKIPPED + step_cancel。
+                exec_task = asyncio.create_task(
+                    self._safe_call(
+                        lambda: self._llm_wrap(Role.EXECUTOR,
+                            lambda: self.executor.run(self.current, ctx,
+                                                      tool_exec=self._tool_registry.call_tool),
+                            ctx_size=count_tokens(ctx)),
+                        lambda exc: ExecResult(
+                            observation=f"执行异常: {type(exc).__name__}: {exc}"),
+                    ))
+                cancel_wait = asyncio.create_task(self._cancel_evt.wait())
+                done, pending = await asyncio.wait(
+                    {exec_task, cancel_wait}, return_when=asyncio.FIRST_COMPLETED)
+                for tsk in pending:
+                    tsk.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                if exec_task in done and not exec_task.cancelled():
+                    res: ExecResult = exec_task.result()
+                else:
+                    self._finish_cancelled_step()
+                    return
             if t.timed_out:
                 self.signals.emit(Signal.PHASE_TIMEOUT, phase="executing",
                                   elapsed_ms=t.elapsed_ms, step_id=self.current.id)
@@ -1129,6 +1196,12 @@ class Engine:
                                   detail=f"step_id={self.current.id} tool_calls={n}  {n} use_tool + {n} tool_result  trace 通道")
             self._go(EngineState.STEP_EVAL, f"step {self.current.id} executed")
         elif s == EngineState.STEP_EVAL:
+            if self.current is not None and self.current.status.value == "SKIPPED":
+                # 被取消的步骤:SKIPPED 即终态,跳过评估直接回调度(取消路径经 _finish_cancelled_step 转入)
+                self.current = None
+                set_run_context(node_id=None, round=None)
+                self._go(EngineState.SCHEDULING, "step cancelled")
+                return
             ctx = await self._assemble_ctx(
                 Role.EVALUATOR_STEP, step_id=self.current.id,
                 system=self.evaluator.system_for(Role.EVALUATOR_STEP))
