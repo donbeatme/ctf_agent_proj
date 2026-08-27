@@ -6,7 +6,7 @@ wsl / 本机 docker(防 LLM 借显式 target 越权读宿主敏感文件)。
 
 CommandRunner 是薄门面:持有/懒建 SandboxManager(config_sandbox 提供凭据),
 run / run_python 委托 sandbox.exec / sandbox.run_python(容器生命周期、工作目录
-同步、依赖安装由 SandboxManager 负责)。
+同步、依赖安装由 SandboxManager 负责)。全 async(沙箱层为 asyncssh)。
 """
 
 from __future__ import annotations
@@ -105,20 +105,20 @@ class CommandRunner:
             cmd=cmd, target="none",
         )
 
-    def run(self, cmd, *, cwd=None, category=None, tool_id=None,
-            timeout=None) -> RunOutcome:
+    async def run(self, cmd, *, cwd=None, category=None, tool_id=None,
+                  timeout=None) -> RunOutcome:
         """在沙箱内执行命令(容器生命周期 + cwd 同步 + 依赖安装由沙箱负责)。"""
         sb = self._ensure_sandbox()
         if sb is None:
             return self._unavailable(cmd)
-        return sb.exec(cmd, cwd=cwd, category=category, tool_id=tool_id,
-                       timeout=timeout or self.timeout)
+        return await sb.exec(cmd, cwd=cwd, category=category, tool_id=tool_id,
+                             timeout=timeout or self.timeout)
 
-    def run_python(self, code, *, cwd=None, category=None, tool_id=None,
-                   timeout=None) -> RunOutcome:
+    async def run_python(self, code, *, cwd=None, category=None, tool_id=None,
+                         timeout=None) -> RunOutcome:
         """在沙箱内执行一段 Python(沙箱写 _ctf_exec.py 后运行)。"""
         sb = self._ensure_sandbox()
         if sb is None:
             return self._unavailable(code)
-        return sb.run_python(code, cwd=cwd, category=category, tool_id=tool_id,
-                             timeout=timeout or self.timeout)
+        return await sb.run_python(code, cwd=cwd, category=category, tool_id=tool_id,
+                                   timeout=timeout or self.timeout)

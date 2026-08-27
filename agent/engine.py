@@ -24,6 +24,7 @@ REVISE 是评审标记,评审通过即清回 PENDING,不会滞留到调度期;
 max_cycles 仅作总调度预算兜底,超限抛 EngineError(引擎结构性失序)。
 """
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field
@@ -230,24 +231,37 @@ class Engine:
         return False
 
     def run(self, raw_content: dict):
-        self._init_run(raw_content)
+        """同步桥:入口保持同步(main/web_server/scripts/测试同步调用点不改),
+        内部经 _run_async 在单事件循环内跑完整 async 调度链。"""
+        return asyncio.run(self._run_async(raw_content))
+
+    async def _run_async(self, raw_content: dict):
+        await self._init_run(raw_content)
         # 事件源合一:run 作用域上下文(run_id),外围/决策链事件经 opslog 自动带归属
         set_run_context(run_id=self.workspace.run_id)
-        self.signals.emit(Signal.RUN_STARTED,
-                          task=raw_content, max_cycles=self.max_cycles,
-                          max_replans=self.max_replans, max_stalls=self.max_stalls,
-                          max_deadlock_attempts=self.max_deadlock_attempts)
-        if self._checker is not None:
-            rep = self._checker.probe_manifest()
-            ctype = (self.raw_content or {}).get("challenge_type")
-            if ctype:
-                rep["category"] = self._checker.probe_category(ctype)
-            self.signals.emit(Signal.ENV_CHECK, scope="run_start", report=rep)
+        try:
+            self.signals.emit(Signal.RUN_STARTED,
+                              task=raw_content, max_cycles=self.max_cycles,
+                              max_replans=self.max_replans, max_stalls=self.max_stalls,
+                              max_deadlock_attempts=self.max_deadlock_attempts)
+            if self._checker is not None:
+                rep = self._checker.probe_manifest()
+                ctype = (self.raw_content or {}).get("challenge_type")
+                if ctype:
+                    rep["category"] = self._checker.probe_category(ctype)
+                self.signals.emit(Signal.ENV_CHECK, scope="run_start", report=rep)
+            await self._run_loop()
+            return self.bp
+        finally:
+            set_run_context(run_id=None)
+
+    async def _run_loop(self):
+        """主循环(初始 run 与 resume 共用):逐拍 _dispatch 直至终态,
+        统一收尾 RUN_END + 持久化 + 结果聚合。PLANNING 是第一类 dispatch 状态,
+        Scheduler 初始态即 PLANNING,无需 _go 自迁移。"""
         run_timer = PhaseTimer("run", deadline_ms=self._run_timeout_ms)
         run_timer.__enter__()
         try:
-            # PLANNING 作为第一类 dispatch 状态:进入循环,由 _dispatch 处理初始规划
-            # (Scheduler 初始态即 PLANNING,无需 _go 自迁移)
             for self._cycle in range(self.max_cycles):
                 if self.scheduler.state in (EngineState.DONE, EngineState.FAILED):
                     break
@@ -261,7 +275,7 @@ class Engine:
                     break
                 if not self._token_budget_ok():
                     break
-                self._dispatch()
+                await self._dispatch()
             else:
                 self._fail(f"engine 循环超过 {self.max_cycles} 次仍未到终态")
             self.signals.emit(Signal.RUN_END,
@@ -270,19 +284,17 @@ class Engine:
                               total_cycles=self._cycle)
             self._persist_run_state()
             self.run_result = self._make_run_result()
-            return self.bp
         finally:
             run_timer.__exit__()
             self._log.close()
-            set_run_context(run_id=None)
 
-    def _init_run(self, raw_content):
+    async def _init_run(self, raw_content):
         """重置运行态(每次 run 前调用)。
 
         经 understander(任务理解层输出 API)获取 TaskInput 实例;goal_list 只从这里
         来,不做二次解析。
         """
-        self.task_input = self._safe_call(
+        self.task_input = await self._safe_call(
             lambda: self.understander.understand(raw_content),
             lambda exc: TaskInput(raw_content=raw_content))
         self.raw_content = self.task_input.raw_content
@@ -376,43 +388,15 @@ class Engine:
         engine._tool_registry.set_workspace(ws)
 
         engine._cycle = 0
-        # 续跑:从当前状态继续
+        # 续跑:从当前状态继续(共享 _run_loop;resume 不设 run 作用域上下文)
         engine.signals.emit(Signal.RUN_STARTED,
                             task=engine.raw_content,
                             max_cycles=engine.max_cycles,
                             max_replans=engine.max_replans,
                             max_stalls=engine.max_stalls,
                             max_deadlock_attempts=engine.max_deadlock_attempts)
-        run_timer = PhaseTimer("run", deadline_ms=engine._run_timeout_ms)
-        run_timer.__enter__()
-        try:
-            for engine._cycle in range(engine.max_cycles):
-                if engine.scheduler.state in (EngineState.DONE, EngineState.FAILED):
-                    break
-                if not engine._check_stop():
-                    break
-                if not run_timer.check():
-                    engine.signals.emit(Signal.RUN_TIMEOUT,
-                                        elapsed_ms=run_timer.elapsed_ms)
-                    engine._fail(
-                        f"run 全局超时 ({run_timer.elapsed_ms:.0f}ms)")
-                    break
-                if not engine._token_budget_ok():
-                    break
-                engine._dispatch()
-            else:
-                engine._fail(
-                    f"engine 循环超过 {engine.max_cycles} 次仍未到终态")
-            engine.signals.emit(Signal.RUN_END,
-                                state=engine.scheduler.state.value,
-                                fail_reason=engine.fail_reason,
-                                total_cycles=engine._cycle)
-            engine._persist_run_state()
-            engine.run_result = engine._make_run_result()
-            return engine
-        finally:
-            run_timer.__exit__()
-            engine._log.close()
+        asyncio.run(engine._run_loop())
+        return engine
 
     def _rebuild_from_events(self, ws):
         """从 event 流重建运行时计数器(断点续跑)。
@@ -475,10 +459,12 @@ class Engine:
             )
 
     @staticmethod
-    def _safe_call(fn, on_error):
-        """执行外部 Agent 调用(executor/评估器);异常转成失败信号,不让引擎崩掉。"""
+    async def _safe_call(fn, on_error):
+        """执行外部 Agent 调用(executor/评估器);异常转成失败信号,不让引擎崩掉。
+        兼容同步/异步 fn:返回协程时 await,同步直取。"""
         try:
-            return fn()
+            r = fn()
+            return await r if asyncio.iscoroutine(r) else r
         except Exception as exc:
             return on_error(exc)
 
@@ -542,7 +528,7 @@ class Engine:
         max_out = model_max_output(model)
         return int((window - max_out) * ratio)
 
-    def _assemble_ctx(self, role, budget=None, system=None, **kw) -> str:
+    async def _assemble_ctx(self, role, budget=None, system=None, **kw) -> str:
         """调用 assembler.assemble 组装上下文;assembler 自带信号发射(若已注入 signals)。
         自动注入 goal_list + compress 回调 + budget,供组件使用。
         system 传给 SystemPromptComponent 渲染(只读投影,供 ctx_asm 日志/信号);
@@ -554,7 +540,7 @@ class Engine:
         if "goal_list" not in kw and self.goals:
             kw["goal_list"] = self.goals
         budget = budget if budget is not None else self._role_budget(role)
-        ctx, _system, over = a.assemble(role, budget=budget, system=system, **kw)
+        ctx, _system, over = await a.assemble(role, budget=budget, system=system, **kw)
         # 溢出信号由 assembler 内发射(带 role/overflow/method 完整字段),这里不重复
         return ctx
 
@@ -812,7 +798,7 @@ class Engine:
             if s.status == StepStatus.REVISE:
                 self.bp.set_status(sid, StepStatus.PENDING)
 
-    def _resolve_stuck(self) -> None:
+    async def _resolve_stuck(self) -> None:
         self._deadlock_attempts += 1
         report = self._blocked_report()
         self.signals.emit(Signal.DEADLOCK_DETECTED,
@@ -821,8 +807,8 @@ class Engine:
         if self._deadlock_attempts > self.max_deadlock_attempts:
             self._fail(f"调度死锁:连续 {self._deadlock_attempts - 1} 次重排仍无可执行步骤")
             return
-        self._replan(EvalSource.SCHEDULING,
-                     EvalResult(Verdict.FAIL, report))
+        await self._replan(EvalSource.SCHEDULING,
+                           EvalResult(Verdict.FAIL, report))
 
     def _blocked_report(self) -> str:
         rows = []
@@ -889,7 +875,7 @@ class Engine:
                 lines.append(f"  result: {s.result}")
         return "\n".join(lines)
 
-    def _eval_goals_after_pass(self, step_ctx: str):
+    async def _eval_goals_after_pass(self, step_ctx: str):
         """步骤 PASS 后,调用 evaluator 比对未完成 goal 与当前 DAG,引用证据记录完成状态。"""
         if not self.goals:
             return
@@ -899,9 +885,9 @@ class Engine:
         dag_summary = self._dag_summary_for_goals()
         raw_goals = [g.model_dump() for g in incomplete]
         try:
-            # goal 评估是 ee 的 LLM 子能力(N 个独立调用,内部线程池并行):
-            # 包 _llm_wrap 统一记账(逐 goal 线程不 drain 全局 log,聚合用量在此兜底)
-            results = self._llm_wrap(
+            # goal 评估是 ee 的 LLM 子能力(N 个独立调用,内部 asyncio 并发):
+            # 包 _llm_wrap 统一记账(逐 goal 协程不 drain 全局 log,聚合用量在此兜底)
+            results = await self._llm_wrap(
                 Role.EVALUATOR_STEP,
                 lambda: self.evaluator.eval_goals(step_ctx, raw_goals, dag_summary),
                 ctx_size=count_tokens(step_ctx),
@@ -945,7 +931,7 @@ class Engine:
         """全部任务目标已被 goal_eval 判为完成(goal_id 均在 _goal_complete)。"""
         return bool(self.goals) and all(g.id in self._goal_complete for g in self.goals)
 
-    def _llm_wrap(self, role, fn, ctx_size=0):
+    async def _llm_wrap(self, role, fn, ctx_size=0):
         """包裹一次外部 agent 调用,前后发 llm_call_start/end + response。
 
         token 用量: 优先从返回值提取(_extract_usage),其次从 _token_log(pop_token_log),
@@ -960,6 +946,8 @@ class Engine:
         self.signals.emit(Signal.LLM_CALL_START, role=role, ctx_size=ctx_size)
         try:
             result = fn()
+            if asyncio.iscoroutine(result):
+                result = await result
             ms = int((time.perf_counter() - t0) * 1000)
             # 优先从返回值提取,再从 _token_log 兜底(executor/evaluator 可能不自行上报)
             pt, ct = self._extract_usage(result)
@@ -1060,7 +1048,7 @@ class Engine:
             product=product,
         )
 
-    def _dispatch(self):
+    async def _dispatch(self):
         s = self.scheduler.state
         if s == EngineState.PLANNING:
             if self.bp is not None:
@@ -1068,7 +1056,7 @@ class Engine:
             else:
                 t = PhaseTimer("planning", deadline_ms=self._phase_deadline("planning"))
                 with t:
-                    self._do_initial_plan()
+                    await self._do_initial_plan()
                 if t.timed_out:
                     self.signals.emit(Signal.PHASE_TIMEOUT, phase="planning",
                                       elapsed_ms=t.elapsed_ms)
@@ -1076,12 +1064,12 @@ class Engine:
                         self._fail(
                             f"初始规划超时({t.elapsed_ms:.0f}ms)且无产出")
         elif s == EngineState.PLAN_REVIEW:
-            ctx = self._assemble_ctx(
+            ctx = await self._assemble_ctx(
                 Role.EVALUATOR_PLAN,
                 system=self.evaluator.system_for(Role.EVALUATOR_PLAN))
             t = PhaseTimer("plan_review", deadline_ms=self._phase_deadline("plan_review"))
             with t:
-                res = self._safe_call(
+                res = await self._safe_call(
                     lambda: self._llm_wrap(Role.EVALUATOR_PLAN,
                         lambda: self.evaluator.review(ctx), ctx_size=count_tokens(ctx)),
                     lambda exc: EvalResult(Verdict.FAIL,
@@ -1093,7 +1081,7 @@ class Engine:
                 res = EvalResult(Verdict.FAIL, f"计划评审超时({t.elapsed_ms:.0f}ms)")
             if res.verdict == Verdict.FAIL:
                 self._mark_revise()
-                self._replan(EvalSource.PLAN_REVIEW, res)
+                await self._replan(EvalSource.PLAN_REVIEW, res)
             else:
                 self._clear_revise()
                 self.signals.emit(Signal.PLAN_REVIEW_PASS)
@@ -1105,7 +1093,7 @@ class Engine:
                 if self.task_completed or self.bp.is_done():
                     self._go(EngineState.REFLECTING, "task completed")
                 else:
-                    self._resolve_stuck()
+                    await self._resolve_stuck()
             else:
                 if self._capability_blocked():
                     self._fail("环境阻塞: 靶机不可达或沙箱不可用(能力探测复查仍失败),后续步骤无法执行")
@@ -1131,15 +1119,15 @@ class Engine:
                                   step_id=self.current.id, report=rep)
             a = self._assembler()
             if a is not None:
-                a.precompress(Role.PLANNER)
+                await a.precompress(Role.PLANNER)
             retry_mode = self._retry_mode or "raw"
             self._retry_mode = None
             start_levels = {"trace": "summary"} if retry_mode == "compressed" else None
-            ctx = self._assemble_ctx(Role.EXECUTOR, step_id=self.current.id,
-                                     system=self.executor.system, start_levels=start_levels)
+            ctx = await self._assemble_ctx(Role.EXECUTOR, step_id=self.current.id,
+                                           system=self.executor.system, start_levels=start_levels)
             t = PhaseTimer("executing", deadline_ms=self._phase_deadline("executing"))
             with t:
-                res: ExecResult = self._safe_call(
+                res: ExecResult = await self._safe_call(
                     lambda: self._llm_wrap(Role.EXECUTOR,
                         lambda: self.executor.run(self.current, ctx,
                                                   tool_exec=self._tool_registry.call_tool),
@@ -1170,7 +1158,7 @@ class Engine:
                                   detail=f"step_id={self.current.id} tool_calls={n}  {n} use_tool + {n} tool_result  trace 通道")
             self._go(EngineState.STEP_EVAL, f"step {self.current.id} executed")
         elif s == EngineState.STEP_EVAL:
-            ctx = self._assemble_ctx(
+            ctx = await self._assemble_ctx(
                 Role.EVALUATOR_STEP, step_id=self.current.id,
                 system=self.evaluator.system_for(Role.EVALUATOR_STEP))
             digest = self._step_tool_digest(self.current.id)
@@ -1180,7 +1168,7 @@ class Engine:
                 ctx = f"{ctx}\n\nobservation: {obs}".strip()
             t = PhaseTimer("step_eval", deadline_ms=self._phase_deadline("step_eval"))
             with t:
-                res = self._safe_call(
+                res = await self._safe_call(
                     lambda: self._llm_wrap(Role.EVALUATOR_STEP,
                         lambda: self.evaluator.step_eval(ctx), ctx_size=count_tokens(ctx)),
                     lambda exc: EvalResult(Verdict.ESCALATE,
@@ -1204,15 +1192,15 @@ class Engine:
                     self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
                                       verdict=Verdict.ESCALATE, observation=self._obs or "",
                                       attempts=self.current.attempts)
-                    self._replan(EvalSource.STEP_EVAL, res,
-                                 scope_step_id=self.current.id)
+                    await self._replan(EvalSource.STEP_EVAL, res,
+                                       scope_step_id=self.current.id)
                 elif self.current.attempts >= self.current.max_attempts:
                     self.bp.set_status(self.current.id, StepStatus.ESCALATED)
                     self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
                     self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
                                       verdict=Verdict.ESCALATE, observation=self._obs or "",
                                       attempts=self.current.attempts)
-                    self._replan(EvalSource.STEP_EVAL, res)
+                    await self._replan(EvalSource.STEP_EVAL, res)
                 else:
                     self.bp.set_status(self.current.id, StepStatus.RETRY)
                     self._record_step(Verdict.RETRY, is_completed=self.task_completed)
@@ -1233,7 +1221,7 @@ class Engine:
                                   verdict=Verdict.ESCALATE, observation=self._obs or "",
                                   attempts=self.current.attempts)
                 scope = self.current.id if diagnosis == Diagnosis.PLANNER_TARGET else None
-                self._replan(EvalSource.STEP_EVAL, res, scope_step_id=scope)
+                await self._replan(EvalSource.STEP_EVAL, res, scope_step_id=scope)
             elif res.verdict == Verdict.PASS:
                 self.bp.set_status(self.current.id, StepStatus.PASSED)
                 self._record_step(Verdict.PASS, is_completed=self.task_completed)
@@ -1241,7 +1229,7 @@ class Engine:
                                   verdict=Verdict.PASS, observation=self._obs or "",
                                   attempts=self.current.attempts)
                 # 步骤通过后,评估 goal list:比对未完成 goal 与当前世界模型(DAG)
-                self._eval_goals_after_pass(ctx)
+                await self._eval_goals_after_pass(ctx)
                 self.current = None
                 set_run_context(node_id=None, round=None)
                 self._go(EngineState.SCHEDULING, "step passed")
@@ -1251,14 +1239,14 @@ class Engine:
                 self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
                                   verdict=Verdict.ESCALATE, observation=self._obs or "",
                                   attempts=self.current.attempts)
-                self._replan(EvalSource.STEP_EVAL, res)
+                await self._replan(EvalSource.STEP_EVAL, res)
         elif s == EngineState.REFLECTING:
-            ctx = self._assemble_ctx(
+            ctx = await self._assemble_ctx(
                 Role.EVALUATOR_TASK,
                 system=self.evaluator.system_for(Role.EVALUATOR_TASK))
             t = PhaseTimer("reflecting", deadline_ms=self._phase_deadline("reflecting"))
             with t:
-                res = self._safe_call(
+                res = await self._safe_call(
                     lambda: self._llm_wrap(Role.EVALUATOR_TASK,
                         lambda: self.evaluator.reflect(ctx),
                         ctx_size=count_tokens(ctx)),
@@ -1270,13 +1258,13 @@ class Engine:
                                   elapsed_ms=t.elapsed_ms)
                 res = EvalResult(Verdict.REPLAN, f"反思超时({t.elapsed_ms:.0f}ms)")
             if res.verdict == Verdict.DONE:
-                self._replan(EvalSource.REFLECT, res, to_done=True)
+                await self._replan(EvalSource.REFLECT, res, to_done=True)
             else:
-                self._replan(EvalSource.REFLECT, res, to_done=False)
+                await self._replan(EvalSource.REFLECT, res, to_done=False)
 
-    def _do_initial_plan(self):
+    async def _do_initial_plan(self):
         """执行初始规划(PLANNING 状态的无 bp 分支):调用 planner → 记录 → 进入评审。"""
-        self.bp = self._safe_call(
+        self.bp = await self._safe_call(
             lambda: self._llm_wrap(Role.PLANNER,
                 lambda: self.planner.plan(
                     PlannerInput(mode=PlannerMode.INITIAL,
@@ -1299,8 +1287,8 @@ class Engine:
         self._fail(f"Planner LLM 调用失败: {type(exc).__name__}: {exc}")
         return None
 
-    def _replan(self, source: EvalSource, res, to_done=False,
-                scope_step_id=None) -> None:
+    async def _replan(self, source: EvalSource, res, to_done=False,
+                      scope_step_id=None) -> None:
         sid = self.current.id if self.current else None
         self.turn.append(
             EvalEvent(source=source, opinion=res.opinion,
@@ -1332,7 +1320,7 @@ class Engine:
         self._turn_consumed = len(self.turn)
         t = PhaseTimer("planning", deadline_ms=self._phase_deadline("planning"))
         with t:
-            self.bp = self._safe_call(
+            self.bp = await self._safe_call(
                 lambda: self._llm_wrap(Role.PLANNER,
                     lambda: self.planner.plan(pin)),
                 lambda exc: self._planner_failure(exc),

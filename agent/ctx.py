@@ -38,6 +38,7 @@ Docs 计划评审通过即清),组装器只机械执行。
 多组件投影 / 同数据两通道进 ctx)的兜底,组件各自保持原文语义,不做一刀切过滤。
 """
 
+import asyncio
 import json
 
 from agent.evaluator import Verdict
@@ -251,14 +252,16 @@ class CtxAssembler:
         for c in self.components(scope):
             c.clear()
 
-    def precompress(self, role) -> None:
+    async def precompress(self, role) -> None:
         """预热某 role 组件的语义压缩缓存(engine 在非决策时刻调用);不改变档位。
 
         提前把 history 的 delta 折成摘要并落盘,决策时 assemble 命中摘要档只读缓存,
-        零 LLM 往返。需要压缩 api 的组件覆盖 precompress;其余基类无操作。
+        零 LLM 往返。需要压缩 api 的组件覆盖 precompress(异步);其余基类无操作。
         """
         for c in self.components(role):
-            c.precompress(self._ws, self.compress)
+            r = c.precompress(self._ws, self.compress)
+            if asyncio.iscoroutine(r):
+                await r
 
     def ingest(self, role, **returns) -> None:
         """模型的返回装填回存储(反向通道):把本轮 LLM 输出按角色契约落账。
@@ -336,8 +339,8 @@ class CtxAssembler:
                           observation=observation, step_id=step_id,
                           diagnosis=diagnosis)
 
-    def assemble(self, role, budget=None, protect=None, purpose=None,
-                 start_levels=None, **kw):
+    async def assemble(self, role, budget=None, protect=None, purpose=None,
+                       start_levels=None, **kw):
         """组装某 role 的上下文。
 
         - 每个组件重置档位(level=0)→ create 投影本轮输入/workspace 状态(压缩 api 经 kw 注入)
@@ -357,10 +360,13 @@ class CtxAssembler:
                 if name in c.LEVELS:
                     c.level = c.LEVELS.index(name)
             (sys_comps if c.target == "system" else ctx_comps).append(c)
+        # 摘要档组件只读预热缓存:start_levels 强压到 summary 时在此折叠(异步 LLM),
+        # render 本身同步(不再懒触发折叠),机械降级路径由 can_advance 保证缓存新鲜。
+        await self._ensure_compression(ctx_comps)
         ctx = self._join(ctx_comps)
         over = 0
         if budget is not None and count_tokens(ctx) > budget:
-            ctx = self._compress_overflow(ctx_comps, budget, protect, role, purpose)
+            ctx = await self._compress_overflow(ctx_comps, budget, protect, role, purpose)
             over = max(0, count_tokens(ctx) - budget)
         # 若引擎注入了 signals,自动发射上下文组装事件
         if self.signals is not None:
@@ -384,6 +390,17 @@ class CtxAssembler:
         return ctx, self._join(sys_comps), over
 
     # ===== 压缩内部 =====
+
+    async def _ensure_compression(self, comps) -> None:
+        """摘要档组件预折叠(异步 LLM):start_levels 强压到 summary 的组件在 render 前折好。
+
+        render 本身同步只读缓存;只有 History/Trace(带 _fold 的组件)在最高档才需要折叠。
+        """
+        for c in comps:
+            if c.level >= len(c.LEVELS) - 1 and hasattr(c, "_fold"):
+                r = c.precompress(self._ws, self.compress)
+                if asyncio.iscoroutine(r):
+                    await r
 
     def _join(self, comps) -> str:
         """拼 ctx:跨组件按行判重,重复行只保留第一个出现。
@@ -410,10 +427,10 @@ class CtxAssembler:
     def _size(self, comps) -> int:
         return count_tokens(self._join(comps))
 
-    def _compress_overflow(self, comps, budget, protect, role, purpose) -> str:
+    async def _compress_overflow(self, comps, budget, protect, role, purpose) -> str:
         """溢出压缩:注入 compress 则 LLM 压缩,否则/超限走机械降级。返回压缩后的 ctx 文本。"""
         if self.compress is not None:
-            result = self._compress_llm(comps, budget, protect, role, purpose)
+            result = await self._compress_llm(comps, budget, protect, role, purpose)
             if result is not None and count_tokens(result) <= budget:
                 return result
         return self._compress_mechanical(comps, budget, protect)
@@ -444,7 +461,7 @@ class CtxAssembler:
         self._last_compression = compressed if compressed else None
         return self._join(comps)
 
-    def _compress_llm(self, comps, budget, protect, role, purpose):
+    async def _compress_llm(self, comps, budget, protect, role, purpose):
         """把超预算内容 + 压缩提示词交给 LLM 压缩。
 
         - 可压部分(声明了 compress_methods 且未受保护)→ 送 LLM 压缩
@@ -462,7 +479,7 @@ class CtxAssembler:
         prompt = self._build_compress_prompt(role, purpose, budget, total, compressible, kept)
         content = "\n\n".join(f"===== {c.key} =====\n{c.render()}" for c in compressible)
         try:
-            result = self.compress(prompt, content)
+            result = await self.compress(prompt, content)
         except Exception:  # 压缩失败 → 兜底机械
             return None
         kept_text = "\n\n".join(part for part in (c.render() for c in kept) if part)
@@ -768,14 +785,14 @@ class HistoryComponent(CtxComponent):
             return False
         return True
 
-    def precompress(self, ws, compress=None):
+    async def precompress(self, ws, compress=None):
         """预热:engine 在非决策时刻调用,提前折叠 delta 并落盘,决策路径零 LLM 往返。"""
         if compress is None:
             return
         self._ws = ws
         self._compress = compress
         self._load_cache()
-        self._fold()
+        await self._fold()
 
     def _events(self):
         ws = self._ws
@@ -787,7 +804,7 @@ class HistoryComponent(CtxComponent):
     def _pass_events(self):
         return [e for e in self._events() if e.verdict == Verdict.PASS]
 
-    def _fold(self):
+    async def _fold(self):
         """增量折叠:只把自标记以来新出现的 PASS 事件发给 compress;非 PASS 不进来。"""
         if self._compress is None:
             return
@@ -801,7 +818,7 @@ class HistoryComponent(CtxComponent):
             "说明哪步过了、关键证据是什么;失败/升级/评审记录不在这里,无需保留。"
         )
         try:
-            folded = self._compress(prompt, chunk)
+            folded = await self._compress(prompt, chunk)
         except Exception:  # 压缩失败:不推进折叠进度,下轮重试
             return
         if folded and folded.strip():
@@ -876,8 +893,7 @@ class HistoryComponent(CtxComponent):
             return "# 执行历史\n" + "\n".join(self._render_raw(evs))
         if self.level == 1:
             return "# 执行历史(索引)\n" + "\n".join(self._iter_lines(self._pass_ref))
-        # 摘要档:增量折叠 PASS;降级(无压缩 api)回索引样式,不装假摘要
-        self._fold()
+        # 摘要档:只读预热缓存(assemble/precompress 已异步折叠),不重付 LLM;降级回索引
         if self._compress is None:
             return "# 执行历史(索引)\n" + "\n".join(self._iter_lines(self._pass_ref))
         body = [ln for ln in self._iter_lines(lambda e: "") if ln]
@@ -1134,14 +1150,14 @@ class TraceComponent(CtxComponent):
             return False
         return True
 
-    def precompress(self, ws, compress=None):
+    async def precompress(self, ws, compress=None):
         """预热:engine 在非决策时刻调用,提前折叠本轮轨迹并落盘,决策路径零 LLM 往返。"""
         if compress is None:
             return
         self._ws = ws
         self._compress = compress
         self._load_cache()
-        self._fold()
+        await self._fold()
 
     def _cut(self) -> int:
         """最近一次 replan 事件的事件列表索引;无 replan 则 -1(渲染全部)。"""
@@ -1165,7 +1181,7 @@ class TraceComponent(CtxComponent):
     def _signature(self):
         return "|".join(e.uuid for e in self._events())
 
-    def _fold(self):
+    async def _fold(self):
         """按轮折叠:本轮事件集与缓存签名不一致 → 重新摘要本轮轨迹(替换,不累计)。"""
         if self._compress is None:
             return
@@ -1181,7 +1197,7 @@ class TraceComponent(CtxComponent):
             "说明调用了哪些工具、关键输出与异常;保持可读。"
         )
         try:
-            folded = self._compress(prompt, chunk)
+            folded = await self._compress(prompt, chunk)
         except Exception:  # 压缩失败不炸:摘要留空,render 走 [暂无]
             folded = ""
         self._summary = folded.strip() if folded and folded.strip() else ""
@@ -1257,7 +1273,7 @@ class TraceComponent(CtxComponent):
             return "# 本轮工具轨迹\n" + "\n".join(self._render_raw(evs))
         if self.level == 1:
             return "# 本轮工具轨迹(索引)\n" + "\n".join(self._render_index(evs))
-        self._fold()
+        # 摘要档:只读预热缓存(assemble/precompress 已异步折叠),不重付 LLM;降级回索引
         if self._compress is None:
             return "# 本轮工具轨迹(索引)\n" + "\n".join(self._render_index(evs))
         return f"# 本轮工具轨迹(摘要)\n{self._summary or '[暂无]'}"

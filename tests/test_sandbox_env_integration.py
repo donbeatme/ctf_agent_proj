@@ -18,7 +18,7 @@ class ScriptedFakeSsh:
         self.available = set()
         self._installed = False
 
-    def exec(self, cmd_str, timeout=None):
+    async def exec(self, cmd_str, timeout=None):
         self.execs.append(cmd_str)
         if cmd_str.startswith("docker ps -aq"):
             return ProcOutcome(0, b"", b"")
@@ -41,14 +41,14 @@ class ScriptedFakeSsh:
             return ProcOutcome(0, b"", b"")
         return ProcOutcome(0, b"", b"")
 
-    def sync_to(self, local, remote):
+    async def sync_to(self, local, remote):
         self.syncs.append((str(local), remote))
 
-    def close(self):
+    async def close(self):
         pass
 
 
-def test_pwn_command_full_chain(tmp_path):
+async def test_pwn_command_full_chain(tmp_path):
     ssh = ScriptedFakeSsh()
     settings = SandboxSettings(ssh_host="vm")
     backend = SshSandboxBackend(settings, ssh=ssh)
@@ -56,8 +56,8 @@ def test_pwn_command_full_chain(tmp_path):
     runner = CommandRunner(sandbox=mgr)
     ex = RealExecutor(runner=runner, workdir=str(tmp_path))
 
-    result = ex._run_command({"command": "gdb -q ./pwn1", "tool_id": "gdb"},
-                             category="ctf-pwn")
+    result = await ex._run_command({"command": "gdb -q ./pwn1", "tool_id": "gdb"},
+                                   category="ctf-pwn")
 
     assert result["ok"] is True
     assert result["target"] == "ssh"

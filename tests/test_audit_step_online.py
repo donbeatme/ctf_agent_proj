@@ -62,10 +62,10 @@ def test_step_prompt_is_formattable():
     assert "pass|retry|escalate" in rendered
 
 
-def test_step_judge_full_path_never_keyerrors(monkeypatch):
-    """create_trajectory_llm_as_judge(STEP_PROMPT) 全链路:模型回合法 JSON 返回 score,
+async def test_step_judge_full_path_never_keyerrors(monkeypatch):
+    """create_async_trajectory_llm_as_judge(STEP_PROMPT) 全链路:模型回合法 JSON 返回 score,
     不抛 KeyError('\"score\"')(prompt.format + create + parse 三段串起来才覆盖根因)。"""
-    from agentevals.trajectory.llm import create_trajectory_llm_as_judge
+    from agentevals.trajectory.llm import create_async_trajectory_llm_as_judge
 
     import agent.llm_api as real_llm_api
     from audit.evaluators.step import STEP_PROMPT
@@ -79,14 +79,14 @@ def test_step_judge_full_path_never_keyerrors(monkeypatch):
     monkeypatch.setattr(real_llm_api, "pop_token_log", lambda: [])
 
     judge = LlmApiAgentEvalsClient("evaluator_step")
-    ev = create_trajectory_llm_as_judge(
+    ev = create_async_trajectory_llm_as_judge(
         prompt=STEP_PROMPT, judge=judge, model="test-model", continuous=True
     )
-    res = ev(outputs=[{"role": "user", "content": "grade this"}])
+    res = await ev(outputs=[{"role": "user", "content": "grade this"}])
     assert res["score"] == 0.9
 
 
-def test_create_never_returns_content_without_score(monkeypatch):
+async def test_create_never_returns_content_without_score(monkeypatch):
     """create() 返回的 content 经矫正后必有 score/reasoning(缺键场景 openevals 不炸)。"""
     import agent.llm_api as real_llm_api
 
@@ -105,7 +105,7 @@ def test_create_never_returns_content_without_score(monkeypatch):
     monkeypatch.setattr(real_llm_api, "role_model", fake.role_model)
 
     comp = _LlmApiCompletions("evaluator_step")
-    resp = comp.create(
+    resp = await comp.create(
         messages=[{"role": "user", "content": "grade this"}],
         model="test-model",
         response_format={

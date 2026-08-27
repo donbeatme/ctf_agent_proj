@@ -9,6 +9,8 @@
 - install_tools:探测缺失 → 适配命令 → 沙箱内安装(持久进会话容器)→ 重校验;
   非目录工具动态解析(apt-cache/pip index)生成命令,解析不到/装不上 → failed 收口不阻塞
 - tool_conflicts:纯元数据分析(同 verify_check / brew-only / 已知约束 / 功能冗余)
+
+全 async:所有触达后端 exec 的方法均为 async(为 Phase 3 actor 每 ex 独立容器铺路)。
 """
 
 from __future__ import annotations
@@ -48,11 +50,11 @@ class ToolManager:
 
     # ===== 探测 =====
 
-    def probe_tool(self, tool_id: str, session_key: str | None = None) -> dict:
+    async def probe_tool(self, tool_id: str, session_key: str | None = None) -> dict:
         """沙箱内校验工具可用性。状态:available|missing|incompatible|manual|unknown。"""
         entry = self.catalog.get_tool(tool_id)
         if entry is None:
-            return self._probe_noncatalog(tool_id, session_key)
+            return await self._probe_noncatalog(tool_id, session_key)
         check = entry.get("verify_check") or ""
         method = entry.get("install_method")
         if method == "manual":
@@ -61,7 +63,7 @@ class ToolManager:
             return self._probe_result(tool_id, "incompatible", check)
         cmd = self._probe_cmd(check)
         try:
-            out = self.backend.exec(cmd, session_key=session_key, timeout=30)
+            out = await self.backend.exec(cmd, session_key=session_key, timeout=30)
         except Exception:
             return self._probe_result(tool_id, "unknown", check)
         status = "available" if out.returncode == 0 else "missing"
@@ -71,13 +73,13 @@ class ToolManager:
         emit("sandbox", "probe", tool_id=tool_id, status=status)
         return {"tool_id": tool_id, "status": status, "check": check}
 
-    def _probe_noncatalog(self, tool_id: str, session_key: str | None = None) -> dict:
+    async def _probe_noncatalog(self, tool_id: str, session_key: str | None = None) -> dict:
         """非目录工具:尽力按名字探测(command -v)。无后端/名称不安全→unknown(不拼 shell)。"""
         if self.backend is None or not _SAFE_NAME_RE.match(tool_id):
             return self._probe_result(tool_id, "unknown", None)
         check = f"command -v {shlex.quote(tool_id)}"
         try:
-            out = self.backend.exec(check, session_key=session_key, timeout=30)
+            out = await self.backend.exec(check, session_key=session_key, timeout=30)
         except Exception:
             return self._probe_result(tool_id, "unknown", check)
         status = "available" if out.returncode == 0 else "missing"
@@ -129,7 +131,7 @@ class ToolManager:
             ) if cmd else None
         return None  # brew/manual/未知 → 不可自动安装
 
-    def _resolve_dynamic(self, tool_id: str, session_key: str | None = None) -> tuple[str, str] | None:
+    async def _resolve_dynamic(self, tool_id: str, session_key: str | None = None) -> tuple[str, str] | None:
         """非目录工具动态解析安装方式:apt-cache show → pip index versions(存在性检查,不下载)。
 
         返回 (安装命令, 方法);两类都查不到/名称不安全/无后端 → None(不可自动安装)。
@@ -137,10 +139,10 @@ class ToolManager:
         """
         if self.backend is None or not _SAFE_NAME_RE.match(tool_id):
             return None
-        if self._apt_has(tool_id, session_key):
+        if await self._apt_has(tool_id, session_key):
             return (f"DEBIAN_FRONTEND=noninteractive apt-get install -y {tool_id}", "apt")
         try:
-            out = self.backend.exec(
+            out = await self.backend.exec(
                 f"python3 -m pip index versions {shlex.quote(tool_id)}",
                 session_key=session_key, timeout=120,
             )
@@ -150,31 +152,31 @@ class ToolManager:
             return (f"python3 -m pip install --break-system-packages {tool_id}", "pip")
         return None
 
-    def _apt_has(self, pkg: str, session_key: str | None = None) -> bool:
+    async def _apt_has(self, pkg: str, session_key: str | None = None) -> bool:
         """apt 源里是否存在该包。镜像构建时清掉了 /var/lib/apt/lists,新容器 apt-cache
         查不到 → 先 apt-get update 一次(容器内持久)再重试,否则直接判不存在。"""
-        if self._apt_show(pkg, session_key):
+        if await self._apt_show(pkg, session_key):
             return True
-        if not self._apt_lists_present(session_key):
+        if not await self._apt_lists_present(session_key):
             try:
-                self.backend.exec("apt-get update", session_key=session_key, timeout=240)
+                await self.backend.exec("apt-get update", session_key=session_key, timeout=240)
             except Exception:
                 pass
-            return bool(self._apt_show(pkg, session_key))
+            return await self._apt_show(pkg, session_key)
         return False
 
-    def _apt_show(self, pkg: str, session_key: str | None = None) -> bool:
+    async def _apt_show(self, pkg: str, session_key: str | None = None) -> bool:
         try:
-            out = self.backend.exec(
+            out = await self.backend.exec(
                 f"apt-cache show {shlex.quote(pkg)}", session_key=session_key, timeout=60
             )
         except Exception:
             return False
         return out.returncode == 0 and bool(out.stdout.strip())
 
-    def _apt_lists_present(self, session_key: str | None = None) -> bool:
+    async def _apt_lists_present(self, session_key: str | None = None) -> bool:
         try:
-            out = self.backend.exec(
+            out = await self.backend.exec(
                 "ls -A /var/lib/apt/lists 2>/dev/null | wc -l", session_key=session_key, timeout=30
             )
         except Exception:
@@ -182,8 +184,8 @@ class ToolManager:
         n = out.stdout.strip()
         return out.returncode == 0 and bool(n) and n != b"0"
 
-    def install_tools(self, tool_ids, *, session_key: str | None = None,
-                      force: bool = False) -> dict:
+    async def install_tools(self, tool_ids, *, session_key: str | None = None,
+                            force: bool = False) -> dict:
         """探测缺失 → 安装 → 重校验。报告 {installed, failed, skipped_manual, incompatible}。
 
         目录外工具走动态解析(apt-cache/pip index),解析不到或装不上 → failed 收口,
@@ -207,13 +209,13 @@ class ToolManager:
             if not force and state == "installed":
                 continue  # 已动态装好(非目录 probe 恒 miss,靠缓存跳过,不重装)
             if not force:
-                st = self.probe_tool(tid, session_key=session_key).get("status")
+                st = (await self.probe_tool(tid, session_key=session_key)).get("status")
                 if st == "available":
                     continue  # 名字已在容器内,无需安装
                 if state == "unavailable":
                     report["failed"].append(tid)  # 缓存:之前解析/安装失败,快速收口
                     continue
-            resolved = self._resolve_dynamic(tid, session_key)
+            resolved = await self._resolve_dynamic(tid, session_key)
             if resolved is None:
                 self._dynamic_state[(tid, session_key)] = "unavailable"
                 report["failed"].append(tid)  # 解析不到 → 装不上,失败收口
@@ -221,19 +223,19 @@ class ToolManager:
                 to_run[tid], dynamic[tid] = resolved
         if not force:
             for tid in list(to_run):
-                if self.probe_tool(tid, session_key=session_key).get("status") == "available":
+                if (await self.probe_tool(tid, session_key=session_key)).get("status") == "available":
                     to_run.pop(tid)  # 已可用,跳过
                     dynamic.pop(tid, None)
         if to_run and any("apt-get" in c for c in to_run.values()):
-            self.backend.exec("apt-get update", session_key=session_key, timeout=180)
+            await self.backend.exec("apt-get update", session_key=session_key, timeout=180)
         for tid, cmd in to_run.items():
-            out = self.backend.exec(cmd, session_key=session_key, timeout=600)
+            out = await self.backend.exec(cmd, session_key=session_key, timeout=600)
             if tid in dynamic:
                 # 非目录工具:安装命令成功即算装上(二进制名可能与包名不同,不作名字探测)
                 ok = out.returncode == 0
             else:
                 ok = out.returncode == 0 and (
-                    self.probe_tool(tid, session_key=session_key).get("status") == "available"
+                    (await self.probe_tool(tid, session_key=session_key)).get("status") == "available"
                 )
             if ok:
                 report["installed"].append(tid)

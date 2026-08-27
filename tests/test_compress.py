@@ -59,18 +59,18 @@ def seeded(ws):
     return bp
 
 
-def test_overflow_llm_gets_content_and_rich_prompt(ws):
+async def test_overflow_llm_gets_content_and_rich_prompt(ws):
     """溢出压缩:LLM 收到待压缩内容 + 压缩提示词(目的/优先级/占比/agent 目的/按需方式)。"""
     seeded(ws)
     calls = []
 
-    def fake_compress(prompt, content):
+    async def fake_compress(prompt, content):
         calls.append((prompt, content))
         return "[压]"
 
     a = make_assembler(ws, compress=fake_compress)
-    ctx, _, over = a.assemble("planner", raw_content={"q": "x"}, budget=100,
-                              purpose="正在修订计划,关注 s1 为何 retry")
+    ctx, _, over = await a.assemble("planner", raw_content={"q": "x"}, budget=100,
+                                    purpose="正在修订计划,关注 s1 为何 retry")
 
     assert over == 0
     assert "[压]" in ctx                          # LLM 输出作为 ctx
@@ -90,16 +90,16 @@ def test_overflow_llm_gets_content_and_rich_prompt(ws):
     assert "任务" not in content                    # task 保留原文,不进 LLM
 
 
-def test_overflow_llm_overshoot_falls_back_to_mechanical(ws):
+async def test_overflow_llm_overshoot_falls_back_to_mechanical(ws):
     seeded(ws)
     calls = []
 
-    def fake_compress(prompt, content):
+    async def fake_compress(prompt, content):
         calls.append(content)
         return "oversized " * 200                  # LLM 输出超限(~200 token,不可用)
 
     a = make_assembler(ws, compress=fake_compress)
-    ctx, _, over = a.assemble("planner", raw_content={"q": "x"}, budget=200)
+    ctx, _, over = await a.assemble("planner", raw_content={"q": "x"}, budget=200)
 
     assert len(calls) == 1                          # 溢出只试一次 LLM,失败不重试
     assert "oversized" not in ctx                   # 没用超限的 LLM 输出
@@ -109,69 +109,69 @@ def test_overflow_llm_overshoot_falls_back_to_mechanical(ws):
                                                     # 索引/骨架档收进预算
 
 
-def test_overflow_no_compress_uses_mechanical(ws):
+async def test_overflow_no_compress_uses_mechanical(ws):
     seeded(ws)
     a = make_assembler(ws)                          # 不注入 compress
-    ctx, _, over = a.assemble("planner", raw_content={"q": "x"}, budget=205)
+    ctx, _, over = await a.assemble("planner", raw_content={"q": "x"}, budget=205)
     assert over == 0
     assert comp(a, "history").level >= 1            # 纯机械降级(索引替换,只压 PASS)
 
 
-def test_history_precompress_incremental(ws):
+async def test_history_precompress_incremental(ws):
     """增量摘要:只压自折叠标记以来新出现的 PASS 事件;非 PASS 事件不进折叠。"""
     seeded(ws)
     calls = []
 
-    def fake_compress(prompt, content):
+    async def fake_compress(prompt, content):
         calls.append(content)
         return "[摘要]"
 
     a = make_assembler(ws, compress=fake_compress)
-    a.precompress("planner")
+    await a.precompress("planner")
     assert len(calls) == 1
     assert ws.summaries["planner:history"]["passes"] == 1   # 只折了 PASS 事件
     assert "retry" not in calls[0] and "replan" not in calls[0]  # 非 PASS 不进折叠
 
-    a.precompress("planner")                        # 折叠标记未动 → 不再调
+    await a.precompress("planner")                  # 折叠标记未动 → 不再调
     assert len(calls) == 1
 
     ws.record_step("s2", "pass")
-    a.precompress("planner")                        # 只折新 PASS delta
+    await a.precompress("planner")                  # 只折新 PASS delta
     assert len(calls) == 2
     assert "step=s2" in calls[1]
     assert "step=s1" not in calls[1]
 
 
-def test_summary_cache_persists_across_load(tmp_path, ws):
+async def test_summary_cache_persists_across_load(tmp_path, ws):
     seeded(ws)
     calls = []
 
-    def fake_compress(prompt, content):
+    async def fake_compress(prompt, content):
         calls.append(content)
         return "[摘要]"
 
     a = make_assembler(ws, compress=fake_compress)
-    a.precompress("planner")
+    await a.precompress("planner")
     assert len(calls) == 1
     ws.sync()
 
     ws2 = Workspace.load("run-comp", root=tmp_path)
     a2 = make_assembler(ws2, compress=fake_compress)
-    a2.precompress("planner")
+    await a2.precompress("planner")
     assert len(calls) == 1                          # 断点续跑后折叠标记恢复,不重折
 
 
-def test_precompress_warms_cache_for_mechanical_fallback(ws):
+async def test_precompress_warms_cache_for_mechanical_fallback(ws):
     """预热缓存 → LLM 超限后机械兜底,history 摘要档直接读缓存,不再付 LLM 往返。"""
     seeded(ws)
     calls = []
 
-    def fake_compress(prompt, content):
+    async def fake_compress(prompt, content):
         calls.append(content)
         return "[摘要]" if len(calls) == 1 else "X" * 500
 
     a = make_assembler(ws, compress=fake_compress)
-    a.precompress("planner")                        # 预热:折一次
-    ctx, _, _ = a.assemble("planner", raw_content={"q": "x"}, budget=40)
+    await a.precompress("planner")                  # 预热:折一次
+    ctx, _, _ = await a.assemble("planner", raw_content={"q": "x"}, budget=40)
     assert len(calls) == 2                          # 1 预热 + 1 溢出尝试(超限)
     assert "[摘要]" in ctx                          # 摘要档渲染缓存,零额外 LLM

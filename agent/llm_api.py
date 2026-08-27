@@ -11,6 +11,7 @@
 - token 用量追踪:每次调用记录 prompt/completion tokens
 """
 
+import asyncio
 import json
 import random
 import re
@@ -53,17 +54,21 @@ def _llm_config() -> dict:
 # Client 单例复用连接池(item 2)
 # ═══════════════════════════════════════════════════════════
 
-_client: openai.OpenAI | None = None
+_client: openai.AsyncOpenAI | None = None
 _client_key: tuple | None = None
+_client_lock = threading.Lock()   # 并发首建/换参时保护单例
 
 
 def _get_client(api_key, base_url, timeout):
     global _client, _client_key
     key = (api_key, base_url, timeout)
-    if _client is None or _client_key != key:
-        _client = openai.OpenAI(api_key=api_key, base_url=base_url,
-                                timeout=timeout, max_retries=0)
-        _client_key = key
+    if _client is not None and _client_key == key:
+        return _client
+    with _client_lock:
+        if _client is None or _client_key != key:
+            _client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url,
+                                         timeout=timeout, max_retries=0)
+            _client_key = key
     return _client
 
 
@@ -79,25 +84,29 @@ class RateLimiter:
         self._capacity = max(1.0, rpm / 10.0) if rpm > 0 else float("inf")
         self._tokens = self._capacity
         self._last = time.monotonic()
-        self._lock = threading.Lock()   # 逐 goal 线程并发 acquire 时保护桶状态
+        # 单线程事件循环内,状态读改间无 await 即原子;不再需要锁
+        # (锁曾是逐 goal 线程版遗留)
 
-    def acquire(self) -> float:
-        """阻塞直到获取一个 token,返回等待秒数(0 = 无需等待/rpm=0 不限速)。"""
+    async def acquire(self) -> float:
+        """阻塞直到获取一个 token,返回等待秒数(0 = 无需等待/rpm=0 不限速)。
+
+        async:等待经 asyncio.sleep 让出事件循环,其余协程在等待期内可推进;
+        token bucket 是惰性补充,多协程排队自然分摊。
+        """
         if self._rate == 0.0:
             return 0.0
-        with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last
-            self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
-            self._last = now
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return 0.0
-            wait = (1.0 - self._tokens) / self._rate
-            time.sleep(wait)
-            self._tokens = 0.0
-            self._last = time.monotonic()
-            return wait
+        now = time.monotonic()
+        elapsed = now - self._last
+        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+        self._last = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return 0.0
+        wait = (1.0 - self._tokens) / self._rate
+        await asyncio.sleep(wait)
+        self._tokens = 0.0
+        self._last = time.monotonic()
+        return wait
 
 
 # 模块级单例(config key: llm_rpm)
@@ -497,16 +506,16 @@ def _with_docs(messages, docs, budget=DEFAULT_MAX_DOCS_CHARS):
     return msgs
 
 
-def _request(client, messages, *, model, temperature, max_tokens=None, tools=None,
-             max_retries=DEFAULT_MAX_RETRIES, retry_backoff=1.5, total_timeout=None,
-             stream=False):
+async def _request(client, messages, *, model, temperature, max_tokens=None, tools=None,
+                   max_retries=DEFAULT_MAX_RETRIES, retry_backoff=1.5, total_timeout=None,
+                   stream=False):
     """带指数退避+jitter重试的请求,含速率限制+熔断+token记录。
 
     返回 (response, usage_dict)。重试耗尽抛 LLMError。
     stream=True 时走流式累积,不支持重试(流式失败直接抛异常)。
     """
     # 速率限制
-    _get_rate_limiter().acquire()
+    await _get_rate_limiter().acquire()
     # 熔断检查:熔断开启属调用侧失败,统一包装成 LLMError(调用方无需感知 CircuitBreakerOpen)
     try:
         _get_circuit_breaker().before_call()
@@ -518,9 +527,9 @@ def _request(client, messages, *, model, temperature, max_tokens=None, tools=Non
         total_timeout = cfg.get("llm_total_timeout_ms", 300_000) / 1000  # ms→秒
 
     if stream:
-        return _stream_request(client, messages, model=model, temperature=temperature,
-                               max_tokens=max_tokens, tools=tools,
-                               total_timeout=total_timeout)
+        return await _stream_request(client, messages, model=model, temperature=temperature,
+                                     max_tokens=max_tokens, tools=tools,
+                                     total_timeout=total_timeout)
 
     kwargs = {"model": model, "messages": messages, "temperature": temperature}
     kwargs["max_tokens"] = max_tokens or model_max_output(model)    # item 7: 默认输出cap
@@ -532,7 +541,7 @@ def _request(client, messages, *, model, temperature, max_tokens=None, tools=Non
     started = time.monotonic()
     for attempt in range(1, max_retries + 1):
         try:
-            resp = client.chat.completions.create(**kwargs)
+            resp = await client.chat.completions.create(**kwargs)
             _record_usage(model, resp.usage)       # item 1.7: token追踪
             _get_circuit_breaker().on_success()
             return resp
@@ -557,12 +566,12 @@ def _request(client, messages, *, model, temperature, max_tokens=None, tools=Non
                             delay = max(delay, float(ra))
                         except ValueError:
                             pass
-                time.sleep(delay)
+                await asyncio.sleep(delay)
     raise LLMError(f"LLM 调用失败(尝试 {attempt} 次后): {last_err}") from last_err
 
 
-def _stream_request(client, messages, *, model, temperature, max_tokens=None, tools=None,
-                     total_timeout=None):
+async def _stream_request(client, messages, *, model, temperature, max_tokens=None, tools=None,
+                          total_timeout=None):
     """流式调用 LLM,累积 chunks 返回合成 response(兼容非流式 response 结构)。
 
     流式不支持重试(已通过 _request 的速率限制/熔断检查)。
@@ -591,7 +600,8 @@ def _stream_request(client, messages, *, model, temperature, max_tokens=None, to
 
     started = time.monotonic()
     try:
-        for chunk in client.chat.completions.create(**kwargs):
+        stream = await client.chat.completions.create(**kwargs)
+        async for chunk in stream:
             if total_timeout is not None:
                 elapsed = time.monotonic() - started
                 if elapsed >= total_timeout:
@@ -650,10 +660,10 @@ def _stream_request(client, messages, *, model, temperature, max_tokens=None, to
     return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
 
 
-def chat(prompt=None, system=None, *, messages=None, model=None, base_url=None, api_key=None,
-         temperature=0.7, max_tokens=None, timeout=DEFAULT_TIMEOUT,
-         max_retries=DEFAULT_MAX_RETRIES, retry_backoff=1.5,
-         docs=None, max_docs_chars=DEFAULT_MAX_DOCS_CHARS, stream=None):
+async def chat(prompt=None, system=None, *, messages=None, model=None, base_url=None, api_key=None,
+               temperature=0.7, max_tokens=None, timeout=DEFAULT_TIMEOUT,
+               max_retries=DEFAULT_MAX_RETRIES, retry_backoff=1.5,
+               docs=None, max_docs_chars=DEFAULT_MAX_DOCS_CHARS, stream=None):
     """调用 LLM,返回模型回复文本。token 用量通过 pop_token_log() 获取。
 
     两种输入方式:
@@ -670,19 +680,19 @@ def chat(prompt=None, system=None, *, messages=None, model=None, base_url=None, 
 
     client = _get_client(api_key, base_url, timeout)
     msgs = _with_docs(_build_messages(prompt, system, messages), docs, max_docs_chars)
-    resp = _request(client, msgs, model=model, temperature=temperature,
-                    max_tokens=max_tokens, max_retries=max_retries,
-                    retry_backoff=retry_backoff, stream=stream)
+    resp = await _request(client, msgs, model=model, temperature=temperature,
+                          max_tokens=max_tokens, max_retries=max_retries,
+                          retry_backoff=retry_backoff, stream=stream)
     return resp.choices[0].message.content or ""
 
 
 def make_compress(model=None, max_tokens=1024, temperature=0.2,
                   fallback_chars=8000):
-    """构造上下文压缩回调 compress(prompt, content) -> str,供 CtxAssembler 溢出压缩用。
+    """构造上下文压缩回调 async compress(prompt, content) -> str,供 CtxAssembler 溢出压缩用。
 
     prompt 是组装器算好的压缩提示词,content 是待压内容;返回压缩后文本。
     LLM 调用失败时兜底截断 content(不抛异常)——assembler 溢出路径本来就会
-    在异常时走机械降级,但 TraceComponent._fold 等同步路径需要回调永不炸。
+    在异常时走机械降级,但 TraceComponent._fold 等路径需要回调永不炸。
     """
     _system = (
         "你是上下文压缩器。输入为 [压缩提示词] 与 [待压内容] 两部分。"
@@ -690,9 +700,9 @@ def make_compress(model=None, max_tokens=1024, temperature=0.2,
         "只输出压缩结果本身,不要任何解释或前缀。"
     )
 
-    def compress(prompt: str, content: str) -> str:
+    async def compress(prompt: str, content: str) -> str:
         try:
-            return chat(
+            return await chat(
                 system=_system,
                 prompt=f"{prompt}\n\n# 待压内容\n{content}",
                 model=model,
@@ -720,23 +730,29 @@ def _assistant_message(msg):
     }
 
 
-def _run_tool(tool_exec, name, arguments):
-    """执行一个工具调用:坏 JSON 参数与执行异常都转 {"error": ...} 喂回模型。"""
+async def _run_tool(tool_exec, name, arguments):
+    """执行一个工具调用:坏 JSON 参数与执行异常都转 {"error": ...} 喂回模型。
+
+    tool_exec 兼容 async(await)与 sync(直接调用):并行架构下工具执行可命中沙箱 I/O。
+    """
     try:
         args = json.loads(arguments or "{}")
     except json.JSONDecodeError:
         args = {}
     try:
-        return tool_exec(name, args)
+        r = tool_exec(name, args)
+        if asyncio.iscoroutine(r):
+            return await r
+        return r
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"}
 
 
-def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools=None,
-                    max_tool_rounds=None, tool_exec=call_tool, model=None, base_url=None,
-                    api_key=None, temperature=0.7, max_tokens=None, timeout=DEFAULT_TIMEOUT,
-                    max_retries=DEFAULT_MAX_RETRIES, retry_backoff=1.5,
-                    stream=None) -> ToolResult:
+async def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools=None,
+                          max_tool_rounds=None, tool_exec=call_tool, model=None, base_url=None,
+                          api_key=None, temperature=0.7, max_tokens=None, timeout=DEFAULT_TIMEOUT,
+                          max_retries=DEFAULT_MAX_RETRIES, retry_backoff=1.5,
+                          stream=None) -> ToolResult:
     """工具调用循环:模型要工具就执行并把结果喂回,直到给纯文本回复。
 
     tools 为空时退化为 chat(plain)。工具执行经 tool_exec(name, arguments)
@@ -755,10 +771,10 @@ def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools
         max_tool_rounds = get_engine_config().get("max_tool_rounds", 8)
 
     if not tools:
-        content = chat(prompt=prompt, system=system, messages=messages, docs=docs,
-                       model=model, base_url=base_url, api_key=api_key, temperature=temperature,
-                       max_tokens=max_tokens, timeout=timeout, max_retries=max_retries,
-                       retry_backoff=retry_backoff, stream=stream)
+        content = await chat(prompt=prompt, system=system, messages=messages, docs=docs,
+                             model=model, base_url=base_url, api_key=api_key, temperature=temperature,
+                             max_tokens=max_tokens, timeout=timeout, max_retries=max_retries,
+                             retry_backoff=retry_backoff, stream=stream)
         usage_log = pop_token_log()
         usage = _sum_usage(usage_log) if usage_log else None
         return ToolResult(content=content, trace=[], rounds=0, total_usage=usage)
@@ -776,10 +792,10 @@ def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools
     try:
         for rnd in range(1, max_tool_rounds + 1):
             set_run_context(round=rnd)  # 本轮内所有 opslog 事件自动带 round 定位
-            resp = _request(client, msgs, model=model, temperature=temperature,
-                            max_tokens=max_tokens, tools=tools,
-                            max_retries=max_retries, retry_backoff=retry_backoff,
-                            stream=stream)
+            resp = await _request(client, msgs, model=model, temperature=temperature,
+                                  max_tokens=max_tokens, tools=tools,
+                                  max_retries=max_retries, retry_backoff=retry_backoff,
+                                  stream=stream)
             msg = resp.choices[0].message
             if not msg.tool_calls:
                 usage_log = pop_token_log()
@@ -790,7 +806,7 @@ def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools
             msgs.append(_assistant_message(msg))
             for tc in msg.tool_calls:
                 name = tc.function.name
-                result = _run_tool(tool_exec, name, tc.function.arguments)
+                result = await _run_tool(tool_exec, name, tc.function.arguments)
                 trace.append({"name": name, "arguments": tc.function.arguments,
                               "result": result, "round": rnd})
                 msgs.append({
@@ -812,9 +828,9 @@ def _sum_usage(logs: list[dict]) -> dict:
     }
 
 
-def chat_result(prompt, **kwargs):
+async def chat_result(prompt, **kwargs):
     """chat 的字典版:成功返回 content,失败返回 error,供工具/脚本直接使用。"""
     try:
-        return {"success": True, "content": chat(prompt, **kwargs)}
+        return {"success": True, "content": await chat(prompt, **kwargs)}
     except LLMError as e:
         return {"success": False, "error": str(e)}

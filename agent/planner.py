@@ -8,6 +8,8 @@ ctx 组装:
   llm_call 可插拔,冒烟/测试用 mock 返回预置 JSON。
 """
 
+import asyncio
+
 from agent import llm_api, tools
 from agent.blueprint import Blueprint, DAGError
 from agent.schema import PlanError, PlannerInput, PlannerMode, Trigger, parse_plan
@@ -117,7 +119,7 @@ class MockPlannerLLM:
     def __init__(self, response: str):
         self._response = response
 
-    def __call__(self, *, system=None, prompt=None, messages=None, **kwargs) -> str:
+    async def __call__(self, *, system=None, prompt=None, messages=None, **kwargs) -> str:
         return self._response
 
 
@@ -149,8 +151,8 @@ class Planner:
         )
         planner_tools = PLANNER_TOOLS if enable_tools else []
 
-        def call(*, system=None, prompt=None, messages=None, **kw) -> str:
-            tr = llm_api.chat_with_tools(
+        async def call(*, system=None, prompt=None, messages=None, **kw) -> str:
+            tr = await llm_api.chat_with_tools(
                 system=system, prompt=prompt, messages=messages,
                 tools=planner_tools, tool_exec=self._lookup, model=model, **kw)
             self._last_usage = tr.total_usage  # token 用量供 plan() 写入 bp.meta
@@ -180,7 +182,12 @@ class Planner:
         ws.record_tool_result(None, name, f"未知工具: {name}", args=args or {})
         return {"error": f"未知工具: {name}"}
 
-    def plan(self, pin: PlannerInput) -> Blueprint:
+    async def _llm_call(self, **kw) -> str:
+        """await 一次 llm_call;兼容同步/异步(测试注入同步 mock,默认闭包为异步)。"""
+        r = self.llm_call(**kw)
+        return await r if asyncio.iscoroutine(r) else r
+
+    async def plan(self, pin: PlannerInput) -> Blueprint:
         raw_content = pin.task_input.raw_content if pin.task_input else None
         goal_list = pin.task_input.goal_list if pin.task_input else []
         # 状态化系统提示词:契约 base(固定)+ 引擎注入的状态上下文(解释触发原因/状态语义)
@@ -201,10 +208,10 @@ class Planner:
             for doc_id, doc in self.docs.search(raw_content or {}):
                 self.workspace.set_doc(doc_id, doc)
         turn = list(pin.feedback.turn) if pin.feedback and pin.feedback.turn else []
-        ctx, sys_text, _ = self.workspace.assembler.assemble(
+        ctx, sys_text, _ = await self.workspace.assembler.assemble(
             "planner", raw_content=raw_content, goal_list=goal_list,
             turn=turn, system=system)
-        text = self.llm_call(system=sys_text or system, prompt=ctx)
+        text = await self._llm_call(system=sys_text or system, prompt=ctx)
         try:
             patch = parse_plan(text).to_patch()
         except PlanError as e:
@@ -213,7 +220,7 @@ class Planner:
                 f"{ctx}\n\n[上一轮输出解析失败: {e}]\n"
                 "请严格按要求的 JSON 格式重新输出。"
             )
-            text = self.llm_call(system=sys_text or system, prompt=retry_prompt)
+            text = await self._llm_call(system=sys_text or system, prompt=retry_prompt)
             patch = parse_plan(text).to_patch()
         bp = Blueprint.from_dict(pin.feedback.dag) if pin.mode == PlannerMode.REVISE \
             else Blueprint(meta={"task": raw_content})
@@ -226,7 +233,7 @@ class Planner:
                 "请针对当前 DAG 返回修正后的补丁:初始空 DAG 用 add 建每一步;"
                 "update/remove 只能针对已存在的 step id。"
             )
-            text = self.llm_call(system=sys_text or system, prompt=retry_prompt)
+            text = await self._llm_call(system=sys_text or system, prompt=retry_prompt)
             patch = parse_plan(text).to_patch()
             bp.apply_patch(patch)
         bp.meta["reason"] = patch.reason   # 规划理由落账,供 _record_plan 写入 replan 事件

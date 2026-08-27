@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from dataclasses import dataclass, field
@@ -54,13 +55,13 @@ class CombinedDocStore(DocStore):
 class AuditedPlanner(Planner):
     """Retry one structurally invalid patch with explicit DAG feedback."""
 
-    def plan(self, planner_input: Any) -> Any:
+    async def plan(self, planner_input: Any) -> Any:
         try:
-            return super().plan(planner_input)
+            return await super().plan(planner_input)
         except DAGError as exc:
             original_llm = self.llm_call
 
-            def corrected_llm(**kwargs: Any) -> str:
+            async def corrected_llm(**kwargs: Any) -> str:
                 prompt = str(kwargs.get("prompt") or "")
                 kwargs["prompt"] = (
                     prompt
@@ -69,11 +70,12 @@ class AuditedPlanner(Planner):
                     + "For an initial empty DAG, create every step with add. "
                     + "Only update or remove step IDs that already exist."
                 )
-                return original_llm(**kwargs)
+                r = original_llm(**kwargs)
+                return await r if asyncio.iscoroutine(r) else r
 
             self.llm_call = corrected_llm
             try:
-                return super().plan(planner_input)
+                return await super().plan(planner_input)
             finally:
                 self.llm_call = original_llm
 
@@ -110,8 +112,8 @@ class FlagCapturingExecutor(Executor):
         self._task_id = task_id
         self._pattern = re.compile(flag_pattern) if flag_pattern else DEFAULT_FLAG_PATTERN
 
-    def run(self, step: Any, ctx: str, tool_exec: Any = None) -> Any:
-        result = self._executor.run(step, ctx, tool_exec=tool_exec)
+    async def run(self, step: Any, ctx: str, tool_exec: Any = None) -> Any:
+        result = await self._executor.run(step, ctx, tool_exec=tool_exec)
         self._capture(result)
         return result
 

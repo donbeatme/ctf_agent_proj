@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from copy import deepcopy
@@ -52,21 +53,23 @@ class LlmChatClient:
         except Exception:
             return False
 
-    def complete(self, messages: List[Dict[str, str]], temperature: float = 0.2) -> LlmChatResult:
+    async def complete(self, messages: List[Dict[str, str]], temperature: float = 0.2) -> LlmChatResult:
         if not self.available:
             raise RuntimeError("LLM 不可用：请设置 online 模式和 LLM_API_KEY/DEEPSEEK_API_KEY")
         model = llm_api.role_model(self.role)
-        content = llm_api.chat(
+        r = llm_api.chat(
             messages=messages,
             model=model,
             temperature=temperature,
         )
+        content = await r if asyncio.iscoroutine(r) else r
         usage = _sum_usage(llm_api.pop_token_log())
         self.last_usage = usage
         return LlmChatResult(content=content, usage=usage)
 
-    def complete_text(self, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
-        return self.complete(messages, temperature=temperature).content
+    async def complete_text(self, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
+        result = await self.complete(messages, temperature=temperature)
+        return result.content
 
 
 _SCORE_KEYS = ("score", "质量分", "quality")
@@ -130,7 +133,7 @@ class _LlmApiCompletions:
     def __init__(self, role: str):
         self.role = role
 
-    def create(self, **params: Any) -> Any:
+    async def create(self, **params: Any) -> Any:
         request: MutableMapping[str, Any] = dict(params)
         response_format = request.pop("response_format", None)
         schema = self._response_schema(response_format) if response_format else None
@@ -141,11 +144,12 @@ class _LlmApiCompletions:
             request.setdefault("temperature", 0)
 
         model = llm_api.role_model(self.role)
-        content = llm_api.chat(
+        r = llm_api.chat(
             messages=messages,
             model=model,
             temperature=float(request.get("temperature", 0)),
         )
+        content = await r if asyncio.iscoroutine(r) else r
         # token 日志保留在 llm_api 全局日志中，由外层 StepAcceptanceEvaluator 统一 pop。
         # 仅 schema 驱动的 agentevals 路径做矫正;普通 LlmChatClient 调用不受影响。
         if schema is not None:

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import time
 import uuid
@@ -339,6 +340,10 @@ class ChallengeAdapter(ABC):
                     try:
                         derived = self._procedure_runner(vp, target)
                     except Exception:
+                        derived = None
+                    if asyncio.iscoroutine(derived):
+                        # async runner(_run_verifier 已协程化):本地判定缝暂不同步 await,
+                        # 跳过本地推导,交回平台判定
                         derived = None
                     if not derived:
                         continue

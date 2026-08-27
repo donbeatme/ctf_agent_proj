@@ -39,13 +39,13 @@ class PlanEvaluator:
         self.llm = llm
         self.last_usage: dict | None = None
 
-    def evaluate(self, attempt: CTFAttempt, ctx: str = "") -> PlanEvaluation:
+    async def evaluate(self, attempt: CTFAttempt, ctx: str = "") -> PlanEvaluation:
         structural = self._structural_review(attempt.plan)
         if not self.llm.available:
             return structural
 
         try:
-            result: LlmChatResult = self.llm.complete([
+            result: LlmChatResult = await self.llm.complete([
                 {"role": "system", "content": PLAN_REVIEW_SYSTEM},
                 {"role": "user", "content": json.dumps({
                 "engine_context": ctx,

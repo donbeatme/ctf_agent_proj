@@ -14,6 +14,8 @@
 - 空初始计划由 ep 判定(评审不过 → 重规划)
 """
 
+import asyncio
+
 import pytest
 
 from agent.blueprint import Blueprint, Step, StepStatus
@@ -1037,7 +1039,7 @@ def test_planner_input_two_paths_validation():
     assert pin.feedback.dag == {}
 
 
-def test_planner_renders_state_context_into_system():
+async def test_planner_renders_state_context_into_system():
     """状态注入提示词:解释触发原因/状态语义,渲染进系统提示词,不进 ctx。"""
     captured = {}
 
@@ -1055,7 +1057,7 @@ def test_planner_renders_state_context_into_system():
             state_context=StateContext(trigger="deadlock", detail="被阻塞: s1"),
         ),
     )
-    planner.plan(pin)
+    await planner.plan(pin)
     assert "# 重规划背景" in captured["system"]
     assert "调度死锁" in captured["system"]        # 触发原因说明
     assert "ESCALATED" in captured["system"]       # 状态语义
@@ -1103,7 +1105,7 @@ def test_engine_records_workspace_and_dispatches_hooks(tmp_path):
     assert "step_record" in kinds                   # 步骤验收落账打点(_record_step)
     # run_end 已分发:组件释放;assemble 重建后投影真实 workspace(dag + history)
     assert all(not c.created for c in ws.assembler.components("planner"))
-    ctx, _, _ = ws.assembler.assemble("planner", raw_content=MOCK_TASK)
+    ctx, _, _ = asyncio.run(ws.assembler.assemble("planner", raw_content=MOCK_TASK))
     assert '"s1"' in ctx
     assert "step_record" in ctx
 

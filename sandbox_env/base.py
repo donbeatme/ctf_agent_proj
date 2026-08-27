@@ -5,6 +5,9 @@
 
 容器模型 per_challenge:会话键 = sha1(绝对 cwd)[:12],容器名 ctf-<key>;不同
 challenge 目录 → 不同容器,题目间隔离且容器内安装持久(解决旧 docker run --rm 无状态)。
+
+全异步(asyncssh/AsyncOpenAI):exec/ensure/sync/cleanup 均 await,为 Phase 3
+actor 每 ex 独立容器 + 连接铺路。I/O 方法调用方需在 async 上下文中。
 """
 
 from __future__ import annotations
@@ -47,33 +50,33 @@ def container_name_for(session_key: str) -> str:
 
 
 class SandboxBackend(ABC):
-    """沙箱后端接口:ensure/exec/sync/cleanup 生命周期 + 资源释放。"""
+    """沙箱后端接口:ensure/exec/sync/cleanup 生命周期 + 资源释放。全 async。"""
 
     name: str = "sandbox"
 
     def __init__(self, settings: SandboxSettings):
         self.settings = settings
 
-    def ensure(self, session_key: str | None = None) -> str:
+    async def ensure(self, session_key: str | None = None) -> str:
         """容器/环境就绪,返回容器标识;无容器后端 no-op 返回 ''。"""
         return ""
 
     @abstractmethod
-    def exec(self, cmd_str: str, *, session_key: str | None = None,
-             timeout: float | None = None) -> ExecOutcome:
+    async def exec(self, cmd_str: str, *, session_key: str | None = None,
+                   timeout: float | None = None) -> ExecOutcome:
         """在沙箱内执行一条命令(远程 shell,支持管道/重定向)。"""
 
-    def sync(self, local_dir, session_key: str | None = None) -> None:
+    async def sync(self, local_dir, session_key: str | None = None) -> None:
         """把本地目录上传到该会话沙箱工作区(默认 no-op)。"""
 
     def is_ready(self) -> bool:
         """后端可用性(SSH 已配置/可连)。"""
         return True
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """释放连接等资源。"""
 
-    def cleanup(self, session_key: str | None = None) -> None:
+    async def cleanup(self, session_key: str | None = None) -> None:
         """销毁会话容器/环境(默认 no-op)。"""
 
 
@@ -88,7 +91,7 @@ class SandboxManager:
                  catalog=None, max_out: int = _MAX_OUT, max_err: int = _MAX_ERR):
         self.settings = settings or SandboxSettings.from_env()
         if backend is None:
-            from .ssh_backend import SshSandboxBackend  # lazy:避免构造时引 paramiko
+            from .ssh_backend import SshSandboxBackend  # lazy:避免构造时引 asyncssh
 
             if not self.settings.ssh_configured:
                 raise SandboxUnavailableError(
@@ -112,28 +115,28 @@ class SandboxManager:
     def session_key(self, cwd=None) -> str:
         return session_key_for(cwd or os.getcwd())
 
-    def ensure(self, session_key: str | None = None) -> str:
-        name = self.backend.ensure(session_key)
+    async def ensure(self, session_key: str | None = None) -> str:
+        name = await self.backend.ensure(session_key)
         emit("sandbox", "ensure", session_key=session_key or "default", container=name)
         return name
 
-    def cleanup(self, session_key: str | None = None) -> None:
-        self.backend.cleanup(session_key)
+    async def cleanup(self, session_key: str | None = None) -> None:
+        await self.backend.cleanup(session_key)
         emit("sandbox", "cleanup", session_key=session_key or "default")
 
-    def close(self) -> None:
-        self.backend.close()
+    async def close(self) -> None:
+        await self.backend.close()
 
     # ===== 执行 =====
 
-    def exec(self, cmd, *, cwd=None, category=None, tool_id=None,
-             target=None, timeout=None):
+    async def exec(self, cmd, *, cwd=None, category=None, tool_id=None,
+                   target=None, timeout=None):
         """沙箱内执行命令:ensure → sync → 依赖钩子 → 后端 exec。"""
         work = Path(cwd or os.getcwd()).resolve()
         key = self.session_key(work)
-        self.backend.ensure(key)
+        await self.backend.ensure(key)
         try:
-            self.backend.sync(work, session_key=key)
+            await self.backend.sync(work, session_key=key)
         except Exception as exc:
             # 同步失败不阻断本次命令(远端持久容器可能已有文件),但必须报错进 log,不能静默
             record_error("sandbox", "sync", exc=exc, level=ErrorLevel.RECOVERABLE,
@@ -141,65 +144,65 @@ class SandboxManager:
         else:
             emit("sandbox", "sync", cwd=str(work), session_key=key)
         if self.settings.install_auto and tool_id:
-            self._ensure_deps(tool_id, key)
+            await self._ensure_deps(tool_id, key)
         cmd_str = shlex.join(cmd) if isinstance(cmd, list) else str(cmd)
         t0 = time.perf_counter()
-        raw = self.backend.exec(cmd_str, session_key=key, timeout=timeout)
+        raw = await self.backend.exec(cmd_str, session_key=key, timeout=timeout)
         out = self._to_outcome(raw, cmd, target or self.backend.name, t0)
         emit("sandbox", "exec", cwd=str(work), session_key=key, tool_id=tool_id,
              target=out.target, ok=out.ok, returncode=out.returncode,
              timed_out=out.timed_out, elapsed_ms=out.elapsed_ms, cmd=cmd_str)
         return out
 
-    def run_python(self, code, *, cwd=None, category=None, tool_id=None,
-                   target=None, timeout=None):
+    async def run_python(self, code, *, cwd=None, category=None, tool_id=None,
+                         target=None, timeout=None):
         """沙箱内执行 Python:写 _ctf_exec.py → sync → python3 运行。"""
         work = Path(cwd or os.getcwd()).resolve()
         work.mkdir(parents=True, exist_ok=True)
         script = work / "_ctf_exec.py"
         script.write_text(code, encoding="utf-8")
         key = self.session_key(work)
-        self.backend.ensure(key)
+        await self.backend.ensure(key)
         try:
-            self.backend.sync(work, session_key=key)
+            await self.backend.sync(work, session_key=key)
         except Exception as exc:
             record_error("sandbox", "sync", exc=exc, level=ErrorLevel.RECOVERABLE,
                          cwd=str(work), reason="工作目录同步失败,远端 /work 可能缺失附件")
         else:
             emit("sandbox", "sync", cwd=str(work), session_key=key)
         if self.settings.install_auto and tool_id:
-            self._ensure_deps(tool_id, key)
+            await self._ensure_deps(tool_id, key)
         argv = ["python3", "/work/_ctf_exec.py"]
         t0 = time.perf_counter()
-        raw = self.backend.exec(shlex.join(argv), session_key=key, timeout=timeout)
+        raw = await self.backend.exec(shlex.join(argv), session_key=key, timeout=timeout)
         out = self._to_outcome(raw, argv, target or self.backend.name, t0)
         emit("sandbox", "run_python", cwd=str(work), session_key=key, tool_id=tool_id,
              target=out.target, ok=out.ok, returncode=out.returncode,
              timed_out=out.timed_out, elapsed_ms=out.elapsed_ms, cmd=shlex.join(argv))
         return out
 
-    def _ensure_deps(self, tool_id: str, key: str) -> None:
+    async def _ensure_deps(self, tool_id: str, key: str) -> None:
         """依赖钩子:工具缺失时安装进该会话容器(持久)。
 
         目录外工具(如 wine)状态为 unknown/missing → 交给 install_tools 动态解析安装;
         解析不到或装不上在 install_tools 内部收口,这里不抛、不阻塞命令执行。
         """
         try:
-            st = self.tools.probe_tool(tool_id, session_key=key).get("status")
+            st = (await self.tools.probe_tool(tool_id, session_key=key)).get("status")
         except Exception:
             return  # 探测失败不阻塞执行,命令如实报错
         if st == "missing":
-            self.tools.install_tools([tool_id], session_key=key)
+            await self.tools.install_tools([tool_id], session_key=key)
         elif st == "unknown" and self.tools.catalog.get_tool(tool_id) is None:
-            self.tools.install_tools([tool_id], session_key=key)
+            await self.tools.install_tools([tool_id], session_key=key)
 
     # ===== 工具委托 =====
 
-    def probe_tool(self, tool_id: str, session_key: str | None = None) -> dict:
-        return self.tools.probe_tool(tool_id, session_key=session_key)
+    async def probe_tool(self, tool_id: str, session_key: str | None = None) -> dict:
+        return await self.tools.probe_tool(tool_id, session_key=session_key)
 
-    def install_tools(self, tool_ids, *, session_key=None, force=False) -> dict:
-        return self.tools.install_tools(tool_ids, session_key=session_key, force=force)
+    async def install_tools(self, tool_ids, *, session_key=None, force=False) -> dict:
+        return await self.tools.install_tools(tool_ids, session_key=session_key, force=force)
 
     def tool_conflicts(self) -> list[dict]:
         return self.tools.tool_conflicts()

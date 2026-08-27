@@ -51,11 +51,11 @@ def two_step_bp():
     return bp
 
 
-def test_assemble_splits_ctx_and_system(ws):
+async def test_assemble_splits_ctx_and_system(ws):
     a = make_assembler(ws)
     ws.set_blueprint(two_step_bp())
     ws.record_opinion(EvalSource.STEP_EVAL, "retry", "s1 要更具体")
-    ctx, system, over = a.assemble(
+    ctx, system, over = await a.assemble(
         "planner",
         system="SYS_BASE\n重规划背景",
         raw_content={"q": "x"},
@@ -70,65 +70,65 @@ def test_assemble_splits_ctx_and_system(ws):
     assert "SYS_BASE" not in ctx
 
 
-def test_dag_projects_blueprint_without_manual_update(ws):
+async def test_dag_projects_blueprint_without_manual_update(ws):
     """投影不变量:改 workspace 的 blueprint,重组装即反映,组件无需 update 喂数据。"""
     a = make_assembler(ws)
     bp = two_step_bp()
     ws.set_blueprint(bp)
-    ctx1, _, _ = a.assemble("planner")
+    ctx1, _, _ = await a.assemble("planner")
     assert '"s3"' not in ctx1
 
     bp.add_step(Step(id="s3", instruction="加一步", criterion="可验收", depends_on=["s1"]))
-    ctx2, _, _ = a.assemble("planner")
+    ctx2, _, _ = await a.assemble("planner")
     assert '"s3"' in ctx2
 
 
-def test_history_projects_events_and_filters_system(ws):
+async def test_history_projects_events_and_filters_system(ws):
     a = make_assembler(ws)
     ws.add_event("planner", "replan")
     ws.record_step("s1", "pass", "完成")
     ws.add_event("system", "state_change")
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "kind=replan" in ctx
     assert "kind=step_record" in ctx
     assert "verdict=pass" in ctx
     assert "SCHEDULING" not in ctx       # 系统行为照记本地,ctx 渲染过滤
 
 
-def test_docs_projects_registry_and_plan_review_pass_clears(ws):
+async def test_docs_projects_registry_and_plan_review_pass_clears(ws):
     a = make_assembler(ws)
     ws.set_doc("doc1", "扫描开放端口")
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "doc1" in ctx and "扫描开放端口" in ctx
 
     a.dispatch("plan_review_pass")
     assert ws.get_doc("doc1") is None
-    ctx2, _, _ = a.assemble("planner")
+    ctx2, _, _ = await a.assemble("planner")
     assert "doc1" not in ctx2
 
 
-def test_agent_comm_replan_clears_round(ws):
+async def test_agent_comm_replan_clears_round(ws):
     """agent_comm 作用域从事件流推导:replan 事件推进轮次边界,上一轮意见落回 history。"""
     a = make_assembler(ws)
     ws.record_opinion(EvalSource.REFLECT, "replan", "整体重构")
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "整体重构" in ctx
 
     ws.add_event("planner", "replan")  # 推进轮次边界
-    ctx2, _, _ = a.assemble("planner")
+    ctx2, _, _ = await a.assemble("planner")
     assert "整体重构" not in ctx2
 
 
-def test_agent_comm_render_includes_step_id(ws):
+async def test_agent_comm_render_includes_step_id(ws):
     """§5.5: 评估意见渲染带 step_id,planner 可定位意见针对哪一步。"""
     a = make_assembler(ws)
     ws.record_opinion(EvalSource.STEP_EVAL, "retry", "s1 要更具体", step_id="s1")
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "step=s1" in ctx
     assert "s1 要更具体" in ctx
 
 
-def test_compression_respects_priority_history_before_dag(ws):
+async def test_compression_respects_priority_history_before_dag(ws):
     from agent.llm_api import count_tokens
     a = make_assembler(ws)
     ws.set_blueprint(two_step_bp())
@@ -136,11 +136,11 @@ def test_compression_respects_priority_history_before_dag(ws):
     ws.record_step("s1", "retry")
     ws.record_step("s1", "pass")
 
-    ctx, _, _ = a.assemble("planner", raw_content={"q": "x"})
+    ctx, _, _ = await a.assemble("planner", raw_content={"q": "x"})
     base_tok = count_tokens(ctx)
     # 预算只少一点点 → 只需推进一档,按优先级 history(2) 先于 dag(4);
     # 索引档只压 PASS(换 uuid 引用),retry/replan 保留原文
-    ctx2, _, over = a.assemble("planner", raw_content={"q": "x"}, budget=base_tok - 1)
+    ctx2, _, over = await a.assemble("planner", raw_content={"q": "x"}, budget=base_tok - 1)
     assert over == 0
     assert count_tokens(ctx2) <= base_tok - 1
     assert comp(a, "history").level == 1
@@ -148,45 +148,45 @@ def test_compression_respects_priority_history_before_dag(ws):
     assert comp(a, "task").level == 0
 
 
-def test_protect_skips_history_compresses_dag(ws):
+async def test_protect_skips_history_compresses_dag(ws):
     from agent.llm_api import count_tokens
     a = make_assembler(ws)
     ws.set_blueprint(two_step_bp())
     ws.add_event("planner", "replan")
     ws.record_step("s1", "retry")
 
-    ctx, _, _ = a.assemble("planner", raw_content={"q": "x"})
+    ctx, _, _ = await a.assemble("planner", raw_content={"q": "x"})
     base_tok = count_tokens(ctx)
-    ctx2, _, over = a.assemble("planner", raw_content={"q": "x"},
-                               budget=base_tok - 2, protect=["history"])
+    ctx2, _, over = await a.assemble("planner", raw_content={"q": "x"},
+                                     budget=base_tok - 2, protect=["history"])
     assert over == 0
     assert count_tokens(ctx2) <= base_tok - 2
     assert comp(a, "history").level == 0   # 被保护,不压
     assert comp(a, "dag").level == 1       # 改压 dag
 
 
-def test_compression_never_touches_task_or_system(ws):
+async def test_compression_never_touches_task_or_system(ws):
     a = make_assembler(ws)
     ws.set_blueprint(two_step_bp())
     ws.record_step("s1", "retry")
 
-    ctx, system, over = a.assemble("planner", system="SYS_HEADER",
-                                   raw_content={"q": "x"}, budget=10)
+    ctx, system, over = await a.assemble("planner", system="SYS_HEADER",
+                                         raw_content={"q": "x"}, budget=10)
     assert over > 0                        # 压无可压仍超预算 → 返回信号,组装器不硬压
     assert comp(a, "task").level == 0
     assert "# 任务" in ctx and '"q"' in ctx  # task 原文仍在
     assert system == "SYS_HEADER"
 
 
-def test_no_budget_means_no_compression(ws):
+async def test_no_budget_means_no_compression(ws):
     a = make_assembler(ws)
     ws.set_blueprint(two_step_bp())
     ws.record_step("s1", "pass")
-    a.assemble("planner", raw_content={"q": "x"})
+    await a.assemble("planner", raw_content={"q": "x"})
     assert all(c.level == 0 for c in a.components("planner"))
 
 
-def test_anchor_never_compresses_even_with_levels_and_methods(ws):
+async def test_anchor_never_compresses_even_with_levels_and_methods(ws):
     """anchor 显式保护:即使声明了多档 + compress_methods,锚点组件也不进压缩候选。"""
     from agent.ctx import CtxComponent
 
@@ -200,25 +200,25 @@ def test_anchor_never_compresses_even_with_levels_and_methods(ws):
 
     a = make_assembler(ws)
     a.register("planner", Anchored())
-    a.assemble("planner", raw_content={"q": "x"})
-    ctx, _, over = a.assemble("planner", raw_content={"q": "x"}, budget=10)
+    await a.assemble("planner", raw_content={"q": "x"})
+    ctx, _, over = await a.assemble("planner", raw_content={"q": "x"}, budget=10)
     comp = next(c for c in a.components("planner") if c.key == "anchored")
     assert comp.level == 0                # anchor 拦住,不进机械候选
     assert over > 0                       # 压无可压 → 诚实信号
     assert "A" * 100 in ctx               # 原文保留
 
 
-def test_clear_scope_resets_levels(ws):
+async def test_clear_scope_resets_levels(ws):
     a = make_assembler(ws)
     ws.set_blueprint(two_step_bp())
     ws.record_step("s1", "retry")
-    a.assemble("planner", raw_content={"q": "x"}, budget=10)
+    await a.assemble("planner", raw_content={"q": "x"}, budget=10)
     assert comp(a, "dag").level == 1
     a.clear("planner")
     assert all(c.level == 0 for c in a.components("planner"))
 
 
-def test_assemble_start_levels_presets_trace_level(ws):
+async def test_assemble_start_levels_presets_trace_level(ws):
     """start_levels 指定组件起始压缩档位:drift 重试把 trace 预压到 summary 档。
     无 compress 注入时摘要档 render 回落到索引;未知 key/档位保持 raw。"""
     from agent.ctx import TraceComponent
@@ -226,24 +226,24 @@ def test_assemble_start_levels_presets_trace_level(ws):
     a = CtxAssembler(ws)
     a.register_class("executor", (TraceComponent, (), {"agent": "executor"}))
     ws.record_tool_call("s1", "cmd", {"cmd": "id"})
-    ctx_raw, _, _ = a.assemble("executor")
+    ctx_raw, _, _ = await a.assemble("executor")
     assert "# 本轮工具轨迹" in ctx_raw
     assert "(索引)" not in ctx_raw
-    ctx_comp, _, _ = a.assemble("executor", start_levels={"trace": "summary"})
+    ctx_comp, _, _ = await a.assemble("executor", start_levels={"trace": "summary"})
     assert "本轮工具轨迹(索引)" in ctx_comp
-    ctx_other, _, _ = a.assemble("executor", start_levels={"trace": "bogus", "nope": "summary"})
+    ctx_other, _, _ = await a.assemble("executor", start_levels={"trace": "bogus", "nope": "summary"})
     assert "(索引)" not in ctx_other
 
 
-def test_run_end_deletes_all_components(ws):
+async def test_run_end_deletes_all_components(ws):
     a = make_assembler(ws)
-    a.assemble("planner", raw_content={"q": "x"})
+    await a.assemble("planner", raw_content={"q": "x"})
     assert all(c.created for c in a.components("planner"))
     a.dispatch("run_end")
     assert all(not c.created for c in a.components("planner"))
 
 
-def test_join_dedups_lines_keeping_first(ws):
+async def test_join_dedups_lines_keeping_first(ws):
     """判重兜底:同数据两通道进 ctx 时,重复行只保留第一个出现,顺序语义不破坏。"""
     from agent.ctx import CtxComponent
 
@@ -259,46 +259,46 @@ def test_join_dedups_lines_keeping_first(ws):
 
     a = make_assembler(ws)
     a.register("planner", A(), B())
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert ctx.count("共享行一") == 1
     assert ctx.index("共享行一") < ctx.index("A 独有")   # 第一个出现保留在原位
     assert "A 独有" in ctx and "B 独有" in ctx
 
 
-def test_docs_skeleton_level_drops_doc_keeps_id(ws):
+async def test_docs_skeleton_level_drops_doc_keeps_id(ws):
     a = make_assembler(ws)
     ws.set_doc("doc1", "扫描开放端口")
     ws.record_step("s1", "pass")
-    a.assemble("planner", raw_content={"q": "x"}, budget=10)
+    await a.assemble("planner", raw_content={"q": "x"}, budget=10)
     assert comp(a, "docs").level == 1
-    ctx, _, _ = a.assemble("planner", raw_content={"q": "x"}, budget=10)
+    ctx, _, _ = await a.assemble("planner", raw_content={"q": "x"}, budget=10)
     assert "doc1" in ctx
     assert "扫描开放端口" not in ctx
 
 
 # ===== 四通道正交性:agent_comm 只投影本轮非 pass 意见 =====
 
-def test_agent_comm_excludes_pass_verdict(ws):
+async def test_agent_comm_excludes_pass_verdict(ws):
     """pass 是闸门(不产出内容);非 pass(FAIL/RETRY/ESCALATE/REPLAN)才进 ctx。"""
     a = make_assembler(ws)
     ws.record_opinion(EvalSource.PLAN_REVIEW, "pass", "计划可执行")
     ws.record_opinion(EvalSource.STEP_EVAL, "retry", "s1 需重试")
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "s1 需重试" in ctx
     assert "计划可执行" not in ctx
 
 
-def test_agent_comm_boundary_scoped_to_latest_replan(ws):
+async def test_agent_comm_boundary_scoped_to_latest_replan(ws):
     """replan 事件推进边界:只渲染最近一次 replan 之后的意见。"""
     a = make_assembler(ws)
     ws.add_event("planner", "replan")
     ws.record_opinion(EvalSource.SCHEDULING, "fail", "死锁重排")
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "死锁重排" in ctx
 
     ws.add_event("planner", "replan")  # 新边界
     ws.record_opinion(EvalSource.STEP_EVAL, "retry", "s1 需重试")
-    ctx2, _, _ = a.assemble("planner")
+    ctx2, _, _ = await a.assemble("planner")
     assert "s1 需重试" in ctx2
     assert "死锁重排" not in ctx2          # 上一轮意见落回 history,不进本轮
 
@@ -319,10 +319,10 @@ def test_history_only_step_record_and_replan(ws):
 
 # ===== DagComponent:step_id 作用域(executor 的 dag.step 视角) =====
 
-def test_dag_step_scope_renders_only_step(ws):
+async def test_dag_step_scope_renders_only_step(ws):
     a = make_assembler(ws)
     ws.set_blueprint(two_step_bp())
-    ctx, _, _ = a.assemble("planner", step_id="s2")
+    ctx, _, _ = await a.assemble("planner", step_id="s2")
     assert "# 当前步骤 s2" in ctx
     assert "instruction: 做二" in ctx
     assert "criterion: 可验收" in ctx
@@ -383,7 +383,7 @@ def test_ingest_unknown_role_raises(ws):
         a.ingest("nobody", x=1)
 
 
-def test_executor_ctx_includes_docs_and_bound_skill_survives_pass(ws):
+async def test_executor_ctx_includes_docs_and_bound_skill_survives_pass(ws):
     """workspace 注册的 executor 角色含 Docs 组件;plan_review_pass 保留绑定
     skill_id 的文档(executor 可查),清掉未绑定的规划用文档。"""
     ws.set_doc("doc0", "SQL注入绕过认证完整步骤")
@@ -392,22 +392,22 @@ def test_executor_ctx_includes_docs_and_bound_skill_survives_pass(ws):
     bp.add_step(Step(id="s1", instruction="注入", criterion="拿到flag", skill_id="doc0"))
     ws.set_blueprint(bp)
 
-    ws.assembler.assemble("executor", step_id="s1")  # 先 assemble 实例化组件(create 注入 ws)
+    await ws.assembler.assemble("executor", step_id="s1")  # 先 assemble 实例化组件(create 注入 ws)
     ws.assembler.dispatch("plan_review_pass")
     assert ws.get_doc("doc0") is not None      # 绑定保留
     assert ws.get_doc("doc1") is None          # 未绑定清掉
 
-    ctx, _, _ = ws.assembler.assemble("executor", step_id="s1")
+    ctx, _, _ = await ws.assembler.assemble("executor", step_id="s1")
     assert "技能库文档" in ctx and "doc0" in ctx
     assert "skill: doc0" in ctx                # 当前步骤渲染带技能绑定
 
 
-def test_dag_render_includes_skill_binding(ws):
+async def test_dag_render_includes_skill_binding(ws):
     """DAG 渲染带 skill 绑定:planner 原始 JSON 含 skill_id,executor 当前步骤视图含 skill。"""
     bp = Blueprint(meta={"task": "t"})
     bp.add_step(Step(id="s1", instruction="注入", criterion="拿到flag", skill_id="doc0"))
     ws.set_blueprint(bp)
-    ctx, _, _ = ws.assembler.assemble("planner")
+    ctx, _, _ = await ws.assembler.assemble("planner")
     assert "skill_id" in ctx and "doc0" in ctx
-    ctx2, _, _ = ws.assembler.assemble("executor", step_id="s1")
+    ctx2, _, _ = await ws.assembler.assemble("executor", step_id="s1")
     assert "skill: doc0" in ctx2

@@ -24,18 +24,18 @@ class FakeBackend(SandboxBackend):
         self.calls = []
         self._exec_fn = exec_fn or (lambda cmd, **kw: ExecOutcome(0, b"ok", b""))
 
-    def ensure(self, session_key=None):
+    async def ensure(self, session_key=None):
         self.ensured.append(session_key)
         return "fake-ctr"
 
-    def exec(self, cmd_str, *, session_key=None, timeout=None):
+    async def exec(self, cmd_str, *, session_key=None, timeout=None):
         self.calls.append(cmd_str)
         return self._exec_fn(cmd_str, session_key=session_key, timeout=timeout)
 
-    def sync(self, local_dir, session_key=None):
+    async def sync(self, local_dir, session_key=None):
         self.synced.append((Path(local_dir), session_key))
 
-    def cleanup(self, session_key=None):
+    async def cleanup(self, session_key=None):
         self.cleaned.append(session_key)
 
 
@@ -59,10 +59,10 @@ def test_container_name_docker_valid():
 # ===== 门面 exec 流程 =====
 
 
-def test_manager_exec_ensure_sync_then_run(tmp_path):
+async def test_manager_exec_ensure_sync_then_run(tmp_path):
     bk = FakeBackend()
     m = SandboxManager(backend=bk)
-    out = m.exec("echo hi", cwd=tmp_path, target="ssh")
+    out = await m.exec("echo hi", cwd=tmp_path, target="ssh")
     assert out.ok and out.target == "ssh" and out.stdout == "ok"
     assert isinstance(out, RunOutcome)
     key = session_key_for(tmp_path)
@@ -71,7 +71,7 @@ def test_manager_exec_ensure_sync_then_run(tmp_path):
     assert bk.calls == ["echo hi"]
 
 
-def test_exec_dep_hook_installs_missing_tool(tmp_path):
+async def test_exec_dep_hook_installs_missing_tool(tmp_path):
     installed = {"ok": False}
 
     def exec_fn(cmd, **kw):
@@ -86,7 +86,7 @@ def test_exec_dep_hook_installs_missing_tool(tmp_path):
 
     bk = FakeBackend(exec_fn=exec_fn)
     m = SandboxManager(backend=bk)
-    out = m.exec("python3 -c 'print(1)'", cwd=tmp_path, tool_id="pwntools")
+    out = await m.exec("python3 -c 'print(1)'", cwd=tmp_path, tool_id="pwntools")
     assert out.ok
     # 依赖钩子:缺失 → 自动装(pip --break-system-packages),先于实际命令
     install_cmd = "python3 -m pip install --break-system-packages pwntools==4.15.0"
@@ -94,17 +94,17 @@ def test_exec_dep_hook_installs_missing_tool(tmp_path):
     assert bk.calls.index("python3 -c 'print(1)'") > bk.calls.index(install_cmd)
 
 
-def test_exec_dep_hook_skipped_when_install_auto_off(tmp_path):
+async def test_exec_dep_hook_skipped_when_install_auto_off(tmp_path):
     bk = FakeBackend()
     m = SandboxManager(backend=bk, settings=SandboxSettings(install_auto=False))
-    m.exec("echo hi", cwd=tmp_path, tool_id="pwntools")
+    await m.exec("echo hi", cwd=tmp_path, tool_id="pwntools")
     assert bk.calls == ["echo hi"]  # 未探测、未安装
 
 
-def test_run_python_writes_syncs_and_runs(tmp_path):
+async def test_run_python_writes_syncs_and_runs(tmp_path):
     bk = FakeBackend()
     m = SandboxManager(backend=bk)
-    out = m.run_python("print('x')", cwd=tmp_path)
+    out = await m.run_python("print('x')", cwd=tmp_path)
     assert out.ok
     assert (tmp_path / "_ctf_exec.py").read_text(encoding="utf-8") == "print('x')"
     key = session_key_for(tmp_path)
@@ -112,15 +112,15 @@ def test_run_python_writes_syncs_and_runs(tmp_path):
     assert bk.calls == ["python3 /work/_ctf_exec.py"]
 
 
-def test_cleanup_delegates(tmp_path):
+async def test_cleanup_delegates(tmp_path):
     bk = FakeBackend()
     m = SandboxManager(backend=bk)
     key = session_key_for(tmp_path)
-    m.cleanup(key)
+    await m.cleanup(key)
     assert bk.cleaned == [key]
 
 
-def test_exec_event_carries_cmd_and_sync_success(tmp_path):
+async def test_exec_event_carries_cmd_and_sync_success(tmp_path):
     """exec 事件带 cmd 内容;sync 成功也进事件(补审计线缺口)。"""
     from opslog import attach, detach
 
@@ -130,7 +130,7 @@ def test_exec_event_carries_cmd_and_sync_success(tmp_path):
     sink = lambda kind, detail: seen.append((kind, detail))
     attach(sink)
     try:
-        out = m.exec("echo hi", cwd=tmp_path)
+        out = await m.exec("echo hi", cwd=tmp_path)
     finally:
         detach(sink)
     assert out.ok
@@ -139,12 +139,12 @@ def test_exec_event_carries_cmd_and_sync_success(tmp_path):
     assert [d for k, d in seen if k == "sandbox.sync"]  # 同步成功也要进事件
 
 
-def test_sync_failure_recorded_not_silent(tmp_path):
+async def test_sync_failure_recorded_not_silent(tmp_path):
     """附件目录同步失败:不阻断本次命令,但必须报错进 log(不能静默吞掉)。"""
     from opslog import attach, detach
 
     class _BoomSync(FakeBackend):
-        def sync(self, local_dir, session_key=None):
+        async def sync(self, local_dir, session_key=None):
             raise FileNotFoundError("distfiles 缺失(本地挑战目录未就绪)")
 
     m = SandboxManager(backend=_BoomSync())
@@ -152,7 +152,7 @@ def test_sync_failure_recorded_not_silent(tmp_path):
     sink = lambda kind, detail: seen.append((kind, detail))
     attach(sink)
     try:
-        out = m.exec("ls", cwd=tmp_path)
+        out = await m.exec("ls", cwd=tmp_path)
     finally:
         detach(sink)
     assert out.ok  # RECOVERABLE: 记录后继续,不阻断命令

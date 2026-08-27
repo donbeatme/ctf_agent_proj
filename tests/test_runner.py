@@ -26,13 +26,13 @@ class StubSandbox:
             cmd=None, target=target_name,
         )
 
-    def exec(self, cmd, *, cwd=None, category=None, tool_id=None, target=None, timeout=None):
+    async def exec(self, cmd, *, cwd=None, category=None, tool_id=None, target=None, timeout=None):
         self.exec_calls.append({"cmd": cmd, "cwd": cwd, "category": category,
                                 "tool_id": tool_id, "timeout": timeout})
         return self.outcome
 
-    def run_python(self, code, *, cwd=None, category=None, tool_id=None,
-                   target=None, timeout=None):
+    async def run_python(self, code, *, cwd=None, category=None, tool_id=None,
+                         target=None, timeout=None):
         self.run_python_calls.append({"code": code, "cwd": cwd, "category": category,
                                       "tool_id": tool_id, "timeout": timeout})
         return self.outcome
@@ -41,65 +41,65 @@ class StubSandbox:
 # ===== 委托沙箱 =====
 
 
-def test_run_delegates_to_sandbox(tmp_path):
+async def test_run_delegates_to_sandbox(tmp_path):
     sbx = StubSandbox()
     r = CommandRunner(sandbox=sbx, timeout=7.0)
-    out = r.run("ROPgadget --binary a", cwd=str(tmp_path), category="ctf-pwn",
-                tool_id="ROPgadget", timeout=10)
+    out = await r.run("ROPgadget --binary a", cwd=str(tmp_path), category="ctf-pwn",
+                      tool_id="ROPgadget", timeout=10)
     assert out.target == "ssh" and out.stdout == "sbx"
     assert sbx.exec_calls == [{"cmd": "ROPgadget --binary a", "cwd": str(tmp_path),
                                "category": "ctf-pwn", "tool_id": "ROPgadget", "timeout": 10}]
 
 
-def test_run_default_timeout(tmp_path):
+async def test_run_default_timeout(tmp_path):
     sbx = StubSandbox()
     r = CommandRunner(sandbox=sbx, timeout=5.0)
-    r.run("ls", cwd=tmp_path)
+    await r.run("ls", cwd=tmp_path)
     assert sbx.exec_calls[0]["timeout"] == 5.0
 
 
-def test_run_python_delegates_to_sandbox(tmp_path):
+async def test_run_python_delegates_to_sandbox(tmp_path):
     sbx = StubSandbox()
     r = CommandRunner(sandbox=sbx)
-    out = r.run_python("import pwn", cwd=tmp_path, category="ctf-pwn", tool_id="pwntools")
+    out = await r.run_python("import pwn", cwd=tmp_path, category="ctf-pwn", tool_id="pwntools")
     assert out.stdout == "sbx" and out.target == "ssh"
     assert sbx.run_python_calls[0]["code"] == "import pwn"
 
 
-def test_run_python_does_not_write_script_locally(tmp_path):
+async def test_run_python_does_not_write_script_locally(tmp_path):
     sbx = StubSandbox()
     r = CommandRunner(sandbox=sbx)
-    r.run_python("print(1)", cwd=tmp_path)
+    await r.run_python("print(1)", cwd=tmp_path)
     assert not (tmp_path / "_ctf_exec.py").exists()  # 脚本由沙箱自管,runner 不写
 
 
-def test_docker_backend_target_name(tmp_path):
+async def test_docker_backend_target_name(tmp_path):
     sbx = StubSandbox(target_name="docker")
     r = CommandRunner(sandbox=sbx)
-    out = r.run("ls", cwd=tmp_path)
+    out = await r.run("ls", cwd=tmp_path)
     assert out.target == "docker"
 
 
 # ===== 无沙箱:不回退宿主 =====
 
 
-def test_no_sandbox_returns_error_not_host_exec(monkeypatch, tmp_path):
+async def test_no_sandbox_returns_error_not_host_exec(monkeypatch, tmp_path):
     # 无沙箱凭据:不建任何宿主 subprocess,直接返回 ok=False 错误结果
     import config_sandbox
     monkeypatch.setattr(config_sandbox, "_CONFIG_FILE", Path(tmp_path) / "nope.json")
     r = CommandRunner()
-    out = r.run("whoami", cwd=tmp_path)
+    out = await r.run("whoami", cwd=tmp_path)
     assert out.ok is False
     assert out.returncode is None
     assert out.target == "none"
     assert "沙箱未配置" in out.stderr
 
 
-def test_no_sandbox_run_python_error(monkeypatch, tmp_path):
+async def test_no_sandbox_run_python_error(monkeypatch, tmp_path):
     import config_sandbox
     monkeypatch.setattr(config_sandbox, "_CONFIG_FILE", Path(tmp_path) / "nope.json")
     r = CommandRunner()
-    out = r.run_python("print(1)", cwd=tmp_path)
+    out = await r.run_python("print(1)", cwd=tmp_path)
     assert out.ok is False and out.target == "none"
 
 
@@ -133,21 +133,21 @@ def test_sandbox_init_failure_records_and_backs_off(monkeypatch):
 # ===== 超时与结果形状 =====
 
 
-def test_timeout_passthrough(tmp_path):
+async def test_timeout_passthrough(tmp_path):
     sbx = StubSandbox(outcome=RunOutcome(
         ok=False, returncode=None, stdout="", stderr="", cmd=None,
         target="ssh", timed_out=True))
     r = CommandRunner(sandbox=sbx)
-    out = r.run("sleep 10", timeout=0.01)
+    out = await r.run("sleep 10", timeout=0.01)
     assert out.timed_out is True
     assert out.ok is False
     assert out.returncode is None
 
 
-def test_outcome_as_dict_shape(tmp_path):
+async def test_outcome_as_dict_shape(tmp_path):
     sbx = StubSandbox()
     r = CommandRunner(sandbox=sbx)
-    d = r.run("python x.py", cwd=tmp_path).as_dict()
+    d = (await r.run("python x.py", cwd=tmp_path)).as_dict()
     for k in ("ok", "returncode", "stdout", "stderr", "cmd", "target",
               "timed_out", "elapsed_ms"):
         assert k in d

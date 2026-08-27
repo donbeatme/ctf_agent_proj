@@ -26,32 +26,32 @@ def _engine(executor):
                   workspace=ws, understander=None)
 
 
-def test_init_run_loads_matched_experience():
+async def test_init_run_loads_matched_experience():
     ex = _ExpExecutor(RECORDS)
     eng = _engine(ex)
-    eng._init_run(MOCK_TASK)
+    await eng._init_run(MOCK_TASK)
     assert eng.workspace.get_experience() == RECORDS
 
 
-def test_init_run_no_match_empty():
+async def test_init_run_no_match_empty():
     ex = _ExpExecutor([])
     eng = _engine(ex)
-    eng._init_run(MOCK_TASK)
+    await eng._init_run(MOCK_TASK)
     assert eng.workspace.get_experience() == []
 
 
-def test_init_run_base_executor_empty_when_no_adapter():
+async def test_init_run_base_executor_empty_when_no_adapter():
     # 基类 Executor.match_experience:无 adapter → 空(而非抛错)
     eng = _engine(MockExecutor())
-    eng._init_run(MOCK_TASK)
+    await eng._init_run(MOCK_TASK)
     assert eng.workspace.get_experience() == []
 
 
-def test_init_run_reset_clears_stale_experience():
+async def test_init_run_reset_clears_stale_experience():
     ex = _ExpExecutor(RECORDS)
     eng = _engine(ex)
-    eng._init_run(MOCK_TASK)
+    await eng._init_run(MOCK_TASK)
     assert eng.workspace.get_experience() == RECORDS
     ex._records = []                       # 下一 run 匹配不到
-    eng._init_run(MOCK_TASK)
+    await eng._init_run(MOCK_TASK)
     assert eng.workspace.get_experience() == []

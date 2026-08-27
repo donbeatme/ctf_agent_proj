@@ -4,8 +4,8 @@
 未接入前用 MockEvaluator:构造时按角色传入要返回的内容,方便测试不同场景。
 """
 
+import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -58,16 +58,16 @@ class Evaluator:
     (DAG),引用 DAG 节点作为证据,返回每个 goal 的完成判定。
     """
 
-    def review(self, ctx: str) -> EvalResult:      # ep 计划评审
+    async def review(self, ctx: str) -> EvalResult:      # ep 计划评审
         raise NotImplementedError
 
-    def step_eval(self, ctx: str) -> EvalResult:   # ee 步骤校验
+    async def step_eval(self, ctx: str) -> EvalResult:   # ee 步骤校验
         raise NotImplementedError
 
-    def reflect(self, ctx: str) -> EvalResult:     # et 任务反思
+    async def reflect(self, ctx: str) -> EvalResult:     # et 任务反思
         raise NotImplementedError
 
-    def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
+    async def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
         """评估 goal list 中未完成的 goal 是否已达成(引用 DAG 节点作证据)。"""
         raise NotImplementedError
 
@@ -92,19 +92,21 @@ class MockEvaluator(Evaluator):
             raise RuntimeError(f"MockEvaluator 未配置 {role} 的返回")
         return r(ctx) if callable(r) else r
 
-    def review(self, ctx: str) -> EvalResult:
+    async def review(self, ctx: str) -> EvalResult:
         return self._get(Role.EVALUATOR_PLAN, ctx)
 
-    def step_eval(self, ctx: str) -> EvalResult:
+    async def step_eval(self, ctx: str) -> EvalResult:
         return self._get(Role.EVALUATOR_STEP, ctx)
 
-    def reflect(self, ctx: str) -> EvalResult:
+    async def reflect(self, ctx: str) -> EvalResult:
         return self._get(Role.EVALUATOR_TASK, ctx)
 
-    def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
-        if callable(self._goal_responses):
-            return self._goal_responses(ctx, goals, dag_summary)
-        return list(self._goal_responses)
+    async def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
+        r = self._goal_responses(ctx, goals, dag_summary) if callable(self._goal_responses) \
+            else self._goal_responses
+        if asyncio.iscoroutine(r):
+            return await r
+        return list(r)
 
 
 class SmokeEvaluator(Evaluator):
@@ -114,22 +116,22 @@ class SmokeEvaluator(Evaluator):
     def __init__(self, ws):
         self._ws = ws
 
-    def review(self, ctx):
+    async def review(self, ctx):
         bp = self._ws.blueprint
         if bp is None or not bp.steps:
             return EvalResult(Verdict.FAIL, "计划为空,请重新规划")
         return EvalResult(Verdict.PASS, "计划可执行(mock)")
 
-    def step_eval(self, ctx):
+    async def step_eval(self, ctx):
         return EvalResult(Verdict.PASS, "步骤验收通过(mock)")
 
-    def reflect(self, ctx):
+    async def reflect(self, ctx):
         return EvalResult(Verdict.DONE, "反思: 无问题(mock)")
 
     def system_for(self, role):
         return ""
 
-    def eval_goals(self, ctx, goals, dag_summary):
+    async def eval_goals(self, ctx, goals, dag_summary):
         """mock:全部 PASSED 步骤作为证据,认为 goal 已达成(冒烟只验证链路不验证判定)。"""
         steps = self._ws.blueprint.steps if self._ws.blueprint else {}
         evidence = [sid for sid, s in steps.items() if s.status.value == "PASSED"]
@@ -222,11 +224,13 @@ class _LLMEvaluator(Evaluator):
     default_verdict: Verdict = Verdict.PASS
     legal: frozenset = frozenset()
 
-    def _call(self, ctx: str, system: str | None = None,
-              drain_usage: bool = True) -> tuple[dict, str, dict | None]:
+    async def _call(self, ctx: str, system: str | None = None,
+                    drain_usage: bool = True) -> tuple[dict, str, dict | None]:
         try:
-            raw = llm_api.chat(system=system or ROLE_SYSTEMS.get(self.role, ""),
-                               prompt=ctx, model=llm_api.role_model(self.role))
+            # chat 已 async;测试注入同步 stub 时降级不 await(沿用 iscoroutine 兼容缝)
+            r = llm_api.chat(system=system or ROLE_SYSTEMS.get(self.role, ""),
+                             prompt=ctx, model=llm_api.role_model(self.role))
+            raw = await r if asyncio.iscoroutine(r) else r
             usage = _sum_usage(llm_api.pop_token_log()) if drain_usage else None
             return _parse_json(raw), raw, usage
         except Exception as exc:  # noqa: BLE001 — LLM 故障不能阻塞评估,走兜底
@@ -266,8 +270,8 @@ class PlanLLMEvaluator(_LLMEvaluator):
     default_verdict = Verdict.PASS
     legal = frozenset({"pass", "fail"})
 
-    def review(self, ctx: str) -> EvalResult:
-        parsed, raw, usage = self._call(ctx)
+    async def review(self, ctx: str) -> EvalResult:
+        parsed, raw, usage = await self._call(ctx)
         return self._result(parsed, raw, usage)
 
 
@@ -278,29 +282,33 @@ class StepLLMEvaluator(_LLMEvaluator):
     default_verdict = Verdict.RETRY
     legal = frozenset({"pass", "retry", "escalate"})
 
-    def step_eval(self, ctx: str) -> EvalResult:
-        parsed, raw, usage = self._call(ctx)
+    async def step_eval(self, ctx: str) -> EvalResult:
+        parsed, raw, usage = await self._call(ctx)
         is_completed = bool(parsed.get("is_completed"))
         diagnosis = self._coerce_diagnosis(parsed.get("diagnosis"))
         return self._result(parsed, raw, usage, is_completed=is_completed,
                             diagnosis=diagnosis)
 
-    def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
-        """逐 goal LLM 软鉴定:每个未达成 goal 独立调用 LLM(可线程池并行),保序返回。
+    async def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
+        """逐 goal LLM 软鉴定:每个未达成 goal 独立调用 LLM(asyncio 并发),保序返回。
 
-        每个 goal 的判定互不依赖 → 同一决策点多个独立 LLM 调用,ThreadPoolExecutor 并行。
-        LLM 失败/解析失败保守收口 complete=False(不臆测达成),仅引擎层聚合用量(_llm_wrap)。
+        每个 goal 的判定互不依赖 → 同一决策点多个独立 LLM 调用,经 Semaphore 限并发,
+        asyncio.gather 保序聚合。LLM 失败/解析失败保守收口 complete=False(不臆测达成),
+        仅引擎层聚合用量(_llm_wrap)。
         """
         if not goals:
             return []
         n = max(1, min(len(goals),
                        int(get_engine_config().get("goal_eval_max_workers", 4) or 1)))
-        if n == 1:
-            return [self._call_goal(g, ctx, dag_summary) for g in goals]
-        with ThreadPoolExecutor(max_workers=n) as pool:
-            return list(pool.map(lambda g: self._call_goal(g, ctx, dag_summary), goals))
+        sem = asyncio.Semaphore(n)
 
-    def _call_goal(self, goal, ctx: str, dag_summary: str) -> GoalEvalDetail:
+        async def bounded(g):
+            async with sem:
+                return await self._call_goal(g, ctx, dag_summary)
+
+        return await asyncio.gather(*(bounded(g) for g in goals))
+
+    async def _call_goal(self, goal, ctx: str, dag_summary: str) -> GoalEvalDetail:
         """单个 goal 的 LLM 软鉴定。drain_usage=False:不抢全局 token log,用量留给引擎聚合。"""
         goal_id = str(goal.get("id", ""))
         prompt = (
@@ -308,7 +316,7 @@ class StepLLMEvaluator(_LLMEvaluator):
             f"【世界模型(DAG)】\n{dag_summary or '(无计划)'}\n\n"
             f"【执行上下文】\n{ctx}\n"
         )
-        parsed, raw, _ = self._call(prompt, system=GOAL_EVAL_SYSTEM, drain_usage=False)
+        parsed, raw, _ = await self._call(prompt, system=GOAL_EVAL_SYSTEM, drain_usage=False)
         complete = bool(parsed.get("complete"))
         evidence = parsed.get("evidence")
         evidence = [str(x) for x in evidence if x] if isinstance(evidence, list) else []
@@ -326,8 +334,8 @@ class TaskLLMEvaluator(_LLMEvaluator):
     default_verdict = Verdict.DONE
     legal = frozenset({"done", "replan"})
 
-    def reflect(self, ctx: str) -> EvalResult:
-        parsed, raw, usage = self._call(ctx)
+    async def reflect(self, ctx: str) -> EvalResult:
+        parsed, raw, usage = await self._call(ctx)
         return self._result(parsed, raw, usage)
 
 
@@ -341,17 +349,17 @@ class ConfigurableEvaluator(Evaluator):
     def _get(self, role: str) -> Evaluator:
         return self._delegates.get(role, self._fallback)
 
-    def review(self, ctx: str) -> EvalResult:
-        return self._get(Role.EVALUATOR_PLAN).review(ctx)
+    async def review(self, ctx: str) -> EvalResult:
+        return await self._get(Role.EVALUATOR_PLAN).review(ctx)
 
-    def step_eval(self, ctx: str) -> EvalResult:
-        return self._get(Role.EVALUATOR_STEP).step_eval(ctx)
+    async def step_eval(self, ctx: str) -> EvalResult:
+        return await self._get(Role.EVALUATOR_STEP).step_eval(ctx)
 
-    def reflect(self, ctx: str) -> EvalResult:
-        return self._get(Role.EVALUATOR_TASK).reflect(ctx)
+    async def reflect(self, ctx: str) -> EvalResult:
+        return await self._get(Role.EVALUATOR_TASK).reflect(ctx)
 
-    def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
-        return self._get(Role.EVALUATOR_STEP).eval_goals(ctx, goals, dag_summary)
+    async def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
+        return await self._get(Role.EVALUATOR_STEP).eval_goals(ctx, goals, dag_summary)
 
     def system_for(self, role) -> str:
         return self._get(role).system_for(role)

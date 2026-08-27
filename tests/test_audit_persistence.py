@@ -49,11 +49,11 @@ def _make(tmp_path, submission, submitted_flag, audit_output):
     return evaluator
 
 
-def test_audit_json_persists_derived_fields(tmp_path):
+async def test_audit_json_persists_derived_fields(tmp_path):
     out = tmp_path / "audit.json"
     sub = {"flag": "flag{x}", "ok": True, "correct": True, "message": "ok"}
     ev = _make(tmp_path, submission=sub, submitted_flag="flag{x}", audit_output=out)
-    res = ev.reflect("ctx")
+    res = await ev.reflect("ctx")
     assert res.verdict == Verdict.DONE
     ev.close()
 

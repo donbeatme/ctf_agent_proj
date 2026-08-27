@@ -21,9 +21,9 @@ def test_capabilities_has_layers():
     assert "audit_report" in ids
     statuses = {L["id"]: L["status"] for L in caps["layers"]}
     assert statuses["planner"] == "wired"
-    assert statuses["executor"] == "stub"
+    assert statuses["executor"] == "wired_declare"
     assert statuses["experience"] == "reserved"
-    assert statuses["flag_verify"] == "frontend_reserved"
+    assert statuses["flag_verify"] == "wired"
 
 
 def test_reserved_payload_shape():

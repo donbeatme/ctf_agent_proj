@@ -16,7 +16,7 @@ class FakeBackend(SandboxBackend):
         self.available = set()   # 探针可命中的 verify 名(import 模块 或 CLI 名)
         self._installed = False
 
-    def exec(self, cmd_str, *, session_key=None, timeout=None):
+    async def exec(self, cmd_str, *, session_key=None, timeout=None):
         self.calls.append(cmd_str)
         if cmd_str.startswith("python3 -c "):
             mod = cmd_str.split("python3 -c ", 1)[1].strip("'\"")
@@ -35,46 +35,46 @@ class FakeBackend(SandboxBackend):
 # ===== 探测 =====
 
 
-def test_probe_pip_uses_import_check():
+async def test_probe_pip_uses_import_check():
     bk = FakeBackend()
     tm = ToolManager(bk)
-    tm.probe_tool("pwntools")
+    await tm.probe_tool("pwntools")
     assert bk.calls[0] == "python3 -c 'import pwn'"
 
 
-def test_probe_cli_uses_command_v():
+async def test_probe_cli_uses_command_v():
     bk = FakeBackend()
     tm = ToolManager(bk)
-    assert tm.probe_tool("gdb")["status"] == "missing"
+    assert (await tm.probe_tool("gdb"))["status"] == "missing"
     assert bk.calls[0] == "command -v gdb"
 
 
-def test_probe_unknown_manual_brew():
+async def test_probe_unknown_manual_brew():
     tm = ToolManager()
-    assert tm.probe_tool("no-such-tool")["status"] == "unknown"
-    assert tm.probe_tool("pwndbg")["status"] == "manual"
-    assert tm.probe_tool("wireshark")["status"] == "incompatible"
+    assert (await tm.probe_tool("no-such-tool"))["status"] == "unknown"
+    assert (await tm.probe_tool("pwndbg"))["status"] == "manual"
+    assert (await tm.probe_tool("wireshark"))["status"] == "incompatible"
 
 
-def test_probe_download_uses_command_v():
+async def test_probe_download_uses_command_v():
     bk = FakeBackend()
     tm = ToolManager(bk)
-    assert tm.probe_tool("ghidra")["status"] == "missing"
+    assert (await tm.probe_tool("ghidra"))["status"] == "missing"
     assert bk.calls[0] == "command -v analyzeHeadless"
     bk.available.add("analyzeHeadless")
-    assert tm.probe_tool("ghidra")["status"] == "available"
+    assert (await tm.probe_tool("ghidra"))["status"] == "available"
 
 
 # ===== 安装 =====
 
 
-def test_install_missing_then_available():
+async def test_install_missing_then_available():
     bk = FakeBackend()
     tm = ToolManager(bk)
-    assert tm.probe_tool("gdb")["status"] == "missing"
-    r = tm.install_tools(["gdb"])
+    assert (await tm.probe_tool("gdb"))["status"] == "missing"
+    r = await tm.install_tools(["gdb"])
     assert r["installed"] == ["gdb"] and r["failed"] == []
-    assert tm.probe_tool("gdb")["status"] == "available"
+    assert (await tm.probe_tool("gdb"))["status"] == "available"
     # apt 先 update 一次,再装
     assert bk.calls.index("apt-get update") < bk.calls.index(
         "DEBIAN_FRONTEND=noninteractive apt-get install -y gdb"
@@ -106,30 +106,30 @@ def test_install_commands_download():
     assert cmds["ghidra"].startswith("DEBIAN_FRONTEND=noninteractive")
 
 
-def test_install_tools_buckets():
+async def test_install_tools_buckets():
     bk = FakeBackend()
     tm = ToolManager(bk)
-    r = tm.install_tools(["gdb", "ghidra", "wireshark", "pwndbg", "no-such"])
+    r = await tm.install_tools(["gdb", "ghidra", "wireshark", "pwndbg", "no-such"])
     assert r["installed"] == ["gdb", "ghidra"]
     assert r["incompatible"] == ["wireshark"]
     assert r["skipped_manual"] == ["pwndbg"]
     assert r["failed"] == ["no-such"]
 
 
-def test_install_already_available_skips():
+async def test_install_already_available_skips():
     bk = FakeBackend()
     bk.available.add("gdb")
     tm = ToolManager(bk)
-    r = tm.install_tools(["gdb"])
+    r = await tm.install_tools(["gdb"])
     assert r["installed"] == []
     assert not any("apt-get install" in c for c in bk.calls)
 
 
-def test_install_force_reinstalls_even_if_available():
+async def test_install_force_reinstalls_even_if_available():
     bk = FakeBackend()
     bk.available.add("gdb")
     tm = ToolManager(bk)
-    r = tm.install_tools(["gdb"], force=True)
+    r = await tm.install_tools(["gdb"], force=True)
     assert r["installed"] == ["gdb"]
 
 
@@ -147,7 +147,7 @@ class AptFakeBackend(SandboxBackend):
         self.apt_pkgs = set(apt_pkgs)
         self.installed = set()
 
-    def exec(self, cmd_str, *, session_key=None, timeout=None):
+    async def exec(self, cmd_str, *, session_key=None, timeout=None):
         self.calls.append(cmd_str)
         if cmd_str.startswith("command -v "):
             name = cmd_str.split("command -v ", 1)[1].strip("'\"")
@@ -167,56 +167,56 @@ class AptFakeBackend(SandboxBackend):
         return ExecOutcome(0, b"", b"")
 
 
-def test_probe_noncatalog_by_name():
+async def test_probe_noncatalog_by_name():
     bk = AptFakeBackend()
     tm = ToolManager(bk)
-    assert tm.probe_tool("wine")["status"] == "missing"
+    assert (await tm.probe_tool("wine"))["status"] == "missing"
     assert bk.calls[0] == "command -v wine"
     bk.installed.add("wine")
-    assert tm.probe_tool("wine")["status"] == "available"
+    assert (await tm.probe_tool("wine"))["status"] == "available"
 
 
-def test_dynamic_install_apt_package():
+async def test_dynamic_install_apt_package():
     bk = AptFakeBackend(apt_pkgs={"wine"})
     tm = ToolManager(bk)
-    r = tm.install_tools(["wine"])
+    r = await tm.install_tools(["wine"])
     assert r["installed"] == ["wine"] and r["failed"] == []
-    assert tm.probe_tool("wine")["status"] == "available"
+    assert (await tm.probe_tool("wine"))["status"] == "available"
     assert bk.calls.index("apt-get update") < bk.calls.index(
         "DEBIAN_FRONTEND=noninteractive apt-get install -y wine"
     )
     # 已装过:再次 install 不再重装,也不报 failed(非目录 probe 恒 miss,靠缓存跳过)
-    r2 = tm.install_tools(["wine"])
+    r2 = await tm.install_tools(["wine"])
     assert r2["installed"] == [] and r2["failed"] == []
     assert bk.calls.count("DEBIAN_FRONTEND=noninteractive apt-get install -y wine") == 1
 
 
-def test_dynamic_install_unavailable_fallback():
+async def test_dynamic_install_unavailable_fallback():
     bk = AptFakeBackend(apt_pkgs=set())
     tm = ToolManager(bk)
-    r = tm.install_tools(["definitely-not-a-pkg"])
+    r = await tm.install_tools(["definitely-not-a-pkg"])
     assert r["installed"] == [] and r["failed"] == ["definitely-not-a-pkg"]
     assert not any("apt-get install" in c for c in bk.calls)
     # 失败缓存:第二次不再重复解析(apt-cache 不再出现),不抛异常
     n_first = bk.calls.count("apt-cache show definitely-not-a-pkg")
-    tm.install_tools(["definitely-not-a-pkg"])
+    await tm.install_tools(["definitely-not-a-pkg"])
     assert bk.calls.count("apt-cache show definitely-not-a-pkg") == n_first
     assert not any("apt-get install" in c for c in bk.calls)
 
 
-def test_dynamic_install_force_retries():
+async def test_dynamic_install_force_retries():
     bk = AptFakeBackend(apt_pkgs={"wine"})
     tm = ToolManager(bk)
-    tm.install_tools(["wine"])
-    r = tm.install_tools(["wine"], force=True)
+    await tm.install_tools(["wine"])
+    r = await tm.install_tools(["wine"], force=True)
     assert r["installed"] == ["wine"]
     assert bk.calls.count("DEBIAN_FRONTEND=noninteractive apt-get install -y wine") == 2
 
 
-def test_dynamic_install_unsafe_name_no_exec():
+async def test_dynamic_install_unsafe_name_no_exec():
     bk = AptFakeBackend(apt_pkgs={"wine"})
     tm = ToolManager(bk)
-    r = tm.install_tools(["wine; rm -rf /"])
+    r = await tm.install_tools(["wine; rm -rf /"])
     assert r["failed"] == ["wine; rm -rf /"]
     # 不安全名称:不产生任何解析/安装命令(防注入)
     assert not any("apt-cache" in c or "pip index" in c or "apt-get install" in c

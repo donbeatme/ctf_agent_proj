@@ -15,7 +15,7 @@ class FakeSsh:
         self.execs = []  # (cmd, timeout)
         self.syncs = []  # (local, remote)
 
-    def exec(self, cmd_str, timeout=None):
+    async def exec(self, cmd_str, timeout=None):
         self.execs.append((cmd_str, timeout))
         if cmd_str.startswith("docker ps -aq"):
             return ProcOutcome(0, b"", b"")  # 无该容器 → 需要创建
@@ -27,10 +27,10 @@ class FakeSsh:
             return ProcOutcome(0, b"OUT", b"")
         return ProcOutcome(0, b"", b"")
 
-    def sync_to(self, local, remote):
+    async def sync_to(self, local, remote):
         self.syncs.append((Path(local), remote))
 
-    def close(self):
+    async def close(self):
         pass
 
 
@@ -38,21 +38,21 @@ def _backend(ssh=None):
     return SshSandboxBackend(SandboxSettings(ssh_host="vm"), ssh=ssh or FakeSsh())
 
 
-def test_ensure_creates_container_once():
+async def test_ensure_creates_container_once():
     ssh = FakeSsh()
     bk = _backend(ssh)
-    assert bk.ensure("abc123") == "ctf-abc123"
-    assert bk.ensure("abc123") == "ctf-abc123"  # 缓存命中,不再 docker ps
+    assert await bk.ensure("abc123") == "ctf-abc123"
+    assert await bk.ensure("abc123") == "ctf-abc123"  # 缓存命中,不再 docker ps
     assert ssh.execs[0][0].startswith("docker ps -aq --filter name=^/ctf-abc123$")
     runs = [c for c, _ in ssh.execs if "docker run -d" in c]
     assert len(runs) == 1
     assert "ctf-abc123" in runs[0] and "sleep infinity" in runs[0]
 
 
-def test_exec_runs_docker_exec_in_container():
+async def test_exec_runs_docker_exec_in_container():
     ssh = FakeSsh()
     bk = _backend(ssh)
-    out = bk.exec("echo hi", session_key="k1")
+    out = await bk.exec("echo hi", session_key="k1")
     assert out.returncode == 0 and out.stdout == b"OUT"
     last = ssh.execs[-1][0]
     assert last.startswith("docker exec ctf-k1 /bin/bash -lc")
@@ -66,37 +66,37 @@ def test_per_challenge_container_isolation(tmp_path):
     assert container_name_for(key_a) != container_name_for(key_b)
 
 
-def test_sync_uploads_to_session_subdir(tmp_path):
+async def test_sync_uploads_to_session_subdir(tmp_path):
     ssh = FakeSsh()
     bk = _backend(ssh)
-    bk.sync(tmp_path, "k1")
+    await bk.sync(tmp_path, "k1")
     assert ssh.syncs == [(tmp_path.resolve(), "/root/ctf/k1")]
 
 
-def test_cleanup_removes_container():
+async def test_cleanup_removes_container():
     ssh = FakeSsh()
     bk = _backend(ssh)
-    bk.cleanup("k1")
+    await bk.cleanup("k1")
     assert any("docker rm -f ctf-k1" in c for c, _ in ssh.execs)
 
 
-def test_cleanup_failure_records_cleanup_event():
+async def test_cleanup_failure_records_cleanup_event():
     """docker rm 失败:记 container_removed_failed(CLEANUP),不再无条件报 removed。"""
     from opslog import attach, detach
 
     class _FailRm(FakeSsh):
-        def exec(self, cmd_str, timeout=None):
+        async def exec(self, cmd_str, timeout=None):
             self.execs.append((cmd_str, timeout))
             if cmd_str.startswith("docker rm -f"):
                 return ProcOutcome(1, b"", b"Error: No such container")
-            return super().exec(cmd_str, timeout)
+            return await super().exec(cmd_str, timeout)
 
     bk = _backend(ssh=_FailRm())
     seen = []
     sink = lambda kind, detail: seen.append((kind, detail))
     attach(sink)
     try:
-        bk.cleanup("k1")
+        await bk.cleanup("k1")
     finally:
         detach(sink)
     fail_ev = [d for k, d in seen if k == "sandbox.container_removed_failed"]

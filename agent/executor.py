@@ -7,6 +7,7 @@
   (apply_tool/get_doc/get_record)与执行工具(run_command/run_python/submit_flag/answer)。
 """
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ class Executor:
     # 系统提示词(经 engine 传入 SystemPromptComponent 渲染;mock 为空)
     system: str = ""
 
-    def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
+    async def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
         raise NotImplementedError
 
     def match_experience(self) -> list[dict]:
@@ -50,12 +51,14 @@ class MockExecutor(Executor):
         self._tool_calls = tool_calls
         self._fn = fn
 
-    def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
+    async def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
         if self._fn is not None:
             try:
-                return self._fn(step, ctx, tool_exec)
+                r = self._fn(step, ctx, tool_exec)
+                return await r if asyncio.iscoroutine(r) else r
             except TypeError:
-                return self._fn(step, ctx)  # 兼容旧 2 参 fn(step, ctx)
+                r = self._fn(step, ctx)  # 兼容旧 2 参 fn(step, ctx)
+                return await r if asyncio.iscoroutine(r) else r
         return ExecResult(observation=self._observation, result=self._result,
                           tool_calls=self._tool_calls)
 
@@ -262,8 +265,8 @@ class RealExecutor(Executor):
     def _default_llm(self):
         from agent import llm_api
 
-        def call(*, system, prompt, tools, tool_exec, **kw):
-            return llm_api.chat_with_tools(
+        async def call(*, system, prompt, tools, tool_exec, **kw):
+            return await llm_api.chat_with_tools(
                 system=system, prompt=prompt, tools=tools, tool_exec=tool_exec,
                 model=self.model, max_tool_rounds=self.max_tool_rounds, **kw)
 
@@ -342,7 +345,7 @@ class RealExecutor(Executor):
         return {"submitted": True, "flag": flag, "ok": res.ok, "correct": res.correct,
                 "message": res.message}
 
-    def _run_verifier(self, verifier_path: str, target: str | None) -> str | None:
+    async def _run_verifier(self, verifier_path: str, target: str | None) -> str | None:
         """重跑已验证提取脚本(沙箱),推导当前实例 flag(stdout 末行);失败返回 None。
 
         脚本约定:相对 challenge 目录,读 argv[1](或 metadata.yml)取靶机地址,
@@ -370,7 +373,7 @@ class RealExecutor(Executor):
             "except SystemExit:\n"
             "    pass\n"
         )
-        out = self.runner.run_python(code, cwd=cwd, timeout=90)
+        out = await self.runner.run_python(code, cwd=cwd, timeout=90)
         lines = [ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip()]
         return lines[-1] if lines else None
 
@@ -481,26 +484,27 @@ class RealExecutor(Executor):
 
     # ===== 执行 =====
 
-    def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
+    async def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
         category = self._category(step)
 
-        def exec_tool(name: str, args: dict):
+        async def exec_tool(name: str, args: dict):
             if name == "run_command":
-                return self._run_command(args, category)
+                return await self._run_command(args, category)
             if name == "run_python":
-                return self._run_python(args, category)
+                return await self._run_python(args, category)
             if name == "submit_flag":
                 return self._submit_flag(args)
             if name == "answer":
                 return {"answer": args.get("text", "")}
             if tool_exec is not None:
-                return tool_exec(name, args)
+                r = tool_exec(name, args)
+                return await r if asyncio.iscoroutine(r) else r
             return {"error": f"unknown tool: {name}"}
 
         prompt = self._build_prompt(step, ctx)
         try:
-            tr = self._llm(system=EXEC_SYSTEM, prompt=prompt,
-                           tools=EXEC_TOOL_SPECS, tool_exec=exec_tool)
+            tr = await self._llm(system=EXEC_SYSTEM, prompt=prompt,
+                                 tools=EXEC_TOOL_SPECS, tool_exec=exec_tool)
         except ToolLoopError as exc:
             # 工具循环超上限:保留已达成的部分轨迹(喂 run.log/events.jsonl/flag 提取)
             trace, result = _normalize_trace(exc.trace)
@@ -522,7 +526,7 @@ class RealExecutor(Executor):
             total_usage=getattr(tr, "total_usage", None),
         )
 
-    def _run_command(self, args: dict, category: str) -> dict:
+    async def _run_command(self, args: dict, category: str) -> dict:
         cmd = args.get("command")
         if not cmd or not str(cmd).strip():
             return {"error": "run_command 需要 command"}
@@ -530,7 +534,7 @@ class RealExecutor(Executor):
             cwd = self._cwd(args)
         except ValueError as exc:
             return {"error": str(exc)}
-        out = self.runner.run(
+        out = await self.runner.run(
             str(cmd),
             cwd=cwd,
             category=category,
@@ -539,7 +543,7 @@ class RealExecutor(Executor):
         )
         return out.as_dict()
 
-    def _run_python(self, args: dict, category: str) -> dict:
+    async def _run_python(self, args: dict, category: str) -> dict:
         code = args.get("code")
         if not code:
             return {"error": "run_python 需要 code"}
@@ -547,7 +551,7 @@ class RealExecutor(Executor):
             cwd = self._cwd(args)
         except ValueError as exc:
             return {"error": str(exc)}
-        out = self.runner.run_python(
+        out = await self.runner.run_python(
             code,
             cwd=cwd,
             category=category,

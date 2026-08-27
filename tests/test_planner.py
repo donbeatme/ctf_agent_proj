@@ -50,7 +50,7 @@ def test_combined_docstore_skill_only_when_no_experience():
     assert combined.search({}) == [("ctf-crypto", "SKILL crypto")]
 
 
-def test_plan_retries_on_dagerror_once():
+async def test_plan_retries_on_dagerror_once():
     calls = []
 
     def mock_llm(*, system=None, prompt=None, messages=None, **kw):
@@ -61,14 +61,14 @@ def test_plan_retries_on_dagerror_once():
         return '{"add":[{"id":"s1","instruction":"读题","criterion":"拿到文本","depends_on":[]}]}'
 
     planner = Planner(llm_call=mock_llm, workspace=MockWorkspace())
-    bp = planner.plan(_pin())
+    bp = await planner.plan(_pin())
 
     assert len(calls) == 2
     assert "补丁无法应用" in calls[1]
     assert bp.steps["s1"].instruction == "读题"
 
 
-def test_plan_propagates_dagerror_after_retry():
+async def test_plan_propagates_dagerror_after_retry():
     calls = []
 
     def mock_llm(*, system=None, prompt=None, messages=None, **kw):
@@ -79,7 +79,7 @@ def test_plan_propagates_dagerror_after_retry():
 
     planner = Planner(llm_call=mock_llm, workspace=MockWorkspace())
     try:
-        planner.plan(_pin())
+        await planner.plan(_pin())
     except DAGError:
         assert len(calls) == 2  # 重试一次后仍失败,异常照常上抛
         return

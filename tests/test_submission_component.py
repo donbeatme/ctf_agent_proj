@@ -11,75 +11,75 @@ from agent.schema import Role
 from agent.workspace import MockWorkspace
 
 
-def _ctx_has_submission(ws, role):
-    ctx, _, _ = ws.assembler.assemble(role)
+async def _ctx_has_submission(ws, role):
+    ctx, _, _ = await ws.assembler.assemble(role)
     return "# 已提交 flag" in ctx
 
 
-def test_correct_submission_renders():
+async def test_correct_submission_renders():
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{x}", "ok": True, "correct": True,
                           "message": "success"})
-    ctx, _, _ = ws.assembler.assemble(Role.EVALUATOR_STEP)
+    ctx, _, _ = await ws.assembler.assemble(Role.EVALUATOR_STEP)
     assert "# 已提交 flag" in ctx
     assert "CTF{x}" in ctx
     assert "正确(平台确认)" in ctx
     assert "success" in ctx
 
 
-def test_wrong_submission_renders():
+async def test_wrong_submission_renders():
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{wrong}", "ok": True, "correct": False,
                           "message": "INCORRECT_FLAG"})
-    ctx, _, _ = ws.assembler.assemble(Role.EVALUATOR_STEP)
+    ctx, _, _ = await ws.assembler.assemble(Role.EVALUATOR_STEP)
     assert "错误(平台拒绝)" in ctx
     assert "INCORRECT_FLAG" in ctx
 
 
-def test_record_only_submission():
+async def test_record_only_submission():
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{x}"})   # 无 adapter:仅记录
-    ctx, _, _ = ws.assembler.assemble(Role.EVALUATOR_STEP)
+    ctx, _, _ = await ws.assembler.assemble(Role.EVALUATOR_STEP)
     assert "未判定(仅记录,无平台确认)" in ctx
 
 
-def test_submission_exception_renders():
+async def test_submission_exception_renders():
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{x}", "ok": False, "correct": None,
                           "message": "提交异常: Boom"})
-    ctx, _, _ = ws.assembler.assemble(Role.EVALUATOR_STEP)
+    ctx, _, _ = await ws.assembler.assemble(Role.EVALUATOR_STEP)
     assert "未判定(提交异常)" in ctx
     assert "Boom" in ctx
 
 
-def test_registered_for_ee_and_et():
+async def test_registered_for_ee_and_et():
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{x}", "correct": True})
-    assert _ctx_has_submission(ws, Role.EVALUATOR_STEP)
-    assert _ctx_has_submission(ws, Role.EVALUATOR_TASK)
+    assert await _ctx_has_submission(ws, Role.EVALUATOR_STEP)
+    assert await _ctx_has_submission(ws, Role.EVALUATOR_TASK)
 
 
-def test_not_projected_without_submission():
+async def test_not_projected_without_submission():
     ws = MockWorkspace()
-    assert not _ctx_has_submission(ws, Role.EVALUATOR_STEP)
+    assert not await _ctx_has_submission(ws, Role.EVALUATOR_STEP)
 
 
-def test_planner_does_not_see_submission():
+async def test_planner_does_not_see_submission():
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{x}", "correct": True})
-    ctx, _, _ = ws.assembler.assemble(Role.PLANNER)
+    ctx, _, _ = await ws.assembler.assemble(Role.PLANNER)
     assert "# 已提交 flag" not in ctx
 
 
-def test_reset_clears_submission():
+async def test_reset_clears_submission():
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{x}", "correct": True})
     ws.reset()
     assert "submission" not in ws.meta
-    assert not _ctx_has_submission(ws, Role.EVALUATOR_STEP)
+    assert not await _ctx_has_submission(ws, Role.EVALUATOR_STEP)
 
 
-def test_record_submission_keeps_authoritative_correct():
+async def test_record_submission_keeps_authoritative_correct():
     """平台已确认 correct=True 后,赢后重提(correct=None, ALREADY_SOLVED)不覆盖权威判定。"""
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{x}", "ok": True, "correct": True,
@@ -88,7 +88,7 @@ def test_record_submission_keeps_authoritative_correct():
     ws.record_submission({"flag": "CTF{x}", "ok": True, "correct": None,
                           "message": "该题已解决且为动态 flag,无法本地判定"})
     assert ws.meta["submission"]["correct"] is True
-    ctx, _, _ = ws.assembler.assemble(Role.EVALUATOR_STEP)
+    ctx, _, _ = await ws.assembler.assemble(Role.EVALUATOR_STEP)
     assert "正确(平台确认)" in ctx
     # 明确的错误判定仍可作为新的权威结论覆盖
     ws.record_submission({"flag": "CTF{wrong}", "ok": True, "correct": False,
@@ -96,7 +96,7 @@ def test_record_submission_keeps_authoritative_correct():
     assert ws.meta["submission"]["correct"] is False
 
 
-def test_record_submission_unknown_after_unknown_overwrites():
+async def test_record_submission_unknown_after_unknown_overwrites():
     """没有已确认判定时(correct=None),普通覆盖语义不变。"""
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{a}", "ok": True, "correct": None,
@@ -106,10 +106,10 @@ def test_record_submission_unknown_after_unknown_overwrites():
     assert ws.meta["submission"]["flag"] == "CTF{b}"
 
 
-def test_anchor_never_compressed():
+async def test_anchor_never_compressed():
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{x}", "correct": True})
-    ws.assembler.assemble(Role.EVALUATOR_STEP)
+    await ws.assembler.assemble(Role.EVALUATOR_STEP)
     comps = ws.assembler.components(Role.EVALUATOR_STEP)
     sub = next(c for c in comps if c.key == "submission")
     assert sub.anchor is True

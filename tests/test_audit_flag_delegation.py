@@ -54,62 +54,62 @@ def _make_evaluator(tmp_path, verifier=None, submission=None, submitted_flag=Non
     return evaluator
 
 
-def test_correct_true_platform_verdict_done(tmp_path):
+async def test_correct_true_platform_verdict_done(tmp_path):
     sub = {"flag": "flag{x}", "ok": True, "correct": True, "message": "ok"}
     ev = _make_evaluator(tmp_path, submission=sub, submitted_flag="flag{x}")
-    res = ev.reflect("ctx")
+    res = await ev.reflect("ctx")
     assert res.verdict == Verdict.DONE
     flag = ev.last_record.flag
     assert flag.valid is True and flag.mode == "platform" and flag.submitted is True
 
 
-def test_correct_false_replan(tmp_path):
+async def test_correct_false_replan(tmp_path):
     sub = {"flag": "flag{wrong}", "ok": True, "correct": False, "message": "提交错误"}
     ev = _make_evaluator(tmp_path, submission=sub, submitted_flag="flag{wrong}")
-    res = ev.reflect("ctx")
+    res = await ev.reflect("ctx")
     assert res.verdict == Verdict.REPLAN
     assert ev.last_record.flag.valid is False
 
 
-def test_dynamic_flag_missing_rule_submitted_no_loop(tmp_path):
+async def test_dynamic_flag_missing_rule_submitted_no_loop(tmp_path):
     """Hack World 场景:correct=None + 无规则 + 已提交(ok=True)→ DONE,不回环。"""
     sub = {"flag": "flag{uuid}", "ok": True, "correct": None, "message": "无法本地判定"}
     ev = _make_evaluator(tmp_path, submission=sub, submitted_flag="flag{uuid}")
-    res = ev.reflect("ctx")
+    res = await ev.reflect("ctx")
     assert res.verdict == Verdict.DONE
     flag = ev.last_record.flag
     assert flag.valid is None and flag.mode == "missing" and flag.submitted is True
 
 
-def test_never_submitted_missing_rule_replan(tmp_path):
+async def test_never_submitted_missing_rule_replan(tmp_path):
     ev = _make_evaluator(tmp_path, submission=None, submitted_flag=None)
-    res = ev.reflect("ctx")
+    res = await ev.reflect("ctx")
     assert res.verdict == Verdict.REPLAN
     flag = ev.last_record.flag
     assert flag.valid is None and flag.submitted is False
 
 
-def test_static_rule_fallback_when_correct_none(tmp_path):
+async def test_static_rule_fallback_when_correct_none(tmp_path):
     verifier = FlagVerifier({"t1": {"mode": "exact", "value": "flag{good}"}})
     ev = _make_evaluator(
         tmp_path, verifier=verifier,
         submission={"flag": "flag{good}", "ok": True, "correct": None},
         submitted_flag="flag{good}",
     )
-    res = ev.reflect("ctx")
+    res = await ev.reflect("ctx")
     assert res.verdict == Verdict.DONE
     flag = ev.last_record.flag
     assert flag.valid is True and flag.mode == "exact"
 
 
-def test_static_rule_fallback_replans_on_mismatch(tmp_path):
+async def test_static_rule_fallback_replans_on_mismatch(tmp_path):
     verifier = FlagVerifier({"t1": {"mode": "exact", "value": "flag{good}"}})
     ev = _make_evaluator(
         tmp_path, verifier=verifier,
         submission={"flag": "flag{bad}", "ok": True, "correct": None},
         submitted_flag="flag{bad}",
     )
-    res = ev.reflect("ctx")
+    res = await ev.reflect("ctx")
     assert res.verdict == Verdict.REPLAN
     assert ev.last_record.flag.valid is False
 
@@ -167,66 +167,66 @@ def _step_eval_evaluator(tmp_path, submission=None, step=None,
     )
 
 
-def test_step_eval_force_pass_on_confirmed_correct(tmp_path):
+async def test_step_eval_force_pass_on_confirmed_correct(tmp_path):
     """correct=True → 关键词误判被覆盖,强制 pass + is_completed=True,落账 item 同步修正。"""
     ev = _step_eval_evaluator(
         tmp_path, submission={"flag": "flag{x}", "ok": True, "correct": True,
                               "message": "提交成功,答案正确"})
-    res = ev.step_eval("ctx")
+    res = await ev.step_eval("ctx")
     assert res.verdict == Verdict.PASS
     assert res.is_completed is True
     assert ev.step_items[-1].decision == "pass"
     assert "强制验收通过" in ev.step_items[-1].reasoning
 
 
-def test_step_eval_not_forced_without_confirmation(tmp_path):
+async def test_step_eval_not_forced_without_confirmation(tmp_path):
     """无提交判定 → 离线规则照常判失败(retry),is_completed 不置位。"""
     ev = _step_eval_evaluator(tmp_path, submission=None)
-    res = ev.step_eval("ctx")
+    res = await ev.step_eval("ctx")
     assert res.verdict == Verdict.RETRY
     assert res.is_completed is False
 
 
-def test_step_eval_not_forced_when_correct_none(tmp_path):
+async def test_step_eval_not_forced_when_correct_none(tmp_path):
     """动态 flag 题(correct=None,未确认)→ 不强制 pass,避免误判完成。"""
     ev = _step_eval_evaluator(
         tmp_path, submission={"flag": "flag{uuid}", "ok": True, "correct": None,
                               "message": "无法本地判定"})
-    res = ev.step_eval("ctx")
+    res = await ev.step_eval("ctx")
     assert res.verdict == Verdict.RETRY
     assert res.is_completed is False
 
 
 # ===== diagnosis 三分类:驱动引擎 retry 继承 ctx / 压缩纠偏 / 单节点重设计 =====
 
-def test_step_eval_round_limit_incomplete_retry(tmp_path):
+async def test_step_eval_round_limit_incomplete_retry(tmp_path):
     """executor 8 轮工具循环超上限 → 不再误判 pass,降为 INCOMPLETE retry 继承前几轮 ctx。"""
     from agent.evaluator import Diagnosis
 
     ev = _step_eval_evaluator(
         tmp_path, submission=None,
         observation="执行 Agent 工具循环超上限(8 轮),已执行 16 次工具调用")
-    res = ev.step_eval("ctx")
+    res = await ev.step_eval("ctx")
     assert res.verdict == Verdict.RETRY
     assert res.diagnosis == Diagnosis.INCOMPLETE
     assert "工具循环达上限" in res.opinion
     assert ev.step_items[-1].decision == "retry"
 
 
-def test_step_eval_drift_on_repeated_failure(tmp_path):
+async def test_step_eval_drift_on_repeated_failure(tmp_path):
     """同工具+参数反复失败 → 方向偏,DRIFT retry(压缩 ctx),不再直接 escalate。"""
     from agent.evaluator import Diagnosis
 
     ev = _step_eval_evaluator(tmp_path, submission=None)
-    ev.step_eval("ctx")                 # 首次失败 → 基线 retry
-    res = ev.step_eval("ctx")           # 相同 tool+args 重复 → 方向偏
+    await ev.step_eval("ctx")           # 首次失败 → 基线 retry
+    res = await ev.step_eval("ctx")     # 相同 tool+args 重复 → 方向偏
     assert res.verdict == Verdict.RETRY
     assert res.diagnosis == Diagnosis.DRIFT
     assert "执行方向偏离" in res.opinion
     assert ev.step_items[-1].decision == "retry"
 
 
-def test_step_eval_planner_target_on_attempts_exhausted(tmp_path):
+async def test_step_eval_planner_target_on_attempts_exhausted(tmp_path):
     """步骤重试耗尽仍失败 → PLANNER_TARGET,escalate 单节点重设计(scope 当前步)。"""
     from agent.evaluator import Diagnosis
 
@@ -235,19 +235,19 @@ def test_step_eval_planner_target_on_attempts_exhausted(tmp_path):
     ev = _step_eval_evaluator(
         tmp_path, submission=None, step=step,
         observation="guess attempt: connection error")
-    res = ev.step_eval("ctx")
+    res = await ev.step_eval("ctx")
     assert res.verdict == Verdict.ESCALATE
     assert res.diagnosis == Diagnosis.PLANNER_TARGET
     assert ev.step_items[-1].decision == "escalate"
 
 
-def test_step_eval_normal_pass_other(tmp_path):
+async def test_step_eval_normal_pass_other(tmp_path):
     """正常通过 → PASS,diagnosis OTHER(不干扰引擎分流)。"""
     from agent.evaluator import Diagnosis
 
     ev = _step_eval_evaluator(tmp_path, submission=None,
                               observation="任务完成,flag 已提交")
-    res = ev.step_eval("ctx")
+    res = await ev.step_eval("ctx")
     assert res.verdict == Verdict.PASS
     assert res.diagnosis == Diagnosis.OTHER
     assert res.is_completed is False
@@ -311,7 +311,7 @@ class _StubPlanLlm:
         self.available = True
         self.last_usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
 
-    def complete(self, messages, temperature=0.2):
+    async def complete(self, messages, temperature=0.2):
         import types
         return types.SimpleNamespace(content=self._content, usage=self.last_usage)
 
@@ -333,11 +333,11 @@ def _plan_attempt():
     )
 
 
-def test_plan_evaluator_revise_without_reasons_carries_raw():
+async def test_plan_evaluator_revise_without_reasons_carries_raw():
     """LLM 只回 {\"decision\":\"revise\"}(无 issue/suggestion)→ 结构 1.0 但决策 revise,
     issues 落原始输出,opinion 不再误报"结构完整"。"""
     ev = PlanEvaluator(_StubPlanLlm('{"decision": "revise"}'))
-    res = ev.evaluate(_plan_attempt())
+    res = await ev.evaluate(_plan_attempt())
     assert res.decision == "revise"
     assert res.score == 1.0                       # 结构评审满分(pass 来源)
     assert res.issues and "评审未给出结构化修订项" in res.issues[0]

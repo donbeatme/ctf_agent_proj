@@ -122,9 +122,9 @@ def _planner_with(lib):
     return planner
 
 
-def test_plan_seeds_real_doc_ids(tmp_path):
+async def test_plan_seeds_real_doc_ids(tmp_path):
     planner = _planner_with(_make_lib(tmp_path))
-    planner.plan(PlannerInput(
+    await planner.plan(PlannerInput(
         mode=PlannerMode.INITIAL,
         task_input=TaskInput(
             raw_content={"title": "base64", "description": "base64 编码题"},
@@ -133,9 +133,9 @@ def test_plan_seeds_real_doc_ids(tmp_path):
     assert "doc0" not in planner.workspace.docs          # 不再丢 id
 
 
-def test_get_doc_fallback_to_sub_doc(tmp_path):
+async def test_get_doc_fallback_to_sub_doc(tmp_path):
     planner = _planner_with(_make_lib(tmp_path))
-    planner.plan(PlannerInput(
+    await planner.plan(PlannerInput(
         mode=PlannerMode.INITIAL,
         task_input=TaskInput(
             raw_content={"title": "base64", "description": "base64 编码题"},

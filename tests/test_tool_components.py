@@ -35,13 +35,13 @@ def comp(a, key):
 
 # ===== ToolComponent:ws.tools 投影 =====
 
-def test_tool_component_renders_catalog(ws):
+async def test_tool_component_renders_catalog(ws):
     ws.set_tools([
         {"type": "function", "function": {"name": "nmap", "description": "端口扫描"}},
         {"type": "function", "function": {"name": "nc", "description": "原始连接"}},
     ])
     a = make_assembler(ws)
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "# 可用工具" in ctx
     assert "- nmap: 端口扫描" in ctx
     assert "- nc: 原始连接" in ctx
@@ -56,9 +56,9 @@ def test_tool_component_ref_level_ids_only(ws):
     assert t.render() == "# 可用工具(索引)\n`nmap`"
 
 
-def test_tool_component_empty_catalog_noop(ws):
+async def test_tool_component_empty_catalog_noop(ws):
     a = make_assembler(ws)
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert ctx == ""          # 无工具目录不渲染
 
 
@@ -82,67 +82,67 @@ def test_tool_component_normalize_interface():
 
 # ===== TraceComponent:ut+tr 轨迹投影 =====
 
-def test_trace_renders_call_and_result_interleaved(ws):
+async def test_trace_renders_call_and_result_interleaved(ws):
     ws.record_tool_call("s1", "nmap", {"host": "x"})
     ws.record_tool_result("s1", "nmap", "port 22 open")
     a = make_assembler(ws)
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "# 本轮工具轨迹" in ctx
     assert "call nmap" in ctx          # ut:调用意图
     assert "-> port 22 open" in ctx    # tr:世界响应
 
 
-def test_trace_scope_only_after_last_replan(ws):
+async def test_trace_scope_only_after_last_replan(ws):
     ws.add_event("planner", "replan")
     ws.record_tool_call("s1", "nmap", {"host": "x"})
     ws.record_tool_result("s1", "nmap", "port 22 open")
     ws.add_event("planner", "replan")   # 推进轮次边界
     ws.record_tool_result("s2", "nc", "banner")
     a = make_assembler(ws)
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "nmap" not in ctx       # 上一轮轨迹落回 history 审计,不进本轮 ctx
     assert "nc" in ctx
     assert "step=s2" in ctx
 
 
-def test_trace_agent_scope_filters_role(ws):
+async def test_trace_agent_scope_filters_role(ws):
     ws.record_tool_result("s1", "nmap", "port 22 open", agent="executor")
     ws.record_tool_result("s2", "skill_query", "docs found", agent="evaluator_plan")
     a = CtxAssembler(ws)
     a.register("planner", TraceComponent(agent="executor"))
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "nmap" in ctx
     assert "skill_query" not in ctx
     a2 = CtxAssembler(ws)
     a2.register("planner", TraceComponent(agent="evaluator_plan"))
-    ctx2, _, _ = a2.assemble("planner")
+    ctx2, _, _ = await a2.assemble("planner")
     assert "skill_query" in ctx2
     assert "nmap" not in ctx2
 
 
-def test_trace_no_replan_renders_all(ws):
+async def test_trace_no_replan_renders_all(ws):
     ws.record_tool_result("s1", "nmap", "port 22 open")
     a = make_assembler(ws)
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "nmap" in ctx
 
 
-def test_trace_replan_event_not_rendered(ws):
+async def test_trace_replan_event_not_rendered(ws):
     ws.record_tool_result("s1", "nc", "banner")
     ws.add_event("planner", "replan")
     a = make_assembler(ws)
-    ctx, _, _ = a.assemble("planner")
+    ctx, _, _ = await a.assemble("planner")
     assert "replan" not in ctx    # 只有 use_tool/tool_result 被投影,replan 只是边界标记
 
 
 # ===== TraceComponent:压缩 =====
 
-def test_trace_compresses_to_index_without_llm(ws):
+async def test_trace_compresses_to_index_without_llm(ws):
     # budget 按 token 计:index 档渲染 ~40-47 tok,raw 档 ~370 tok,取 100 保证
     # 触发压缩(raw→index)且 index 稳定收进预算(uuid 切分有 ±tok 抖动)
     ws.record_tool_result("s1", "nmap", "x" * 2000)
     a = make_assembler(ws)                          # 无 compress → 机械降级
-    ctx, _, over = a.assemble("planner", budget=100)
+    ctx, _, over = await a.assemble("planner", budget=100)
     tr = comp(a, "trace")
     assert tr.level == 1                            # 压到 index 档
     assert over == 0
@@ -151,17 +151,17 @@ def test_trace_compresses_to_index_without_llm(ws):
     assert "[ref " in ctx                           # uuid 引用(get_record 可展开)
 
 
-def test_trace_without_compress_stops_at_index(ws):
+async def test_trace_without_compress_stops_at_index(ws):
     ws.record_tool_result("s1", "nmap", "x" * 300)
     a = make_assembler(ws)
-    ctx, _, _ = a.assemble("planner", budget=40)
+    ctx, _, _ = await a.assemble("planner", budget=40)
     tr = comp(a, "trace")
     assert tr.level == 1
     assert tr.can_advance() is False                # 无压缩 api → 摘要档不可用
     assert "摘要" not in ctx                        # 不装假摘要
 
 
-def test_trace_compressed_before_tools(ws):
+async def test_trace_compressed_before_tools(ws):
     ws.set_tools([
         {"type": "function", "function": {"name": "nmap", "description": "端口扫描"}},
         {"type": "function", "function": {"name": "nc", "description": "原始连接"}},
@@ -170,24 +170,24 @@ def test_trace_compressed_before_tools(ws):
     ])
     ws.record_tool_result("s1", "nmap", "x" * 300)
     a = make_assembler(ws)
-    a.assemble("planner", budget=95)
+    await a.assemble("planner", budget=95)
     assert comp(a, "trace").level > comp(a, "tools").level  # 优先级 1 先压,4 后压
 
 
 # ===== TraceComponent:摘要档 =====
 
-def test_trace_summary_warm_cache_zero_refold(ws):
+async def test_trace_summary_warm_cache_zero_refold(ws):
     ws.record_tool_result("s1", "nmap", "x" * 300)
     calls = []
 
-    def fake_compress(prompt, content):
+    async def fake_compress(prompt, content):
         calls.append(content)
         return "ok" if len(calls) == 1 else "X" * 500
 
     a = make_assembler(ws, compress=fake_compress)
-    a.precompress("planner")                        # 预热:折一次并落盘
+    await a.precompress("planner")                  # 预热:折一次并落盘
     assert len(calls) == 1
-    ctx, _, over = a.assemble("planner", budget=20)  # 溢出尝试超限 → 机械兜底
+    ctx, _, over = await a.assemble("planner", budget=20)  # 溢出尝试超限 → 机械兜底
     tr = comp(a, "trace")
     assert tr.level == 2                            # 命中预热缓存 → 摘要档
     assert "# 本轮工具轨迹(摘要)" in ctx
@@ -196,40 +196,40 @@ def test_trace_summary_warm_cache_zero_refold(ws):
     assert len(calls) == 2                          # 预热 1 + 溢出尝试 1(超限);摘要档读缓存
 
 
-def test_trace_summary_refolds_on_round_change(ws):
+async def test_trace_summary_refolds_on_round_change(ws):
     calls = []
 
-    def fake_compress(prompt, content):
+    async def fake_compress(prompt, content):
         calls.append(content)
         return "[摘要]"
 
     ws.record_tool_result("s1", "nmap", "port 22 open")
     a = make_assembler(ws, compress=fake_compress)
-    a.precompress("planner")
+    await a.precompress("planner")
     assert len(calls) == 1
 
     ws.add_event("planner", "replan")   # 新轮次:边界推进
     ws.record_tool_result("s2", "nc", "banner")
-    a.precompress("planner")                        # 本轮事件集变了 → 重折(替换,不累计)
+    await a.precompress("planner")                  # 本轮事件集变了 → 重折(替换,不累计)
     assert len(calls) == 2
 
 
-def test_trace_summary_cache_persists_across_load(tmp_path, ws):
+async def test_trace_summary_cache_persists_across_load(tmp_path, ws):
     ws.record_tool_result("s1", "nmap", "port 22 open")
     calls = []
 
-    def fake_compress(prompt, content):
+    async def fake_compress(prompt, content):
         calls.append(content)
         return "[摘要]"
 
     a = make_assembler(ws, compress=fake_compress)
-    a.precompress("planner")
+    await a.precompress("planner")
     assert len(calls) == 1
     ws.sync()
 
     ws2 = Workspace.load("run-tools", root=tmp_path)
     a2 = make_assembler(ws2, compress=fake_compress)
-    a2.precompress("planner")
+    await a2.precompress("planner")
     assert len(calls) == 1                          # 签名缓存恢复 → 不重折
 
 

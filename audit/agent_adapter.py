@@ -6,6 +6,7 @@ does not patch or mutate the agent package.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from copy import deepcopy
@@ -202,10 +203,10 @@ class AgentAuditEvaluator(Evaluator):
             Role.EVALUATOR_TASK: REFLEXION_SYSTEM,
         }.get(role, "")
 
-    def review(self, ctx: str) -> EvalResult:
+    async def review(self, ctx: str) -> EvalResult:
         attempt = self._ensure_attempt()
         attempt.plan = blueprint_to_plan(self.bindings.blueprint())
-        self.plan_evaluation = self.plan_evaluator.evaluate(attempt, ctx=ctx)
+        self.plan_evaluation = await self.plan_evaluator.evaluate(attempt, ctx=ctx)
         verdict = (
             Verdict.PASS
             if self.plan_evaluation.decision == "pass"
@@ -224,7 +225,7 @@ class AgentAuditEvaluator(Evaluator):
             total_usage=self.plan_evaluator.last_usage,
         )
 
-    def step_eval(self, ctx: str) -> EvalResult:
+    async def step_eval(self, ctx: str) -> EvalResult:
         attempt = self._ensure_attempt()
         step = self.bindings.current_step()
         observation = str(self.bindings.observation() or "")
@@ -248,7 +249,7 @@ class AgentAuditEvaluator(Evaluator):
         repeated = signature in self.seen_calls
         self.seen_calls.add(signature)
         attempt.steps.extend([call, result])
-        item = self.step_evaluator.evaluate_step(
+        item = await self.step_evaluator.evaluate_step(
             attempt,
             call,
             result,
@@ -309,11 +310,11 @@ class AgentAuditEvaluator(Evaluator):
                 return Diagnosis.DRIFT
         return Diagnosis.OTHER
 
-    def reflect(self, ctx: str) -> EvalResult:
+    async def reflect(self, ctx: str) -> EvalResult:
         attempt = self._ensure_attempt()
         if self.plan_evaluation is None:
             attempt.plan = blueprint_to_plan(self.bindings.blueprint())
-            self.plan_evaluation = self.plan_evaluator.evaluate(attempt)
+            self.plan_evaluation = await self.plan_evaluator.evaluate(attempt)
         attempt.ended_at = utc_now()
         attempt.submitted_flag = self.bindings.submitted_flag()
         steps = self.step_evaluator.summarize(self.step_items)
@@ -323,7 +324,7 @@ class AgentAuditEvaluator(Evaluator):
             flag.valid,
             steps.score,
         )
-        task = self.task_evaluator.evaluate(
+        task = await self.task_evaluator.evaluate(
             attempt,
             self.plan_evaluation,
             steps,
@@ -360,14 +361,15 @@ class AgentAuditEvaluator(Evaluator):
             total_usage=self.task_evaluator.last_usage,
         )
 
-    def eval_goals(
+    async def eval_goals(
         self,
         ctx: str,
         goals: list[dict],
         dag_summary: str,
     ) -> list:
         if self.bindings.goal_evaluator is not None:
-            return self.bindings.goal_evaluator(ctx, goals, dag_summary)
+            r = self.bindings.goal_evaluator(ctx, goals, dag_summary)
+            return await r if asyncio.iscoroutine(r) else r
         return []
 
     def _emit(self, kind: str, detail: dict) -> None:

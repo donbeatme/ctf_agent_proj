@@ -8,6 +8,8 @@
 - engine 集成:RealExecutor 接 Executor 契约跑通到 DONE,submitted_flag 落账
 """
 
+import asyncio
+
 from agent.blueprint import Blueprint, Step
 from agent.engine import Engine, EngineState
 from ctf_platform.errors import DownloadError
@@ -26,11 +28,11 @@ class _FakeRunner:
         self.calls = []
         self.python_calls = []
 
-    def run(self, cmd, **kw):
+    async def run(self, cmd, **kw):
         self.calls.append((cmd, kw))
         return _outcome("ssh", cmd)
 
-    def run_python(self, code, **kw):
+    async def run_python(self, code, **kw):
         self.python_calls.append((code, kw))
         return _outcome("ssh", ["python", "script"])
 
@@ -54,8 +56,8 @@ def _tr(name, arguments, result):
 # ===== trace 归一与 result 提取 =====
 
 
-def test_run_normalizes_trace_and_extracts_flag():
-    def llm(*, system, prompt, tools, tool_exec, **kw):
+async def test_run_normalizes_trace_and_extracts_flag():
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
         assert "run_command" in [s["function"]["name"] for s in tools]
         return _tool_result(
             _tr("run_command", '{"command": "echo hi"}', {"ok": True, "stdout": "hi"}),
@@ -63,7 +65,7 @@ def test_run_normalizes_trace_and_extracts_flag():
         )
 
     ex = RealExecutor(llm_fn=llm, runner=_FakeRunner())
-    res = ex.run(None, "ctx")
+    res = await ex.run(None, "ctx")
     assert isinstance(res, ExecResult)
     assert res.tool_calls == [
         {"tool": "run_command", "args": {"command": "echo hi"}, "result": {"ok": True, "stdout": "hi"}},
@@ -74,11 +76,11 @@ def test_run_normalizes_trace_and_extracts_flag():
     assert res.total_usage["total_tokens"] == 2
 
 
-def test_run_extracts_answer_when_no_flag():
-    def llm(*, system, prompt, tools, tool_exec, **kw):
+async def test_run_extracts_answer_when_no_flag():
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
         return _tool_result(_tr("answer", '{"text": "结论: 明文为 hello"}', {"answer": "ok"}))
 
-    res = RealExecutor(llm_fn=llm, runner=_FakeRunner()).run(None, "ctx")
+    res = await RealExecutor(llm_fn=llm, runner=_FakeRunner()).run(None, "ctx")
     assert res.result == {"answer": "结论: 明文为 hello"}
     assert res.tool_calls[0]["tool"] == "answer"
 
@@ -86,14 +88,14 @@ def test_run_extracts_answer_when_no_flag():
 # ===== 复合 tool_exec =====
 
 
-def test_exec_tool_delegates_builtins_to_engine():
+async def test_exec_tool_delegates_builtins_to_engine():
     calls = []
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
         # 执行侧工具本地处理;其余委托引擎注入的 tool_exec
-        r1 = tool_exec("run_command", {"command": "ls"})
-        r2 = tool_exec("get_doc", {"doc_id": "ctf-pwn"})
-        r3 = tool_exec("submit_flag", {"flag": "CTF{flag}"})
+        r1 = await tool_exec("run_command", {"command": "ls"})
+        r2 = await tool_exec("get_doc", {"doc_id": "ctf-pwn"})
+        r3 = await tool_exec("submit_flag", {"flag": "CTF{flag}"})
         calls.append((r1, r2, r3))
         # 真实 chat_with_tools 会把每次 tool_exec 结果追加进 trace
         return _tool_result(_tr("submit_flag", '{"flag": "CTF{flag}"}',
@@ -107,7 +109,7 @@ def test_exec_tool_delegates_builtins_to_engine():
     ws = MockWorkspace()
     ws.meta["task"] = {"challenge_dir": "D:/chal"}
     ex = RealExecutor(llm_fn=llm, runner=_FakeRunner(), workspace=ws)
-    res = ex.run(None, "ctx", tool_exec=engine_tool_exec)
+    res = await ex.run(None, "ctx", tool_exec=engine_tool_exec)
     r1, r2, r3 = calls[0]
     assert "stdout" in r1                      # run_command 走 runner
     assert r2 == {"doc_id": "ctf-pwn", "content": "doc"}  # get_doc 委托引擎
@@ -115,12 +117,12 @@ def test_exec_tool_delegates_builtins_to_engine():
     assert res.result == {"flag": "CTF{flag}"}
 
 
-def test_run_command_forwards_category_and_tool_id():
+async def test_run_command_forwards_category_and_tool_id():
     captured = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        captured["ret"] = tool_exec("run_command",
-                                    {"command": "gdb -q ./pwn1", "tool_id": "gdb"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        captured["ret"] = await tool_exec("run_command",
+                                          {"command": "gdb -q ./pwn1", "tool_id": "gdb"})
         return _tool_result(_tr("run_command", '{"command": "gdb -q ./pwn1"}', "ok"))
 
     runner = _FakeRunner()
@@ -128,38 +130,38 @@ def test_run_command_forwards_category_and_tool_id():
     ws.meta["task"] = {"challenge_dir": "D:/chal"}
     ex = RealExecutor(llm_fn=llm, runner=runner, workspace=ws)
     step = Step(id="s1", instruction="调试", criterion="拿到泄漏", skill_id="ctf-pwn.exploit")
-    ex.run(step, "ctx")
+    await ex.run(step, "ctx")
     cmd, kw = runner.calls[0]
     assert cmd == "gdb -q ./pwn1"
     assert kw["category"] == "ctf-pwn"        # 从 skill_id 前缀解析
     assert kw["tool_id"] == "gdb"
 
 
-def test_run_python_forwards_tool_id():
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        tool_exec("run_python", {"code": "from pwn import *", "tool_id": "pwntools"})
+async def test_run_python_forwards_tool_id():
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        await tool_exec("run_python", {"code": "from pwn import *", "tool_id": "pwntools"})
         return _tool_result(_tr("run_python", '{"code": "x"}', "ok"))
 
     runner = _FakeRunner()
     ws = MockWorkspace()
     ws.meta["task"] = {"challenge_dir": "D:/chal"}
-    RealExecutor(llm_fn=llm, runner=runner, workspace=ws).run(None, "ctx")
+    await RealExecutor(llm_fn=llm, runner=runner, workspace=ws).run(None, "ctx")
     code, kw = runner.python_calls[0]
     assert code == "from pwn import *"
     assert kw["tool_id"] == "pwntools"
 
 
-def test_category_falls_back_to_workspace_challenge_type():
+async def test_category_falls_back_to_workspace_challenge_type():
     captured = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        captured["ret"] = tool_exec("run_command", {"command": "strings a.bin"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        captured["ret"] = await tool_exec("run_command", {"command": "strings a.bin"})
         return _tool_result(_tr("run_command", '{"command": "strings a.bin"}', "ok"))
 
     ws = MockWorkspace()
     ws.meta["task"] = {"challenge_type": "ctf-reverse", "challenge_dir": "D:/chal"}
     runner = _FakeRunner()
-    RealExecutor(llm_fn=llm, runner=runner, workspace=ws).run(None, "ctx")
+    await RealExecutor(llm_fn=llm, runner=runner, workspace=ws).run(None, "ctx")
     assert runner.calls[0][1]["category"] == "ctf-reverse"
 
 
@@ -187,54 +189,54 @@ def _submit_exe(llm, *, adapter=None, task=None):
     return RealExecutor(llm_fn=llm, runner=_FakeRunner(), workspace=ws, adapter=adapter)
 
 
-def test_submit_flag_calls_adapter_and_returns_verdict():
+async def test_submit_flag_calls_adapter_and_returns_verdict():
     seen = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        seen["r"] = tool_exec("submit_flag", {"flag": "CTF{x}"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        seen["r"] = await tool_exec("submit_flag", {"flag": "CTF{x}"})
         return _tool_result(_tr("submit_flag", '{"flag": "CTF{x}"}', seen["r"]))
 
     adapter = _FakeAdapter()
     ex = _submit_exe(llm, adapter=adapter, task={"challenge_id": "c-1"})
-    res = ex.run(None, "ctx")
+    res = await ex.run(None, "ctx")
     assert adapter.calls == [("c-1", "CTF{x}")]          # 真调 adapter
     assert seen["r"] == {"submitted": True, "flag": "CTF{x}",
                          "ok": True, "correct": True, "message": "ok"}
     assert res.result == {"flag": "CTF{x}"}              # flag 仍进 result → engine 提取
 
 
-def test_submit_flag_record_only_when_no_adapter():
+async def test_submit_flag_record_only_when_no_adapter():
     seen = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        seen["r"] = tool_exec("submit_flag", {"flag": "CTF{x}"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        seen["r"] = await tool_exec("submit_flag", {"flag": "CTF{x}"})
         return _tool_result(_tr("submit_flag", '{"flag": "CTF{x}"}', seen["r"]))
 
     ex = _submit_exe(llm, task={"challenge_id": "c-1"})   # 无 adapter
-    ex.run(None, "ctx")
+    await ex.run(None, "ctx")
     assert seen["r"] == {"submitted": True, "flag": "CTF{x}"}   # 历史行为:仅记录
 
 
-def test_submit_flag_record_only_when_no_challenge_id():
+async def test_submit_flag_record_only_when_no_challenge_id():
     seen = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        seen["r"] = tool_exec("submit_flag", {"flag": "CTF{x}"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        seen["r"] = await tool_exec("submit_flag", {"flag": "CTF{x}"})
         return _tool_result(_tr("submit_flag", '{"flag": "CTF{x}"}', seen["r"]))
 
     adapter = _FakeAdapter()
     ex = _submit_exe(llm, adapter=adapter)                 # task 无 challenge_id
-    ex.run(None, "ctx")
+    await ex.run(None, "ctx")
     assert adapter.calls == []                            # 无 id 不提交
     assert seen["r"]["correct"] is None
     assert "缺少 challenge_id" in seen["r"]["message"]
 
 
-def test_submit_flag_adapter_exception_returns_failure():
+async def test_submit_flag_adapter_exception_returns_failure():
     seen = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        seen["r"] = tool_exec("submit_flag", {"flag": "CTF{x}"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        seen["r"] = await tool_exec("submit_flag", {"flag": "CTF{x}"})
         return _tool_result(_tr("submit_flag", '{"flag": "CTF{x}"}', seen["r"]))
 
     class _Boom:
@@ -242,7 +244,7 @@ def test_submit_flag_adapter_exception_returns_failure():
             raise RuntimeError("平台挂了")
 
     ex = _submit_exe(llm, adapter=_Boom(), task={"id": "c-9"})
-    ex.run(None, "ctx")
+    await ex.run(None, "ctx")
     assert seen["r"]["ok"] is False                      # 失败降级,不崩
     assert seen["r"]["correct"] is None
     assert "提交异常" in seen["r"]["message"]
@@ -264,10 +266,10 @@ class _TargetAdapter:
                 "access_url": f"{self._host}:{self._port}", "status": "running"}
 
 
-def _capture_prompt(task=None, adapter=None):
+async def _capture_prompt(task=None, adapter=None):
     seen = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
         seen["prompt"] = prompt
         return _tool_result(_tr("answer", '{"text": "ok"}', {"answer": "ok"}))
 
@@ -275,43 +277,43 @@ def _capture_prompt(task=None, adapter=None):
     if task:
         ws.meta["task"] = task
     ex = RealExecutor(llm_fn=llm, runner=_FakeRunner(), workspace=ws, adapter=adapter)
-    ex.run(None, "ctx")
+    await ex.run(None, "ctx")
     return seen["prompt"]
 
 
-def test_target_injected_from_task_target_info():
+async def test_target_injected_from_task_target_info():
     task = {"challenge_id": "c-1",
             "target_info": {"kind": "host_port", "host": "abc.tcp-ctf2.dasctf.com",
                             "port": 9999, "source": "target"}}
-    prompt = _capture_prompt(task=task)
+    prompt = await _capture_prompt(task=task)
     assert "# 目标地址(靶机)" in prompt
     assert "abc.tcp-ctf2.dasctf.com:9999" in prompt
 
 
-def test_target_injected_from_task_target_string():
-    prompt = _capture_prompt(task={"target": "1.2.3.4:31337"})
+async def test_target_injected_from_task_target_string():
+    prompt = await _capture_prompt(task={"target": "1.2.3.4:31337"})
     assert "# 目标地址(靶机)" in prompt
     assert "1.2.3.4:31337" in prompt
 
 
-def test_target_fmt_url_kind():
+async def test_target_fmt_url_kind():
     task = {"target_info": {"kind": "url", "scheme": "http", "host": "10.0.0.5", "port": 80}}
-    assert "http://10.0.0.5" in _capture_prompt(task=task)
+    assert "http://10.0.0.5" in await _capture_prompt(task=task)
 
 
-def test_target_lazy_start_when_container_and_adapter():
+async def test_target_lazy_start_when_container_and_adapter():
     adapter = _TargetAdapter()
     task = {"challenge_id": "c-77", "has_container": 1}   # 无 target → 惰性开靶
-    prompt = _capture_prompt(task=task, adapter=adapter)
+    prompt = await _capture_prompt(task=task, adapter=adapter)
     assert adapter.starts == ["c-77"]
     assert "tcp.example.com:9999" in prompt
 
 
-def test_target_resolved_once_per_executor():
+async def test_target_resolved_once_per_executor():
     """单 Executor 多步只开一次靶(缓存),不重复消耗靶机配额。"""
     seen = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
         seen["prompt"] = prompt
         return _tool_result(_tr("answer", '{"text": "ok"}', {"answer": "ok"}))
 
@@ -319,13 +321,13 @@ def test_target_resolved_once_per_executor():
     ws = MockWorkspace()
     ws.meta["task"] = {"challenge_id": "c-1", "has_container": 1}
     ex = RealExecutor(llm_fn=llm, runner=_FakeRunner(), workspace=ws, adapter=adapter)
-    ex.run(None, "ctx")
-    ex.run(None, "ctx")   # 第二次 run 不再 start_target
+    await ex.run(None, "ctx")
+    await ex.run(None, "ctx")   # 第二次 run 不再 start_target
     assert adapter.starts == ["c-1"]
 
 
-def test_target_none_without_container_no_target():
-    prompt = _capture_prompt(task={"challenge_id": "c-1"})   # 非容器、无 target
+async def test_target_none_without_container_no_target():
+    prompt = await _capture_prompt(task={"challenge_id": "c-1"})   # 非容器、无 target
     assert "# 目标地址(靶机)" not in prompt
 
 
@@ -433,36 +435,36 @@ def test_cwd_unknown_root_raises():
         assert "无法确定题目附件目录" in str(exc)
 
 
-def test_run_command_outside_cwd_returns_error():
+async def test_run_command_outside_cwd_returns_error():
     """LLM 传目录外 cwd → _run_command 捕获 ValueError 返回 {"error":...},不执行。"""
     seen = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        seen["r"] = tool_exec("run_command", {"command": "cat token.txt", "cwd": "C:/Users"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        seen["r"] = await tool_exec("run_command", {"command": "cat token.txt", "cwd": "C:/Users"})
         return _tool_result(_tr("run_command", '{"command": "cat token.txt"}', seen["r"]))
 
     ws = MockWorkspace()
     ws.meta["task"] = {"challenge_dir": "D:/chal"}
     runner = _FakeRunner()
     ex = RealExecutor(llm_fn=llm, runner=runner, workspace=ws)
-    ex.run(None, "ctx")
+    await ex.run(None, "ctx")
     assert "error" in seen["r"]
     assert "题目附件目录" in seen["r"]["error"]
     assert runner.calls == []  # 被拒,未进 runner
 
 
-def test_run_python_outside_cwd_returns_error():
+async def test_run_python_outside_cwd_returns_error():
     seen = {}
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        seen["r"] = tool_exec("run_python", {"code": "print(1)", "cwd": "C:/"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        seen["r"] = await tool_exec("run_python", {"code": "print(1)", "cwd": "C:/"})
         return _tool_result(_tr("run_python", '{"code": "print(1)"}', seen["r"]))
 
     ws = MockWorkspace()
     ws.meta["task"] = {"challenge_dir": "D:/chal"}
     runner = _FakeRunner()
     ex = RealExecutor(llm_fn=llm, runner=runner, workspace=ws)
-    ex.run(None, "ctx")
+    await ex.run(None, "ctx")
     assert "error" in seen["r"]
     assert runner.python_calls == []
 
@@ -470,22 +472,22 @@ def test_run_python_outside_cwd_returns_error():
 # ===== 异常保护 =====
 
 
-def test_llm_exception_returns_error_observation():
-    def llm(**kw):
+async def test_llm_exception_returns_error_observation():
+    async def llm(**kw):
         raise RuntimeError("boom")
 
-    res = RealExecutor(llm_fn=llm, runner=_FakeRunner()).run(None, "ctx")
+    res = await RealExecutor(llm_fn=llm, runner=_FakeRunner()).run(None, "ctx")
     assert isinstance(res, ExecResult)
     assert "异常" in res.observation
     assert res.tool_calls is None
 
 
-def test_tool_loop_error_preserves_partial_trace():
+async def test_tool_loop_error_preserves_partial_trace():
     """工具循环超上限:部分轨迹保留进 ExecResult.tool_calls(喂 run.log/events/flag 提取)。"""
     from agent.llm_api import ToolLoopError
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        tool_exec("run_command", {"command": "strings a.bin"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        await tool_exec("run_command", {"command": "strings a.bin"})
         raise ToolLoopError("工具循环超过上限 8 轮", trace=[
             {"name": "run_command", "arguments": '{"command": "strings a.bin"}',
              "result": {"ok": True, "stdout": "CTF{partial}"}},
@@ -493,7 +495,7 @@ def test_tool_loop_error_preserves_partial_trace():
              "result": {"submitted": True}},
         ])
 
-    res = RealExecutor(llm_fn=llm, runner=_FakeRunner()).run(None, "ctx")
+    res = await RealExecutor(llm_fn=llm, runner=_FakeRunner()).run(None, "ctx")
     assert isinstance(res, ExecResult)
     assert res.tool_calls == [
         {"tool": "run_command", "args": {"command": "strings a.bin"},
@@ -505,11 +507,11 @@ def test_tool_loop_error_preserves_partial_trace():
     assert "超上限" in res.observation
 
 
-def test_llm_missing_trace_returns_empty():
-    def llm(*, system, prompt, tools, tool_exec, **kw):
+async def test_llm_missing_trace_returns_empty():
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
         return ToolResult(content="直接给出结论", trace=[], rounds=1, total_usage=None)
 
-    res = RealExecutor(llm_fn=llm, runner=_FakeRunner()).run(None, "ctx")
+    res = await RealExecutor(llm_fn=llm, runner=_FakeRunner()).run(None, "ctx")
     assert res.tool_calls is None
     assert "直接给出结论" in res.observation
 
@@ -550,9 +552,9 @@ def _resp(*bodies):
 
 
 def test_real_executor_engine_integration_done():
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        tool_exec("run_command", {"command": "echo hi"})
-        tool_exec("submit_flag", {"flag": "CTF{real}"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        await tool_exec("run_command", {"command": "echo hi"})
+        await tool_exec("submit_flag", {"flag": "CTF{real}"})
         return _tool_result(
             _tr("run_command", '{"command": "echo hi"}', "ok"),
             _tr("submit_flag", '{"flag": "CTF{real}"}', {"submitted": True}),
@@ -579,8 +581,8 @@ def test_engine_records_submission_verdict_to_ee():
     """executor 提交 flag(adapter 判定 correct=True)→ engine 落 ws.meta["submission"],
     ee 上下文可见提交判定(ee 判 is_completed/DONE 的核心证据)。"""
 
-    def llm(*, system, prompt, tools, tool_exec, **kw):
-        tool_exec("submit_flag", {"flag": "CTF{ok}"})
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        await tool_exec("submit_flag", {"flag": "CTF{ok}"})
         return _tool_result(
             _tr("submit_flag", '{"flag": "CTF{ok}"}',
                 {"submitted": True, "ok": True, "correct": True, "message": "success"}),
@@ -613,6 +615,6 @@ def test_engine_records_submission_verdict_to_ee():
     assert sub["correct"] is True
     assert sub["message"] == "success"
     # ee 上下文经 SubmissionComponent 投影出提交判定
-    ctx, _, _ = ws.assembler.assemble(Role.EVALUATOR_STEP)
+    ctx, _, _ = asyncio.run(ws.assembler.assemble(Role.EVALUATOR_STEP))
     assert "# 已提交 flag" in ctx
     assert "正确(平台确认)" in ctx

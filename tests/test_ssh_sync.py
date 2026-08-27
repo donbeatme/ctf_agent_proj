@@ -7,30 +7,30 @@
 - _needs_upload 判定:不存在/大小不同/mtime 不同 → 需上传
 """
 
+import asyncssh
 from pathlib import Path
 
 from agent.ssh import SshBackend
 
 
-def test_transport_error_records_event(monkeypatch):
+async def test_transport_error_records_event(monkeypatch):
     """SSH 传输层异常 → ssh.exec_failed 进审计线(区别于命令失败)。"""
     from opslog import attach, detach
 
-    class _Chan:
-        def open_session(self):
+    class _Client:
+        async def run(self, cmd_str, *, check=False, encoding=None):
             raise ConnectionResetError("connection reset by peer")
 
-    class _Client:
-        def get_transport(self):
-            return _Chan()
+    async def _fake_connect(self):
+        return _Client()
 
-    monkeypatch.setattr(SshBackend, "_connect", lambda self: _Client())
+    monkeypatch.setattr(SshBackend, "_connect", _fake_connect)
     sb = SshBackend(host="vm", user="u", password="p")
     seen = []
     sink = lambda kind, detail: seen.append((kind, detail))
     attach(sink)
     try:
-        out = sb.exec("ls", timeout=5)
+        out = await sb.exec("ls", timeout=5)
     finally:
         detach(sink)
     assert out.returncode is None
@@ -42,8 +42,8 @@ def test_transport_error_records_event(monkeypatch):
 
 class _Stat:
     def __init__(self, size, mtime):
-        self.st_size = size
-        self.st_mtime = mtime
+        self.size = size
+        self.mtime = mtime
 
 
 class FakeSftp:
@@ -54,23 +54,44 @@ class FakeSftp:
         self.put_calls = []
         self.mkdirs = []
 
-    def stat(self, path):
+    async def stat(self, path):
         if path in self.files:
             return _Stat(*self.files[path])
-        raise FileNotFoundError(path)
+        raise asyncssh.SFTPNoSuchFile(path)
 
-    def mkdir(self, path):
+    async def mkdir(self, path):
         self.mkdirs.append(path)
 
-    def put(self, local, remote):
+    async def put(self, local, remote):
         self.put_calls.append((local, remote))
         st = Path(local).stat()
         self.files[remote] = (st.st_size, int(st.st_mtime))
 
 
+class _FakeConn:
+    """替身连接:start_sftp_client 返回托管 FakeSftp 的异步上下文管理器。"""
+
+    def __init__(self, sftp):
+        self._sftp = sftp
+
+    async def start_sftp_client(self):
+        return _SftpCtx(self._sftp)
+
+
+class _SftpCtx:
+    def __init__(self, sftp):
+        self._sftp = sftp
+
+    async def __aenter__(self):
+        return self._sftp
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 def _backend(sftp):
     b = SshBackend(host="h", user="root", password="p", workdir="/root/ctf")
-    b._sftp = sftp  # 绕过 paramiko 连接,注入替身
+    b._client = _FakeConn(sftp)  # 绕过 asyncssh 连接,注入替身
     return b
 
 
@@ -85,10 +106,10 @@ def _make_tree(root: Path):
     (root / "__pycache__").mkdir()
 
 
-def test_sync_uploads_new_files_and_mkdirs(tmp_path):
+async def test_sync_uploads_new_files_and_mkdirs(tmp_path):
     _make_tree(tmp_path)
     sftp = FakeSftp()
-    _backend(sftp).sync(tmp_path)
+    await _backend(sftp).sync(tmp_path)
 
     uploaded = {remote for _, remote in sftp.put_calls}
     # _ctf_exec.py 必须上传:run_python 先本地写脚本再 sync,忽略会导致远端缺文件
@@ -97,28 +118,28 @@ def test_sync_uploads_new_files_and_mkdirs(tmp_path):
     assert "/root/ctf/sub" in sftp.mkdirs
 
 
-def test_sync_skips_unchanged_on_second_run(tmp_path):
+async def test_sync_skips_unchanged_on_second_run(tmp_path):
     _make_tree(tmp_path)
     sftp = FakeSftp()
     b = _backend(sftp)
-    b.sync(tmp_path)
+    await b.sync(tmp_path)
     first = list(sftp.put_calls)
-    b.sync(tmp_path)
+    await b.sync(tmp_path)
     assert sftp.put_calls == first  # 无变化 → 不重复上传
 
 
-def test_sync_repaints_modified_file(tmp_path):
+async def test_sync_repaints_modified_file(tmp_path):
     _make_tree(tmp_path)
     sftp = FakeSftp()
     b = _backend(sftp)
-    b.sync(tmp_path)
+    await b.sync(tmp_path)
     # 改动一个文件(size 变化)再同步 → 只有它被重新上传
     (tmp_path / "a.txt").write_text("hello modified", encoding="utf-8")
-    b.sync(tmp_path)
+    await b.sync(tmp_path)
     assert sftp.put_calls[-1] == (str(tmp_path / "a.txt"), "/root/ctf/a.txt")
 
 
-def test_needs_upload():
+async def test_needs_upload():
     import tempfile
 
     sftp = FakeSftp()
@@ -126,9 +147,9 @@ def test_needs_upload():
         p = Path(d) / "f.txt"
         p.write_text("data", encoding="utf-8")
         sftp.files["/r/f.txt"] = (p.stat().st_size, int(p.stat().st_mtime))
-        assert SshBackend._needs_upload(sftp, p, "/r/f.txt") is False
-        assert SshBackend._needs_upload(sftp, p, "/r/none.txt") is True
+        assert await SshBackend._needs_upload(sftp, p, "/r/f.txt") is False
+        assert await SshBackend._needs_upload(sftp, p, "/r/none.txt") is True
         sftp.files["/r/f2.txt"] = (p.stat().st_size, int(p.stat().st_mtime) + 1)
-        assert SshBackend._needs_upload(sftp, p, "/r/f2.txt") is True
+        assert await SshBackend._needs_upload(sftp, p, "/r/f2.txt") is True
         sftp.files["/r/f3.txt"] = (p.stat().st_size + 1, int(p.stat().st_mtime))
-        assert SshBackend._needs_upload(sftp, p, "/r/f3.txt") is True
+        assert await SshBackend._needs_upload(sftp, p, "/r/f3.txt") is True

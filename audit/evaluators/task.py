@@ -41,7 +41,7 @@ class TaskReflectionEvaluator:
         self.llm = llm
         self.last_usage: dict | None = None
 
-    def evaluate(
+    async def evaluate(
         self,
         attempt: CTFAttempt,
         plan: PlanEvaluation,
@@ -53,7 +53,7 @@ class TaskReflectionEvaluator:
         process_has_issue = plan.decision == "revise" or steps.retry_count > 0 or steps.escalate_count > 0
         # valid=None(无判定来源)不再算"失败":动态 flag/未配置规则时提交过即可 pass,避免 REPLAN 死循环
         needs_reflection = flag.valid is False or process_has_issue
-        reflection = self._reflect(attempt, plan, steps, flag, metrics, ctx=ctx) if needs_reflection else None
+        reflection = await self._reflect(attempt, plan, steps, flag, metrics, ctx=ctx) if needs_reflection else None
         if flag.valid is True:
             reason = "flag 验证通过"
             if process_has_issue:
@@ -70,7 +70,7 @@ class TaskReflectionEvaluator:
             reason = "未提交 flag，任务未完成"
         return TaskEvaluation(decision=decision, reason=reason, reflection=reflection)
 
-    def _reflect(
+    async def _reflect(
         self,
         attempt: CTFAttempt,
         plan: PlanEvaluation,
@@ -92,7 +92,7 @@ class TaskReflectionEvaluator:
             "attempt": redact(attempt.to_dict()),
         }
         try:
-            result: LlmChatResult = self.llm.complete([
+            result: LlmChatResult = await self.llm.complete([
                 {"role": "system", "content": REFLEXION_SYSTEM},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ])

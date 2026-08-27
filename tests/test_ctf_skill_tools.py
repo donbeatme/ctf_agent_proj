@@ -254,7 +254,7 @@ def test_add_tools_merges():
 # ===== 工具目录组件(全量菜单,step 绑定 skill 才渲染) =====
 
 
-def test_tool_directory_render_full():
+async def test_tool_directory_render_full():
     from agent.blueprint import Blueprint, Step
     from agent.ctx import ToolDirectoryComponent
     from agent.schema import Role
@@ -294,15 +294,15 @@ def test_tool_directory_render_full():
     assert comp3.render() == ""
 
     # planner 上下文也接收目录(全量)
-    ctx, _, _ = ws.assembler.assemble(Role.PLANNER)
+    ctx, _, _ = await ws.assembler.assemble(Role.PLANNER)
     assert "# 工具目录" in ctx and "- sqlmap:" in ctx
 
 
-def test_executor_accepts_tool_exec():
+async def test_executor_accepts_tool_exec():
     from agent.blueprint import Step
     from agent.executor import MockExecutor
 
     step = Step(id="s1", instruction="x", criterion="y")
     ex = MockExecutor(observation="ok")
-    res = ex.run(step, "ctx", tool_exec=lambda name, args: {"ok": True})
+    res = await ex.run(step, "ctx", tool_exec=lambda name, args: {"ok": True})
     assert res.observation == "ok"

@@ -76,7 +76,7 @@ class StepAcceptanceEvaluator:
         """任务完成或中止时释放该任务的在线降级状态。"""
         self._online_disabled_reasons.pop(attempt_id, None)
 
-    def evaluate(self, attempt: CTFAttempt) -> StepEvaluation:
+    async def evaluate(self, attempt: CTFAttempt) -> StepEvaluation:
         """批量兼容入口；事件驱动 pipeline 使用 evaluate_step。"""
         pairs = self.pairs(attempt)
         seen = set()
@@ -96,7 +96,7 @@ class StepAcceptanceEvaluator:
                 else "step-%d" % (position + 1)
             )
             items.append(
-                self.evaluate_step(
+                await self.evaluate_step(
                     attempt,
                     call,
                     result,
@@ -107,7 +107,7 @@ class StepAcceptanceEvaluator:
             )
         return self.summarize(items)
 
-    def evaluate_step(
+    async def evaluate_step(
         self,
         attempt: CTFAttempt,
         call: TrajectoryStep,
@@ -132,7 +132,7 @@ class StepAcceptanceEvaluator:
         else:
             try:
                 online_evaluator = self._online_evaluator()
-                response = online_evaluator(
+                response = await online_evaluator(
                     outputs=self._messages(attempt, call, result, position, ctx=ctx),
                 )
                 self.last_usage = _sum_usage(llm_api.pop_token_log())
@@ -222,11 +222,11 @@ class StepAcceptanceEvaluator:
         except Exception as exc:
             raise RuntimeError("MissingLLMApiKey") from exc
         try:
-            from agentevals.trajectory.llm import create_trajectory_llm_as_judge
+            from agentevals.trajectory.llm import create_async_trajectory_llm_as_judge
         except ImportError as exc:
             raise RuntimeError("AgentEvalsNotInstalled") from exc
         judge = LlmApiAgentEvalsClient(role="evaluator_step")
-        self._cached_online_evaluator = create_trajectory_llm_as_judge(
+        self._cached_online_evaluator = create_async_trajectory_llm_as_judge(
             prompt=STEP_PROMPT,
             judge=judge,
             model=_llm_api.role_model("evaluator_step"),
