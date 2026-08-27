@@ -608,13 +608,14 @@ class AgentCommComponent(CtxComponent):
     _KINDS = (EventKind.PLAN_REVIEW, EventKind.STEP_EVAL, EventKind.REFLECT, EventKind.SCHEDULING)
 
     def _cut(self) -> int:
-        """最近一次 replan 事件的事件列表索引;无 replan 则 -1(渲染全部)。"""
-        cut = -1
-        if self._ws is not None:
-            for i, e in enumerate(self._ws.events):
-                if e.kind == EventKind.REPLAN:
-                    cut = i
-        return cut
+        """最近一次 replan 事件的事件列表索引;无 replan 则 -1(渲染全部)。
+
+        O(1) 读:replan 边界由投影折叠维护(proj.last_replan_idx),不再线性扫事件流。
+        """
+        ws = self._ws
+        if ws is None or getattr(ws, "proj", None) is None:
+            return -1
+        return ws.proj.last_replan_idx
 
     def _events(self):
         ws = self._ws
@@ -797,10 +798,10 @@ class HistoryComponent(CtxComponent):
 
     def _events(self):
         ws = self._ws
-        if ws is None:
+        if ws is None or getattr(ws, "proj", None) is None:
             return []
-        return [e for e in ws.events
-                if e.agent != Role.SYSTEM and e.kind in (EventKind.STEP_RECORD, EventKind.REPLAN)]
+        # O(1) 读:step_record + replan(非 system)子列表由投影折叠维护,不再线性扫事件流
+        return list(ws.proj.history_events)
 
     def _pass_events(self):
         return [e for e in self._events() if e.verdict == Verdict.PASS]
@@ -1161,13 +1162,14 @@ class TraceComponent(CtxComponent):
         await self._fold()
 
     def _cut(self) -> int:
-        """最近一次 replan 事件的事件列表索引;无 replan 则 -1(渲染全部)。"""
-        cut = -1
-        if self._ws is not None:
-            for i, e in enumerate(self._ws.events):
-                if e.kind == EventKind.REPLAN:
-                    cut = i
-        return cut
+        """最近一次 replan 事件的事件列表索引;无 replan 则 -1(渲染全部)。
+
+        O(1) 读:replan 边界由投影折叠维护(proj.last_replan_idx),不再线性扫事件流。
+        """
+        ws = self._ws
+        if ws is None or getattr(ws, "proj", None) is None:
+            return -1
+        return ws.proj.last_replan_idx
 
     def _events(self):
         ws = self._ws
