@@ -10,11 +10,12 @@
 import json
 from pathlib import Path
 
+from agent.blueprint import Blueprint, Step
 from agent.engine import Engine, EngineState
 from agent.executor import MockExecutor
 from agent.planner import Planner
-from agent.schema import EventKind, Role
-from agent.workspace import MockWorkspace
+from agent.schema import EventKind, EvalSource, Role
+from agent.workspace import MockWorkspace, Workspace
 from audit import AgentAuditService, AgentRuntimeBindings
 from audit.agent_adapter import AuditExperienceDocStore
 from audit.settings import Settings
@@ -110,6 +111,41 @@ def test_audit_evaluator_wiring_end_to_end(tmp_path):
     dumped = json.loads(audit_out.read_text(encoding="utf-8"))
     assert "steps" not in dumped and "attempt" not in dumped  # 轨迹真源是 events.jsonl,不双写
     assert dumped["flag"]["valid"] is None and dumped["flag"]["submitted"] is False  # 未提交 → 无判定来源,REPLAN 收敛 FAILED
+
+
+def test_audit_events_cqrs_roundtrip_and_projection_isolation(tmp_path):
+    """audit 事件真实持久化 → load 重放:typed 归一化、不入 turn/history 投影、标准投影不受污染。"""
+    ws = Workspace.create("run-audit", {"q": "x"}, root=tmp_path)
+    sink = lambda kind, detail: ws.add_event(Role.SYSTEM, kind, **detail)  # 镜像 main._workspace_event_sink
+    bp = Blueprint(meta={"task": "t"})
+    bp.add_step(Step(id="s1", instruction="做", criterion="可验收"))
+    ws.set_blueprint(bp)
+    sink("audit_plan_review", {"decision": "pass", "score": 0.95,
+                               "issues": ["s3 与 s4 职责重叠"], "suggestions": ["拆分 s3"]})
+    ws.record_opinion(EvalSource.STEP_EVAL, "retry", "s1 要更具体", step_id="s1")
+    sink("audit_step_eval", {"step_id": "s1", "decision": "retry", "score": 0.4,
+                             "reasoning": "缺少 flag 证据", "diagnosis": "incomplete"})
+    ws.record_step("s1", "pass", "完成", status="PASSED")
+    sink("audit_reflect", {"decision": "pass", "reason": "目标达成", "flag_valid": True, "store_error": None})
+    ws.sync()
+
+    ws2 = Workspace.load("run-audit", root=tmp_path)
+    # 1) 3 个 audit 事件全走 typed 通道(load 归一化后非退化 dict)
+    for kind in (EventKind.AUDIT_PLAN_REVIEW, EventKind.AUDIT_STEP_EVAL, EventKind.AUDIT_REFLECT):
+        hits = [e for e in ws2.events if e.kind == kind]
+        assert hits, f"缺少 audit 事件 {kind}"
+        assert all(not isinstance(e.detail, dict) for e in hits)
+    # 2) audit 是 observability 通道,不入 turn/history 投影
+    assert [t.source.value for t in ws2.proj.turn] == ["step_eval"]
+    assert [e.kind for e in ws2.proj.history_events] == ["replan", "step_record"]
+    # 3) 标准投影不受 audit 事件污染
+    assert ws2.proj.replans == 1 and ws2.proj.run_tokens == 0
+    assert ws2.proj.steps["s1"].verdict == "pass"
+    # 4) typed 字段正确(step_id 在 Event 顶层,detail 持有评分/诊断)
+    pr = next(e.detail for e in ws2.events if e.kind == EventKind.AUDIT_PLAN_REVIEW)
+    assert pr.score == 0.95 and "拆分 s3" in pr.suggestions
+    se = [e for e in ws2.events if e.kind == EventKind.AUDIT_STEP_EVAL]
+    assert se[0].step_id == "s1" and se[0].detail.diagnosis == "incomplete"
 
 
 # ===== 接线:audit 优先读 challenge_type(回退 category)=====
