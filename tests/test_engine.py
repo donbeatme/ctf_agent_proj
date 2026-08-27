@@ -19,11 +19,15 @@ import asyncio
 import pytest
 
 from agent.blueprint import Blueprint, Step, StepStatus
+from agent.env_providers import SandboxHandle, SandboxProvider, SshProvider
 from agent.evaluator import Diagnosis, EvalResult, MockEvaluator, Verdict
 from agent.engine import Engine, EngineState
 from agent.executor import ExecResult, MockExecutor, RealExecutor
 from agent.llm_api import ToolResult
+from agent.scheduler import ExecutionScheduler
+from sandbox_env import SandboxSettings
 from tests.mock_data import MOCK_TASK
+from tests.test_env_providers import FakeSsh
 from agent.planner import Planner
 from agent.schema import (
     EvalEvent,
@@ -127,6 +131,53 @@ def test_happy_path_all_pass_done():
     assert engine.fail_reason is None
     assert all(s.status.value == "PASSED" for s in engine.bp.steps.values())
     assert engine.task_completed is False  # 未打 is_completed,靠全部终态收尾
+
+
+def test_engine_wires_sandbox_session_lifecycle(monkeypatch):
+    """scheduler 接线:run 开会话(acquire 容器)→ handle 注入执行器 → 结束 release(删容器还连接)。"""
+
+    def fake_install(self, tool_ids, *, session_key=None, force=False):
+        return {"installed": list(tool_ids)}
+
+    monkeypatch.setattr("sandbox_env.base.SandboxManager.install_tools", fake_install)
+
+    conns = []
+
+    def factory():
+        c = FakeSsh()
+        conns.append(c)
+        return c
+
+    pool = SshProvider(factory=factory, max_connections=2)
+    provider = SandboxProvider(pool, settings=SandboxSettings(ssh_host="vm"))
+    sched = ExecutionScheduler(providers=[provider])
+    received = []
+
+    class _Exec(MockExecutor):
+        allowed_cwd = "/challenge/x"
+
+        def set_sandbox(self, handle):
+            received.append(handle)
+
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"读题","criterion":"拿到文本","depends_on":[]}]',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=_Exec(observation="执行完成"),
+        scheduler=sched,
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert received and isinstance(received[0], SandboxHandle)   # acquire 的 handle 已注入
+    cmds = [c for c, _ in conns[0].execs]
+    assert any("docker run -d --name" in c and "-ex1" in c for c in cmds)  # acquire 建 actor 容器
+    assert any("docker rm -f" in c for c in cmds)                          # release 删容器
+    assert len(provider._active) == 0                                      # 活跃租约清空
+    assert len(pool._idle) == 1                                            # 连接还池
 
 
 def test_request_stop_fails_run():

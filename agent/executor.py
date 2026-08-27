@@ -295,6 +295,23 @@ class RealExecutor(Executor):
                 return Path(str(v)).resolve()
         return None
 
+    @property
+    def allowed_cwd(self) -> str | None:
+        """执行工作目录根(题目附件目录);None=无法确定。scheduler 开会话时用。"""
+        p = self._allowed_cwd()
+        return str(p) if p else None
+
+    def set_sandbox(self, handle) -> None:
+        """用外部受限句柄(SandboxHandle)接管沙箱执行面,替换自建 CommandRunner。
+
+        引擎接线用:scheduler.acquire 拿到的会话容器 handle 注入这里,后续 run/run_python
+        全经该会话(工具/文件状态横跨步骤持久);执行器只依赖 handle,不直接构造沙箱。
+        """
+        from agent.runner import CommandRunner
+
+        self.runner = CommandRunner(sandbox=handle, timeout=self.runner.timeout,
+                                    max_out=self.runner.max_out, max_err=self.runner.max_err)
+
     def _cwd(self, args: dict) -> str:
         """解析执行工作目录:默认题目附件目录;args.cwd 必须在允许根内,否则拒绝。
 

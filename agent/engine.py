@@ -142,7 +142,7 @@ class Engine:
                  max_cycles=None, max_replans=None, max_stalls=None,
                  max_deadlock_attempts=None, compress=None, context_budget=None,
                  run_token_budget_tokens=None, understander=None, tool_catalog=None,
-                 checker=None, subscribers=None):
+                 checker=None, subscribers=None, scheduler=None):
         from model_config import get_engine_config
         cfg = get_engine_config()
         self.workspace = workspace or MockWorkspace()
@@ -160,6 +160,7 @@ class Engine:
         self.executor = executor
         self.evaluator = evaluator
         self.understander = understander or MockTaskUnderstander()
+        self._scheduler = scheduler  # 可选执行环境调度器(None=执行器自建沙箱,旧路径)
         self.scheduler = Scheduler()
         self.bp = None
         self.current: Step | None = None
@@ -309,6 +310,7 @@ class Engine:
         self._cancel_reason = None
         run_timer = PhaseTimer("run", deadline_ms=self._run_timeout_ms)
         run_timer.__enter__()
+        env_lease = await self._open_env_session()
         try:
             for self._cycle in range(self.max_cycles):
                 if self.scheduler.state in (EngineState.DONE, EngineState.FAILED):
@@ -333,8 +335,26 @@ class Engine:
             self._persist_run_state()
             self.run_result = self._make_run_result()
         finally:
+            if env_lease is not None:
+                await self._scheduler.release(env_lease)  # 删容器 + 还连接(会话结束)
             run_timer.__exit__()
             self._log.close()
+
+    async def _open_env_session(self):
+        """可选接线:配置了 scheduler 时开一个 actor 会话容器,把受限 handle 注入执行器。
+
+        无 scheduler / 执行器不支持接管 / 无法确定工作目录 → 返回 None,走旧路径
+        (执行器自建 SandboxManager)。会话级 lease 跨步骤持有,run 结束 release(删容器)。
+        """
+        if self._scheduler is None or not hasattr(self.executor, "set_sandbox"):
+            return None
+        cwd = getattr(self.executor, "allowed_cwd", None)
+        if not cwd:
+            return None
+        req = self._scheduler.requirement_for(actor_id="ex1", cwd=cwd)
+        lease = await self._scheduler.acquire(req)
+        self.executor.set_sandbox(lease.handle)
+        return lease
 
     async def _init_run(self, raw_content):
         """重置运行态(每次 run 前调用)。
