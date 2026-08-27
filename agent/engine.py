@@ -339,11 +339,11 @@ class Engine:
         恢复内容:
         - ws.blueprint / steps / events / docs / tools / summaries (Workspace.load)
         - scheduler.state / current / fail_reason (ws.meta)
-        - replans / _stalls / _deadlock_attempts (从 replan 事件链重算)
-        - task_completed (从 step_record is_completed 推)
+        - replans / _stalls / task_completed / _goal_complete / turn / turn_consumed /
+          submitted_flag / run_tokens (ws.proj 事件折叠投影)
+        - _deadlock_attempts (ws.meta bootstrap,瞬态计数不事件化)
 
-        不恢复: _obs(最后执行观察,该步重放时重新产生)、turn(本轮意见,从最后
-        replan 之后的 opinion 事件重建)。
+        不恢复: _obs(最后执行观察,该步重放时重新产生)。
         """
         from agent.workspace import Workspace
 
@@ -365,12 +365,19 @@ class Engine:
         run_status = ws.meta.get("run_status", "PLANNING")
         current_step_id = ws.meta.get("current_step")
         engine.fail_reason = ws.meta.get("fail_reason")
-        # 续跑续计 token(断点前的用量在 _persist_run_state 已落 meta);budget 覆盖整次 run
-        engine._run_tokens = ws.meta.get("run_tokens", 0)
-
-        # 从 event 流重建计数器 + turn(在终态早返之前,确保 task_completed 等被恢复)
-        engine._rebuild_from_events(ws)
-        engine._rebuild_turn(ws)
+        # 从事件折叠投影恢复运行态(在终态早返之前,确保 task_completed 等被恢复);
+        # 事件流是唯一事实源,resume 不再线性扫事件流
+        proj = ws.proj
+        engine.replans = proj.replans
+        engine._stalls = proj.stalls
+        engine.task_completed = proj.task_completed
+        engine._goal_complete = dict(proj.goal_complete)
+        engine.turn = list(proj.turn)
+        engine._turn_consumed = proj.turn_consumed
+        engine.submitted_flag = proj.submitted_flag
+        engine._deadlock_attempts = int(ws.meta.get("deadlock_attempts", 0) or 0)
+        # 续跑续计 token:事件折叠为主(完整),旧 run(无 llm_usage 事件)回退 meta 检查点
+        engine._run_tokens = max(proj.run_tokens, ws.meta.get("run_tokens", 0))
 
         if run_status in ("DONE", "FAILED"):
             # 已经是终态,直接返回
@@ -397,66 +404,6 @@ class Engine:
                             max_deadlock_attempts=engine.max_deadlock_attempts)
         asyncio.run(engine._run_loop())
         return engine
-
-    def _rebuild_from_events(self, ws):
-        """从 event 流重建运行时计数器(断点续跑)。
-
-        振荡检测:与 live path 不同,这里无法重建每次 replan 时的历史 DAG,
-        故从 ReplanDetail.changes 字段判断——changes=="无改动" 即为一次 stall。
-        """
-        # goals 已在 resume() 从 meta.goal_list 恢复,这里只重建完成状态
-        self._goal_complete = {}
-        for e in ws.events:
-            if e.kind == EventKind.REPLAN:
-                self.replans += 1
-                detail = e.detail
-                if hasattr(detail, "changes") and detail.changes == "无改动":
-                    self._stalls += 1
-                else:
-                    self._stalls = 0
-            elif e.kind == EventKind.STEP_RECORD:
-                from agent.schema import StepRecordDetail
-                d = e.detail
-                if isinstance(d, StepRecordDetail) and d.is_completed:
-                    self.task_completed = True
-                    # ee 已判任务达成:同步把未决 goal 置完成,消除报告矛盾
-                    for g in self.goals:
-                        self._goal_complete.setdefault(g.id, [])
-            elif e.kind == EventKind.GOAL_EVAL:
-                d = e.detail
-                if hasattr(d, "complete") and d.complete:
-                    self._goal_complete[d.goal_id] = list(getattr(d, "evidence", []) or [])
-
-    def _rebuild_turn(self, ws):
-        """从事件流重建 self.turn:收集最后一次 REPLAN 之后的所有意见事件。
-
-        turn 只在 _replan() 中 append,对应 opinion 事件紧邻 REPLAN 之前;
-        重建时取最后 REPLAN 之后的所有非 PASS 意见事件构建 EvalEvent 列表。
-        """
-        last_replan_idx = -1
-        for i, e in enumerate(ws.events):
-            if e.kind == EventKind.REPLAN:
-                last_replan_idx = i
-
-        opinion_kinds = {
-            EventKind.PLAN_REVIEW, EventKind.STEP_EVAL,
-            EventKind.REFLECT, EventKind.SCHEDULING, EventKind.GOAL_EVAL,
-        }
-        self.turn = []
-        for e in ws.events[last_replan_idx + 1:]:
-            if e.kind not in opinion_kinds:
-                continue
-            detail = e.detail
-            if e.kind == EventKind.GOAL_EVAL:
-                opinion = getattr(detail, "reasoning", "") or ""
-                observation = f"goal_id={getattr(detail, 'goal_id', '')} complete={getattr(detail, 'complete', False)}"
-            else:
-                opinion = getattr(detail, "opinion", "") or ""
-                observation = getattr(detail, "observation", None)
-            self.turn.append(
-                EvalEvent(source=EvalSource(e.kind), opinion=opinion,
-                          observation=observation, step_id=e.step_id),
-            )
 
     @staticmethod
     async def _safe_call(fn, on_error):
@@ -492,6 +439,8 @@ class Engine:
             "fail_reason": self.fail_reason,
             "run_tokens": getattr(self, "_run_tokens", 0),
             "goal_list": [g.model_dump() for g in self.goals],
+            # 瞬态计数不走事件流(纯调度计数器),resume 经 meta bootstrap 恢复
+            "deadlock_attempts": getattr(self, "_deadlock_attempts", 0),
         })
         ws.sync()
 
@@ -653,7 +602,8 @@ class Engine:
             self.workspace.record_step(
                 self.current.id, verdict, self._obs or "",
                 result=self.current.result, attempts=self.current.attempts,
-                is_completed=is_completed, round=self.current.attempts)
+                is_completed=is_completed, status=self.current.status.value,
+                round=self.current.attempts)
 
     def _record_opinion(self, source: EvalSource, res, step_id=None):
         """评估意见落事件流(agent_comm 通道投影源;pass 是闸门,引擎只在非 pass 时调用)。
@@ -791,11 +741,14 @@ class Engine:
             self._log.engine_action(
                 f"mark_revise  " + "  ".join(f"{sid}=REVISE" for sid in revised))
 
-    def _clear_revise(self) -> None:
-        """修订后评审通过:残留 REVISE 步骤回 PENDING(评审通过即视为可执行)。"""
+    def _clear_revise(self) -> list[str]:
+        """修订后评审通过:残留 REVISE 步骤回 PENDING(评审通过即视为可执行)。返回被清步骤。"""
+        cleared = []
         for sid, s in self.bp.steps.items():
             if s.status == StepStatus.REVISE:
                 self.bp.set_status(sid, StepStatus.PENDING)
+                cleared.append(sid)
+        return cleared
 
     async def _resolve_stuck(self) -> None:
         self._deadlock_attempts += 1
@@ -957,6 +910,7 @@ class Engine:
             else:
                 pop_token_log()  # 已从返回值获取,清理 log 中重复记录
             self._run_tokens += pt + ct   # run 级累计(§5.1 预算上限依据)
+            self._emit_llm_usage(role, pt, ct, ms, ctx_size, ok=True)
             self.signals.emit(Signal.LLM_CALL_END, role=role, latency_ms=ms,
                               prompt_tokens=pt, completion_tokens=ct)
             self.signals.emit(Signal.LLM_RESPONSE, role=role, result=result)
@@ -964,8 +918,20 @@ class Engine:
         except Exception as exc:
             ms = int((time.perf_counter() - t0) * 1000)
             pop_token_log()  # 丢弃失败调用的记录
+            self._emit_llm_usage(role, 0, 0, ms, ctx_size, ok=False)
             self.signals.emit(Signal.LLM_CALL_END, role=role, latency_ms=ms, error=exc)
             raise
+
+    def _emit_llm_usage(self, role, pt, ct, ms, ctx_size, ok):
+        """单次 LLM 调用记账落事件流(llm_usage 事件;run_tokens 的投影源)。"""
+        ws = self.workspace
+        if ws is None or not hasattr(ws, "add_event"):
+            return
+        ws.add_event(
+            Role.SYSTEM, EventKind.LLM_USAGE,
+            role=role.value if hasattr(role, "value") else str(role),
+            prompt_tokens=pt, completion_tokens=ct, total_tokens=pt + ct,
+            latency_ms=ms, ctx_size=ctx_size, ok=ok)
 
     @staticmethod
     def _extract_flag(res) -> str | None:
@@ -1082,8 +1048,14 @@ class Engine:
                 self._mark_revise()
                 await self._replan(EvalSource.PLAN_REVIEW, res)
             else:
-                self._clear_revise()
+                cleared = self._clear_revise()
                 self.signals.emit(Signal.PLAN_REVIEW_PASS)
+                ws = self.workspace
+                if ws is not None and hasattr(ws, "add_event"):
+                    # REVISE→PENDING 状态迁移事件化(事件源不可见的状态变更补齐)
+                    ws.add_event(
+                        Role.EVALUATOR_PLAN, EventKind.PLAN_REVIEW_PASS,
+                        reason="plan review passed", revised=cleared)
                 self._go(EngineState.SCHEDULING, "plan review passed")
         elif s == EngineState.SCHEDULING:
             step = self.bp.next_step()
