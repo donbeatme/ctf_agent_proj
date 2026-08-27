@@ -560,9 +560,8 @@ class Engine:
             return
         ws = self.workspace
         if hasattr(ws, "set_blueprint"):
-            ws.set_blueprint(self.bp)
-            ws.add_event(Role.PLANNER, EventKind.REPLAN,
-                        reason=reason, source=source, changes=changes)
+            # set_blueprint 是单一 DAG 写路径(内部发 REPLAN 事件带 DAG 快照)
+            ws.set_blueprint(self.bp, reason=reason, source=source, changes=changes)
             ws.sync()
 
     @staticmethod

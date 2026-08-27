@@ -277,14 +277,15 @@ class CtxAssembler:
         handler(**returns)
 
     def _ingest_planner(self, blueprint=None, reason="", source="", changes="", **kw):
-        """planner 返回 → 当前 DAG:写 blueprint + 推进 replan 边界(本轮意见落回 history)。"""
+        """planner 返回 → 当前 DAG:set_blueprint 单一写路径(内部发 REPLAN 事件带 DAG 快照)。
+
+        物化聚合 + 事件源合一:blueprint 由引擎持有实例,事件流记录规划决策链。
+        """
         ws = self._ws
         if ws is None:
             return
         if blueprint is not None:
-            ws.set_blueprint(blueprint)
-        ws.add_event(Role.PLANNER, EventKind.REPLAN,
-                     reason=reason, source=source, changes=changes)
+            ws.set_blueprint(blueprint, reason=reason, source=source, changes=changes)
         ws.sync()
 
     def _ingest_executor(self, step_id=None, tool_calls=None, result=None, **kw):

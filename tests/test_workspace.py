@@ -166,8 +166,9 @@ def test_sync_load_roundtrip_all_fields(tmp_path, ws):
     assert ws2.steps["s1"].observation == "done"
     assert ws2.steps["s1"].verdict == "pass"
     assert ws2.steps["s1"].attempts == 1
-    assert len(ws2.events) == 1
-    assert ws2.events[0].kind == "step_record"
+    # set_blueprint 是单一写路径:内部发 REPLAN 事件(带 DAG 快照),故 2 条事件
+    assert [e.kind for e in ws2.events] == ["replan", "step_record"]
+    assert ws2.events[0].detail.dag is not None      # REPLAN 事件携带 DAG 快照
 
 
 def test_tools_persist_across_sync_load(tmp_path, ws):

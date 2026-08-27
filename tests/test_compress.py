@@ -52,8 +52,7 @@ def seeded(ws):
     bp = Blueprint(meta={"task": "t"})
     bp.add_step(Step(id="s1", instruction="做", criterion="可验收"))
     bp.add_step(Step(id="s2", instruction="做二", criterion="可验收", depends_on=["s1"]))
-    ws.set_blueprint(bp)
-    ws.add_event("planner", "replan")
+    ws.set_blueprint(bp)                            # 单一写路径:内部发 REPLAN 事件
     ws.record_step("s1", "retry", attempts=1)
     ws.record_step("s1", "pass")
     return bp

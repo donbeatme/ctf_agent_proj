@@ -31,6 +31,7 @@ from agent.ctx import (
     ToolDirectoryComponent,
     TraceComponent,
 )
+from agent.projections import Projection, apply as _apply_proj, replay as _replay_proj
 from agent.schema import (
     EVENT_SCHEMA, EventKind, Role, SOURCE_AGENT, StepResult, normalize_event_detail,
 )
@@ -104,8 +105,9 @@ class Workspace:
         self.run_id = run_id
         self.root = Path(root) / run_id if root else _RUNS_DIR / run_id
         self.meta = {"run_id": run_id, "task": {}, "created_at": _now(), "run_status": "PLANNING"}
+        self.proj = Projection()
         self.blueprint: Blueprint | None = None
-        self.steps: dict[str, StepResult] = {}
+        self.steps: dict[str, StepResult] = self.proj.steps   # 纯投影缓存(add_event 时折叠)
         self.env_state: dict = {}
         self.docs: dict[str, str] = {}           # 技能库检索出的参考文档 {doc_id: 文本}
         self.tools: dict[str, dict] = {}         # 活动工具集(统一形式 {id: {description, parameters}};动态按需注入,默认空)
@@ -185,13 +187,15 @@ class Workspace:
 
     @classmethod
     def load(cls, run_id, root=None) -> "Workspace":
-        """从 runs/<run_id>/ 重建实例(断点续跑)。"""
+        """从 runs/<run_id>/ 重建实例(断点续跑)。
+
+        事件流(events.jsonl)是唯一事实源:steps / blueprint / 计数器从事件重放重建;
+        崩溃窗口(REPLAN 事件丢失但 state.json 有快照)回退 state.json 的 blueprint。
+        """
         ws = cls(run_id, root)
         ws._ensure_dir()
         st = json.loads(ws._read("state.json"))
         ws.meta = st.get("meta") or {}
-        ws.blueprint = Blueprint.from_dict(st["blueprint"]) if st.get("blueprint") else None
-        ws.steps = {sid: StepResult(**d) for sid, d in (st.get("steps") or {}).items()}
         ws.env_state = st.get("env_state") or {}
         ws.docs = st.get("docs") or {}
         ws.tools = st.get("tools") or {}
@@ -206,6 +210,13 @@ class Workspace:
         for e in raw:
             e.detail = normalize_event_detail(e.kind, e.detail)
         ws.events = raw
+        goal_ids = [g.get("id", "") for g in (ws.meta.get("goal_list") or [])]
+        ws.proj = _replay_proj(raw, goal_ids=goal_ids)
+        if ws.proj.blueprint is None and st.get("blueprint"):
+            # 崩溃窗口:REPLAN 事件(含 dag 快照)丢失,回退 state.json 的 blueprint
+            ws.proj.blueprint = Blueprint.from_dict(st["blueprint"])
+        ws.blueprint = ws.proj.blueprint
+        ws.steps = ws.proj.steps
         return ws
 
     def sync(self):
@@ -232,7 +243,8 @@ class Workspace:
         保留 docs/tools 等静态配置与 meta.run_id。持久化实例同步清空 events.jsonl 并写空 state.json。
         """
         self.blueprint = None
-        self.steps = {}
+        self.proj = Projection()
+        self.steps = self.proj.steps
         self.env_state = {}
         self.summaries = {}
         self.experience = []
@@ -254,44 +266,54 @@ class Workspace:
                 "experience": [],
             })
 
-    def set_blueprint(self, bp: Blueprint):
-        """规划产出 / 补丁合并后写入当前 DAG。"""
+    def set_blueprint(self, bp: Blueprint, reason="", source="", changes="",
+                      dag_snapshot=None) -> Event:
+        """规划产出 / 补丁合并后写入当前 DAG(单一 DAG 写路径)。
+
+        物化聚合:引擎 live path 直接改 bp 对象,这里只登记物化实例;同时发一条带
+        DAG 快照的 REPLAN 事件——事件流是唯一事实源,重放靠快照重建 DAG。
+        调用方不再额外 add_event(避免双写);reason/source/changes 经此透传。
+        """
         self.blueprint = bp
+        return self.add_event(
+            Role.PLANNER, EventKind.REPLAN, reason=reason, source=source, changes=changes,
+            dag=dag_snapshot if dag_snapshot is not None else (bp.to_dict() if bp else None),
+        )
 
     def record_submission(self, info: dict):
         """记录 executor 提交 flag 后的判定(正确/错误/仅记录/异常),供 ee/et 组件投影。
 
-        meta["submission"] 是 SubmissionComponent 的投影源;run 级状态,reset 时清除。
-        平台判定权威优先:后来的 correct=None 重提(如 ALREADY_SOLVED)不覆盖已确认的
-        True/False——否则动态 flag 题赢后重提会把正确判定洗成"未知",污染 audit 记录。
+        事件化:写 submission 事件(事实源),折叠由 add_event→apply 完成
+        (proj.submission / submitted_flag 已是权威 correct 优先的结果);
+        meta["submission"] 保留供 SubmissionComponent 投影(兼容期),镜像 proj。
         """
-        old = self.meta.get("submission") or {}
-        if info.get("correct") is None and old.get("correct") is not None:
-            return
+        self.add_event(
+            Role.EXECUTOR, EventKind.SUBMISSION,
+            flag=str(info.get("flag") or ""),
+            ok=info.get("ok"),
+            correct=info.get("correct"),
+            message=info.get("message"),
+        )
+        p = self.proj.submission or {}
         self.meta["submission"] = {
-            "flag": str(info.get("flag") or ""),
-            "ok": info.get("ok"),
-            "correct": info.get("correct"),
-            "message": info.get("message"),
+            "flag": str(p.get("flag") or ""),
+            "ok": p.get("ok"),
+            "correct": p.get("correct"),
+            "message": p.get("message"),
         }
 
     def record_step(self, step_id, verdict, observation="", *, result=None, attempts=0,
-                    is_completed=False, agent=Role.EVALUATOR_STEP, **kw) -> StepResult:
-        """每步执行+验收后落账:写 steps + 追加一条 step_record 事件。
+                    is_completed=False, status=None, agent=Role.EVALUATOR_STEP, **kw) -> StepResult:
+        """每步执行+验收后落账:写 steps(投影折叠)+ 追加一条 step_record 事件。
 
         step_record 是 history 唯一投影源(design/workspace.md §7),事件 detail 需携带
-        该步的 observation / result / attempts / is_completed——观察与产物进事件流,历史投影才读得到。
-        StepResult 同步写入,供断点续跑后的结构化查询(ws.steps[sid].verdict 等)。
+        该步的 observation / result / attempts / is_completed / status——观察、产物与
+        验收时 DAG 状态进事件流,历史投影与 resume 才读得到。ws.steps 由投影维护。
         """
-        sr = StepResult(
-            step_id=step_id, verdict=verdict, observation=observation,
-            result=result or {}, attempts=attempts, is_completed=is_completed,
-        )
-        self.steps[step_id] = sr
         self.add_event(agent, EventKind.STEP_RECORD, step_id=step_id, verdict=verdict,
                        observation=observation, result=result or {},
-                       attempts=attempts, is_completed=is_completed, **kw)
-        return sr
+                       attempts=attempts, is_completed=is_completed, status=status, **kw)
+        return self.steps[step_id]
 
     def set_env(self, key, val):
         self.env_state[key] = val
@@ -401,6 +423,7 @@ class Workspace:
                    step_id=step_id, verdict=verdict, detail=detail, ts=_now(),
                    node_id=node_id, round=rnd)
         self.events.append(ev)
+        _apply_proj(self.proj, ev, len(self.events) - 1)
         if self._persist:
             d = detail if isinstance(detail, dict) else asdict(detail)
             _emit_ops("ws", kind, run_id=self.run_id,
@@ -408,7 +431,7 @@ class Workspace:
                       step_id=step_id, verdict=verdict, node_id=node_id, round=rnd,
                       **{k: v for k, v in d.items()
                          if k not in ("run_id", "node_id", "round", "domain", "event",
-                                      "ts", "seq", "agent", "step_id", "verdict")})
+                                      "ts", "seq", "agent", "step_id", "verdict", "dag")})
             self._ensure_dir()
             with (self.root / "events.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(asdict(ev), ensure_ascii=False) + "\n")
