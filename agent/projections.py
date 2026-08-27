@@ -9,13 +9,21 @@ live path 引擎直接持有物化 blueprint(ws.blueprint,可变聚合)与自身
 取回全部运行态。增量折叠规则与旧 _rebuild_from_events / _rebuild_turn 等价
 (stalls 以 ReplanDetail.changes=="无改动" 判定;turn 在 replan 边界推进
 turn_consumed)。
+
+## step 实例版本(重建侧 + 运行侧契约)
+
+step 实例身份不显式打标,由 REPLAN 谱系派生:step 被 remove 后重加 = 新实例
+(隐式版本),replay 的状态叠加按出生下标过滤,旧实例的 step_record 不污染新实例。
+**运行侧前置契约**:并行下 replan 若重建正在 RUNNING 的 step 实例,必须先取消
+旧实例(token + SKIP + 抑制其 step_record),否则同 step_id 双实例并存——这是
+中断机制(step_cancel)的硬前提,重建侧(本模块)与运行侧由它衔接。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from agent.blueprint import Blueprint, StepStatus
+from agent.blueprint import Blueprint, DONE_STATUSES, StepStatus
 from agent.schema import (
     EvalEvent, EvalSource, EventKind, Role, StepResult,
 )
@@ -124,6 +132,29 @@ def apply(proj: Projection, ev, idx: int) -> None:
         proj.turn.append(_ev_to_eval(ev))
 
 
+def _derive_birth_index(events) -> dict[str, int]:
+    """每个 step_id 在当前 DAG 谱系的出生下标 = 最后一次「重新出现」的 replan 下标。
+
+    step 实例身份不显式打标:remove 后重加 = 新实例(隐式版本),旧实例的
+    step_record 不得叠加到新实例。实例只由 DAG 结构变更(replan)诞生,故谱系
+    级联差即完整版本判别。运行侧(并行下 replan 重建 RUNNING 实例必须先取消
+    旧实例)属中断契约,本函数只负责重建侧。
+    """
+    birth: dict[str, int] = {}
+    present: set[str] = set()
+    for idx, e in enumerate(events):
+        if e.kind != EventKind.REPLAN:
+            continue
+        dag = getattr(e.detail, "dag", None)
+        if not dag:
+            continue
+        S = set((dag.get("steps") or {}).keys())
+        for sid in S - present:          # 谱系里新出现 → 出生于此
+            birth[sid] = idx
+        present = S
+    return birth
+
+
 def replay(events, goal_ids=None) -> Projection:
     """全量重放事件流 → 投影。blueprint 从最后一条 REPLAN 事件的 dag 快照重建
     (无 REPLAN 或快照缺失 → None,由调用方回退 state.json)。"""
@@ -136,10 +167,20 @@ def replay(events, goal_ids=None) -> Projection:
             break
     # REPLAN 快照是规划时刻的 DAG,执行态(步骤状态)可能落后;以 step_record 事件的
     # status 叠加各步最终 DAG 状态(最后一次胜出)——事件源合一,resume 拿到真实终态。
+    # 双守卫(版本正确性):
+    #   ① birth 判别——被 replan remove+重加 = 新实例,旧实例的 step_record 不叠;
+    #   ② 快照终态守卫——快照已是 PASSED/SKIPPED(取消/已执行)= 最新意图,旧记录
+    #      不叠(同时避免 SKIPPED 撞旧记录触发终态保护抛 DAGError)。
     if proj.blueprint is not None:
-        for e in events:
-            if e.kind == EventKind.STEP_RECORD and e.step_id in proj.blueprint.steps:
-                st = getattr(e.detail, "status", None)
-                if st:
-                    proj.blueprint.set_status(e.step_id, StepStatus(st), force=True)
+        birth = _derive_birth_index(events)
+        for idx, e in enumerate(events):
+            if e.kind != EventKind.STEP_RECORD or e.step_id not in proj.blueprint.steps:
+                continue
+            if birth.get(e.step_id, -1) > idx:
+                continue
+            if proj.blueprint.steps[e.step_id].status in DONE_STATUSES:
+                continue
+            st = getattr(e.detail, "status", None)
+            if st:
+                proj.blueprint.set_status(e.step_id, StepStatus(st), force=True)
     return proj

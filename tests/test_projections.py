@@ -1,6 +1,6 @@
 """事件折叠投影(projections.py)测试:replay 确定性 / 各 kind fold / 提交权威规则。"""
 
-from agent.blueprint import Blueprint, Step
+from agent.blueprint import Blueprint, Step, StepStatus
 from agent.projections import Projection, apply, replay
 from agent.schema import (
     EventKind, GoalEvalDetail, LLMUsageDetail, OpinionDetail, ReplanDetail,
@@ -18,6 +18,18 @@ def _bp():
     bp = Blueprint(meta={"task": "t"})
     bp.add_step(Step(id="s1", instruction="做", criterion="可验收"))
     return bp
+
+
+def _dag(*ids, statuses=None):
+    """构造 Blueprint.to_dict() 形状的 DAG 快照(可指定步骤状态,默认 PENDING)。"""
+    statuses = statuses or {}
+    bp = Blueprint(meta={"task": "t"})
+    for sid in ids:
+        s = Step(id=sid, instruction=f"做{sid}", criterion="可验收")
+        if sid in statuses:
+            s.status = StepStatus(statuses[sid])
+        bp.add_step(s)
+    return bp.to_dict()
 
 
 def test_replay_is_deterministic_and_folds_each_kind():
@@ -117,3 +129,72 @@ def test_workspace_events_replay_into_projection(tmp_path):
     assert ws2.proj.steps["s1"].verdict == "pass"
     assert ws2.proj.submitted_flag == "CTF{x}"
     assert ws2.proj.submission["correct"] is True
+
+
+# ===== step 实例版本:重建侧双守卫(出生下标派生 + 快照终态守卫)=====
+
+
+def test_replay_skip_stale_record_after_readd():
+    """v1 s2 PASSED → v2 删 s2 → v3 重加 s2(fresh):旧实例的 PASSED 不叠到新实例。"""
+    events = [
+        _event(EventKind.REPLAN, ReplanDetail(changes="init", dag=_dag("s1", "s2")), agent="planner"),
+        _event(EventKind.STEP_RECORD, StepRecordDetail(observation="o", status="PASSED"),
+               step_id="s2", verdict="pass", agent="evaluator_step"),
+        _event(EventKind.REPLAN, ReplanDetail(changes="rm s2", dag=_dag("s1")), agent="planner"),
+        _event(EventKind.REPLAN, ReplanDetail(changes="readd s2", dag=_dag("s1", "s2")), agent="planner"),
+    ]
+    p = replay(events)
+    assert p.blueprint.steps["s2"].status == StepStatus.PENDING   # 新实例从未执行
+
+
+def test_replay_preserve_same_instance_record():
+    """v1 s1 PASSED → v2 加 s3(s1 同实例未重加):s1 的 PASSED 保留。"""
+    events = [
+        _event(EventKind.REPLAN, ReplanDetail(changes="init", dag=_dag("s1")), agent="planner"),
+        _event(EventKind.STEP_RECORD, StepRecordDetail(observation="o", status="PASSED"),
+               step_id="s1", verdict="pass", agent="evaluator_step"),
+        _event(EventKind.REPLAN, ReplanDetail(changes="add s3", dag=_dag("s1", "s3")), agent="planner"),
+    ]
+    p = replay(events)
+    assert p.blueprint.steps["s1"].status == StepStatus.PASSED
+    assert p.blueprint.steps["s3"].status == StepStatus.PENDING
+
+
+def test_replay_skipped_terminal_not_crashed_or_overlaid():
+    """v1 s2 RETRY 记录 → v2 快照 s2=SKIPPED(取消):不抛 DAGError,SKIPPED 保留。"""
+    events = [
+        _event(EventKind.REPLAN, ReplanDetail(changes="init", dag=_dag("s1", "s2")), agent="planner"),
+        _event(EventKind.STEP_RECORD, StepRecordDetail(observation="o", status="RETRY"),
+               step_id="s2", verdict="retry", agent="evaluator_step"),
+        _event(EventKind.REPLAN, ReplanDetail(changes="cancel s2",
+               dag=_dag("s1", "s2", statuses={"s2": "SKIPPED"})), agent="planner"),
+    ]
+    p = replay(events)
+    assert p.blueprint.steps["s2"].status == StepStatus.SKIPPED
+
+
+def test_replay_retry_then_pass_same_instance():
+    """v1 s1 PENDING → RETRY 记录 → v2 快照 s1=RETRY(非终态)→ PASSED 记录 → 终态 PASSED。"""
+    events = [
+        _event(EventKind.REPLAN, ReplanDetail(changes="init", dag=_dag("s1")), agent="planner"),
+        _event(EventKind.STEP_RECORD, StepRecordDetail(observation="o1", status="RETRY"),
+               step_id="s1", verdict="retry", agent="evaluator_step"),
+        _event(EventKind.REPLAN, ReplanDetail(changes="replan",
+               dag=_dag("s1", statuses={"s1": "RETRY"})), agent="planner"),
+        _event(EventKind.STEP_RECORD, StepRecordDetail(observation="o2", status="PASSED"),
+               step_id="s1", verdict="pass", agent="evaluator_step"),
+    ]
+    p = replay(events)
+    assert p.blueprint.steps["s1"].status == StepStatus.PASSED
+
+
+def test_task_completed_sticky_across_readd():
+    """task_completed 全局粘性:旧实例 is_completed=True 后重加,不回退(flag 已找到=任务完成)。"""
+    events = [
+        _event(EventKind.REPLAN, ReplanDetail(changes="init", dag=_dag("s1")), agent="planner"),
+        _event(EventKind.STEP_RECORD, StepRecordDetail(observation="o", is_completed=True),
+               step_id="s1", verdict="pass", agent="evaluator_step"),
+        _event(EventKind.REPLAN, ReplanDetail(changes="readd", dag=_dag("s1")), agent="planner"),
+    ]
+    p = replay(events, goal_ids=["g1"])
+    assert p.task_completed is True
