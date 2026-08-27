@@ -274,7 +274,12 @@ class Workspace:
         """记录 executor 提交 flag 后的判定(正确/错误/仅记录/异常),供 ee/et 组件投影。
 
         meta["submission"] 是 SubmissionComponent 的投影源;run 级状态,reset 时清除。
+        平台判定权威优先:后来的 correct=None 重提(如 ALREADY_SOLVED)不覆盖已确认的
+        True/False——否则动态 flag 题赢后重提会把正确判定洗成"未知",污染 audit 记录。
         """
+        old = self.meta.get("submission") or {}
+        if info.get("correct") is None and old.get("correct") is not None:
+            return
         self.meta["submission"] = {
             "flag": str(info.get("flag") or ""),
             "ok": info.get("ok"),
@@ -374,6 +379,10 @@ class Workspace:
         """
         agent = SOURCE_AGENT[source]
         verdict = verdict.value if hasattr(verdict, "value") else verdict
+        diagnosis = kw.pop("diagnosis", None)
+        diagnosis = diagnosis.value if hasattr(diagnosis, "value") else diagnosis
+        if diagnosis is not None:
+            kw["diagnosis"] = diagnosis
         return self.add_event(agent, source.value, step_id=step_id, verdict=verdict,
                               opinion=opinion, observation=observation, **kw)
 

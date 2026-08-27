@@ -33,9 +33,10 @@ class ReplanDetail:
 
 @dataclass
 class OpinionDetail:
-    """评估意见(ep/ee/et/scheduling):意见文本 + 可选观察。"""
+    """评估意见(ep/ee/et/scheduling):意见文本 + 可选观察 + 失败分类。"""
     opinion: str = ""
     observation: str | None = None
+    diagnosis: str | None = None  # 仅 ee:未达成原因分类(incomplete/drift/planner_target/other)
 
 
 @dataclass
@@ -86,11 +87,12 @@ class PlanReviewAuditDetail:
 
 @dataclass
 class StepEvalAuditDetail:
-    """audit 步骤验收事件:步骤 id + 决策 + 评分 + 推理。"""
+    """audit 步骤验收事件:步骤 id + 决策 + 评分 + 推理 + 未达成原因三分类。"""
     step_id: str = ""
     decision: str = ""
     score: float = 0.0
     reasoning: str = ""
+    diagnosis: str = ""
 
 
 @dataclass
@@ -342,6 +344,7 @@ class Trigger(StrEnum):
     """重规划触发原因(StateContext.trigger)。"""
     PLAN_REVIEW_FAIL = "plan_review_fail"
     STEP_ESCALATED = "step_escalated"
+    STEP_TARGET_REDESIGN = "step_target_redesign"  # ee 判定步骤目标设计有误,仅重设计该步
     DEADLOCK = "deadlock"
     REFLECT = "reflect"
 
@@ -386,6 +389,7 @@ class EvalEvent(BaseModel):
     opinion: str
     observation: str | None = None
     step_id: str | None = None
+    diagnosis: str | None = None  # 仅 ee:失败分类(引擎路由单节点重设计的证据)
 
     @field_validator("opinion")
     @classmethod
@@ -452,6 +456,7 @@ class Feedback(BaseModel):
     dag: dict | None = None                                    # 当前计划快照(revise 必填)
     turn: list[EvalEvent] = Field(default_factory=list)        # 评估意见(当轮保底)
     state_context: StateContext | None = None                  # 调度器状态注入(触发类型/预算)
+    scope_step_id: str | None = None                           # 单节点重设计:仅允许修改该步,其余不动
 
 
 class PlannerInput(BaseModel):

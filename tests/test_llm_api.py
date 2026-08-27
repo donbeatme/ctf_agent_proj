@@ -285,3 +285,78 @@ def test_request_non_retryable_single_attempt():
 def test_should_retry_classifies_errors():
     assert llm_api._should_retry(RuntimeError("x")) is False
     assert llm_api._should_retry(requests.exceptions.Timeout("x")) is True
+
+
+# ===== 并发安全(RateLimiter / _token_log) =====
+
+def test_rate_limiter_concurrent_acquire_succeeds():
+    """高并发 acquire:所有线程都拿到令牌,且桶容量内不阻塞。"""
+    import threading
+    import time as _time
+
+    rl = llm_api.RateLimiter(rpm=120)
+    out = []
+    lock = threading.Lock()
+
+    def worker():
+        w = rl.acquire()
+        with lock:
+            out.append(w)
+
+    threads = [threading.Thread(target=worker) for _ in range(14)]
+    t0 = _time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(out) == 14                       # 全部拿到令牌
+    assert all(x >= 0 for x in out)             # 等待时间非负
+    assert sum(w == 0 for w in out) >= 12       # 桶容量内多数不等待
+
+
+def test_rate_limiter_unlimited_no_block():
+    """rpm=0(不限速):acquire 立即返回 0,永不等待。"""
+    import threading
+
+    rl = llm_api.RateLimiter(rpm=0)
+    out = []
+    lock = threading.Lock()
+
+    def worker():
+        w = rl.acquire()
+        with lock:
+            out.append(w)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert out == [0.0] * 8
+
+
+def test_token_log_concurrent_append_no_loss_no_dup():
+    """多线程并发 _record_usage 后单次 pop:不丢不重。"""
+    import threading
+
+    llm_api.pop_token_log()  # 清空基线
+    errs = []
+
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+
+    def worker():
+        try:
+            for _ in range(50):
+                llm_api._record_usage("m", usage)
+        except Exception as e:  # noqa: BLE001
+            errs.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errs == []                            # 并发写入不抛
+    u = llm_api.pop_token_log()
+    assert len(u) == 300                         # 6*50 条全在
+    assert sum(x["total_tokens"] for x in u) == 300 * 15

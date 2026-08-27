@@ -159,7 +159,8 @@ def test_apply_tool_returns_probe():
     reg.set_workspace(ws)
     res = reg.call_tool("apply_tool", {"tool_ids": ["sqlmap", "no.such"]})
     assert res["added"] == ["sqlmap"]          # 向后兼容
-    assert res["unknown"] == ["no.such"]       # 向后兼容
+    assert res["pending"] == ["no.such"]       # 目录外名称 → 按需申请(不再 unknown 拒绝)
+    assert res["unknown"] == [] and res["rejected"] == []
     assert "probe" in res                      # 新增 key
     assert "sqlmap" in res["probe"]
     assert res["probe"]["sqlmap"]["status"] in \
@@ -239,6 +240,97 @@ def test_engine_no_checker_no_env_check():
 
 
 # ===== logger 写 run.log =====
+
+
+def test_logger_tool_output_uses_real_newlines(tmp_path):
+    """use_tool/tool_result 不再 !r 转义:换行/缩进以真实字符渲染,续行对齐缩进。"""
+    from agent.logging import EngineLogger
+
+    log = EngineLogger(tmp_path)
+    log.on_run_started(task={})
+    log.on_llm_call_start(role="executor", ctx_size=10)
+    log.on_llm_response(role="executor", result=_FakeExecResult([
+        {
+            "tool": "run_python",
+            "args": {"code": "a = 1\nb = 2\nprint(a + b)"},
+            "result": {"ok": True, "returncode": 0, "stdout": "3\n4\n", "stderr": ""},
+        },
+    ]))
+    log.on_run_end(state="DONE", fail_reason=None, total_cycles=1)
+    text = (tmp_path / "run.log").read_text(encoding="utf-8")
+
+    assert "\\n" not in text            # 无转义换行
+    assert "\\t" not in text            # 无转义 tab
+    assert "code=a = 1\n\t\t  b = 2" in text   # code 参数真实换行 + 续行二级缩进
+    assert "stdout: 3\n\t\t  4" in text      # 工具结果 stdout 真实换行
+
+
+class _FakeExecResult:
+    def __init__(self, tool_calls):
+        self.tool_calls = tool_calls
+        self.observation = "done"
+        self.result = {}
+
+
+def test_logger_tool_arg_string_not_repr_quoted(tmp_path):
+    """普通单行字符串参数不再带 repr 引号。"""
+    from agent.logging import EngineLogger
+
+    log = EngineLogger(tmp_path)
+    log.on_run_started(task={})
+    log.on_llm_call_start(role="executor", ctx_size=10)
+    log.on_llm_response(role="executor", result=_FakeExecResult([
+        {"tool": "run_command", "args": {"command": "pwd; ls"}, "result": "ok"},
+    ]))
+    log.on_run_end(state="DONE", fail_reason=None, total_cycles=1)
+    text = (tmp_path / "run.log").read_text(encoding="utf-8")
+
+    assert "use_tool: run_command(command=pwd; ls)" in text
+
+
+def test_logger_tool_tag_once_and_blank_line_before_result(tmp_path):
+    """多行 use_tool 参数 [tool] 只出现一次(续行二级缩进);use_tool 与 tool_result 空一行。"""
+    from agent.logging import EngineLogger
+
+    log = EngineLogger(tmp_path)
+    log.on_run_started(task={})
+    log.on_llm_call_start(role="executor", ctx_size=10)
+    log.on_llm_response(role="executor", result=_FakeExecResult([
+        {
+            "tool": "run_python",
+            "args": {"code": "a = 1\nb = 2\nprint(a + b)"},
+            "result": {"ok": True, "returncode": 0, "stdout": "3\n4\n", "stderr": ""},
+        },
+    ]))
+    log.on_run_end(state="DONE", fail_reason=None, total_cycles=1)
+    text = (tmp_path / "run.log").read_text(encoding="utf-8")
+
+    assert text.count("[tool]") == 1                  # 每段只出现一次
+    assert "code=a = 1\n\t\t  b = 2" in text          # 续行二级缩进,不带 [tool] 标签
+    assert "print(a + b))\n\n\t\ttool_result:" in text  # use_tool 与 tool_result 空一行
+
+
+def test_logger_verdict_tag_once_per_eval_response(tmp_path):
+    """多行 opinion 不再每行重复 [verdict]:verdict 单行 + opinion 二级缩进续行。"""
+    from agent.logging import EngineLogger
+
+    class _FakeEvalResult:
+        verdict = "FAIL"
+        opinion = "## 评审判定：revise\n\n- 子项一\n- 子项二"
+        is_completed = False
+        observation = "观察到结构缺陷"
+
+    log = EngineLogger(tmp_path)
+    log.on_run_started(task={})
+    log.on_llm_call_start(role="evaluator_step", ctx_size=10)
+    log.on_llm_response(role="evaluator_step", result=_FakeEvalResult())
+    log.on_run_end(state="DONE", fail_reason=None, total_cycles=1)
+    text = (tmp_path / "run.log").read_text(encoding="utf-8")
+
+    assert text.count("[verdict]") == 1          # 每段只出现一次
+    assert "[verdict] FAIL" in text              # verdict 单行
+    assert "\t\topinion: ## 评审判定：revise" in text   # opinion 二级缩进首行
+    assert "\t\t- 子项一" in text                # 续行不再带 [verdict] 标签
 
 
 def test_logger_writes_env_check(tmp_path):

@@ -5,8 +5,14 @@ ToolRegistry 持有实例级 _registry / _docs / _workspace, 消除进程级全�
 ToolRegistry 在 call_tool/openai_tool_specs 时先查自身再 fallback 到全局。
 """
 
+import re
+
 # 模块级全局注册表(外部工具经 @tool 装饰器注册)
 _REGISTRY: dict[str, object] = {}
+
+# 按需包名安全校验(与 sandbox_env.tools._SAFE_NAME_RE 一致):非目录名称要拼进沙箱
+# shell 命令(apt-get/pip),先拦掉元字符,防工具名注入。
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$")
 
 
 # 只读 lookup 工具规格(OpenAI function-calling 格式):skills 只渲染 id+一句话描述,
@@ -163,11 +169,18 @@ class ToolRegistry:
                 return {"error": "工具目录未初始化(Engine 未注入 tool_catalog)"}
             from agent.checks import SkillEnvProbe
             probe = SkillEnvProbe(catalog)
-            added, unknown, probe_map = [], [], {}
+            added, pending, rejected, probe_map = [], [], [], {}
             for tid in tool_ids:
+                if not isinstance(tid, str) or not _TOOL_NAME_RE.match(tid):
+                    rejected.append(tid)
+                    continue
                 meta = catalog.get_tool(tid)
                 if meta is None:
-                    unknown.append(tid)
+                    # 目录外工具(如 wine):接受为"按需申请",沙箱适配器首次使用时动态安装。
+                    # agent 只声明意图,不直接装包(安装能力在沙箱适配器)。
+                    pending.append(tid)
+                    ws.add_tools([{"name": tid,
+                                   "description": f"按需包:{tid}(目录外,首次使用由沙箱自动安装)"}])
                     continue
                 ws.add_tools([{"name": tid, "description": meta["description"],
                                "parameters": {"type": "object", "properties": {}}}])
@@ -176,8 +189,9 @@ class ToolRegistry:
                     probe_map[tid] = probe.probe_tool(tid)
                 except Exception:
                     probe_map[tid] = {"tool_id": tid, "status": "unknown", "check": ""}
-            # 返回追加 probe:每工具可用性探测(只读),向后兼容(只增 key)
-            return {"added": added, "unknown": unknown, "probe": probe_map}
+            # 返回追加 probe:每工具可用性探测(只读)。unknown 向后兼容(本次即 rejected)。
+            return {"added": added, "pending": pending, "unknown": rejected,
+                    "rejected": rejected, "probe": probe_map}
 
         def remove_tool(tool_ids):
             ws = _self._workspace

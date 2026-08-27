@@ -14,6 +14,7 @@
 import json
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -78,23 +79,25 @@ class RateLimiter:
         self._capacity = max(1.0, rpm / 10.0) if rpm > 0 else float("inf")
         self._tokens = self._capacity
         self._last = time.monotonic()
+        self._lock = threading.Lock()   # 逐 goal 线程并发 acquire 时保护桶状态
 
     def acquire(self) -> float:
         """阻塞直到获取一个 token,返回等待秒数(0 = 无需等待/rpm=0 不限速)。"""
         if self._rate == 0.0:
             return 0.0
-        now = time.monotonic()
-        elapsed = now - self._last
-        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
-        self._last = now
-        if self._tokens >= 1.0:
-            self._tokens -= 1.0
-            return 0.0
-        wait = (1.0 - self._tokens) / self._rate
-        time.sleep(wait)
-        self._tokens = 0.0
-        self._last = time.monotonic()
-        return wait
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last
+            self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+            self._last = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return 0.0
+            wait = (1.0 - self._tokens) / self._rate
+            time.sleep(wait)
+            self._tokens = 0.0
+            self._last = time.monotonic()
+            return wait
 
 
 # 模块级单例(config key: llm_rpm)
@@ -131,32 +134,36 @@ class CircuitBreaker:
         self._state = self.CLOSED
         self._failures = 0
         self._opened_at = 0.0
+        self._lock = threading.Lock()   # 逐 goal 线程并发调用时保护熔断状态
 
     def before_call(self):
-        if self._state == self.CLOSED:
-            return
-        if self._state == self.OPEN:
-            if time.monotonic() - self._opened_at >= self._recovery:
-                self._state = self.HALF_OPEN
-            else:
-                raise CircuitBreakerOpen(
-                    f"熔断器 OPEN(已熔断 {(time.monotonic() - self._opened_at):.0f}s,"
-                    f" {self._recovery}s 后探测恢复)")
-        # HALF_OPEN: 放行一个探测请求
+        with self._lock:
+            if self._state == self.CLOSED:
+                return
+            if self._state == self.OPEN:
+                if time.monotonic() - self._opened_at >= self._recovery:
+                    self._state = self.HALF_OPEN
+                else:
+                    raise CircuitBreakerOpen(
+                        f"熔断器 OPEN(已熔断 {(time.monotonic() - self._opened_at):.0f}s,"
+                        f" {self._recovery}s 后探测恢复)")
+            # HALF_OPEN: 放行一个探测请求
 
     def on_success(self):
-        if self._state == self.HALF_OPEN:
-            self._state = self.CLOSED
-        self._failures = 0
+        with self._lock:
+            if self._state == self.HALF_OPEN:
+                self._state = self.CLOSED
+            self._failures = 0
 
     def on_failure(self):
-        self._failures += 1
-        if self._state == self.HALF_OPEN:
-            self._state = self.OPEN
-            self._opened_at = time.monotonic()
-        elif self._failures >= self._threshold:
-            self._state = self.OPEN
-            self._opened_at = time.monotonic()
+        with self._lock:
+            self._failures += 1
+            if self._state == self.HALF_OPEN:
+                self._state = self.OPEN
+                self._opened_at = time.monotonic()
+            elif self._failures >= self._threshold:
+                self._state = self.OPEN
+                self._opened_at = time.monotonic()
 
 
 # 模块级单例(config keys: llm_circuit_breaker_threshold / llm_circuit_breaker_recovery)
@@ -433,22 +440,25 @@ def _should_retry(e):
 # ═══════════════════════════════════════════════════════════
 
 _token_log: list[dict] = []
+_token_log_lock = threading.Lock()   # 逐 goal 线程并发 append + 引擎单线程 drain,防误读/双 drain
 
 
 def _record_usage(model: str, usage) -> None:
     if usage is not None:
-        _token_log.append({
-            "model": model,
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "total_tokens": usage.total_tokens,
-        })
+        with _token_log_lock:
+            _token_log.append({
+                "model": model,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
+            })
 
 
 def pop_token_log() -> list[dict]:
     """取出并清空 token 使用量日志。"""
-    u = list(_token_log)
-    _token_log.clear()
+    with _token_log_lock:
+        u = list(_token_log)
+        _token_log.clear()
     return u
 
 
@@ -742,7 +752,7 @@ def chat_with_tools(prompt=None, system=None, *, messages=None, docs=None, tools
     if max_tool_rounds is None:
         from model_config import get_engine_config
 
-        max_tool_rounds = get_engine_config().get("max_tool_rounds", 24)
+        max_tool_rounds = get_engine_config().get("max_tool_rounds", 8)
 
     if not tools:
         content = chat(prompt=prompt, system=system, messages=messages, docs=docs,

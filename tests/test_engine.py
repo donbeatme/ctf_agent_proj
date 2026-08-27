@@ -17,9 +17,9 @@
 import pytest
 
 from agent.blueprint import Blueprint, Step, StepStatus
-from agent.evaluator import EvalResult, MockEvaluator, Verdict
+from agent.evaluator import Diagnosis, EvalResult, MockEvaluator, Verdict
 from agent.engine import Engine, EngineState
-from agent.executor import MockExecutor, RealExecutor
+from agent.executor import ExecResult, MockExecutor, RealExecutor
 from agent.llm_api import ToolResult
 from tests.mock_data import MOCK_TASK
 from agent.planner import Planner
@@ -1671,3 +1671,248 @@ def test_capability_blocked_sandbox_fails_run():
     engine.run(task)
     assert engine.scheduler.state == EngineState.FAILED
     assert "环境阻塞" in (engine.fail_reason or "")
+
+
+# ===== ee 三分类诊断路由 =====
+
+def _capture_executor(ctxs):
+    """记录每次 executor ctx,并带一条工具调用(喂 trace 通道,供重试档位断言)。"""
+    def run(step, ctx, tool_exec=None):
+        ctxs.append(ctx)
+        return ExecResult(observation="执行完成",
+                          tool_calls=[{"tool": "cmd", "args": {"cmd": "echo probe"}}])
+    return run
+
+
+def test_retry_drift_uses_compressed_ctx():
+    """drift 重试:继承压缩 ctx(trace 摘要档,无 compress → 索引)。"""
+    ctxs = []
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"访问目标","criterion":"拿到入口","depends_on":[]}]',
+            "{}",
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.RETRY, "s1: 方向偏了", diagnosis=Diagnosis.DRIFT),
+            EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=MockExecutor(fn=_capture_executor(ctxs)),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert len(ctxs) == 2
+    assert "本轮工具轨迹" in ctxs[1]
+    assert "本轮工具轨迹(索引)" in ctxs[1]   # drift 重试 trace 被压缩(无 compress → 索引档)
+
+
+def test_retry_incomplete_keeps_raw_ctx():
+    """incomplete 重试:继承前 8 轮原始 ctx,不压缩。"""
+    ctxs = []
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"访问目标","criterion":"拿到入口","depends_on":[]}]',
+            "{}",
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.RETRY, "s1: 8 轮未达成", diagnosis=Diagnosis.INCOMPLETE),
+            EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=MockExecutor(fn=_capture_executor(ctxs)),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert len(ctxs) == 2
+    assert "本轮工具轨迹" in ctxs[1]
+    assert "(索引)" not in ctxs[1]           # incomplete 重试保留原始轨迹
+
+
+def test_retry_planner_target_routes_to_single_node_replan():
+    """RETRY + planner_target:不等重试耗尽,直接升级并触发单节点重设计(scope_step_id)。"""
+    engine, planner = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"访问目标","criterion":"拿到入口","depends_on":[]}]',
+            '{"update":[{"id":"s1","instruction":"改目标","criterion":"新标准"}],"reason":"redesign"}',
+            "{}",
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.RETRY, "s1: 目标本身有误", diagnosis=Diagnosis.PLANNER_TARGET),
+            EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=MockExecutor(observation="执行完成"),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    replan = planner.calls[1]
+    assert replan.feedback.scope_step_id == "s1"
+    assert replan.feedback.state_context.trigger == "step_target_redesign"
+    assert replan.feedback.turn[0].diagnosis == "planner_target"
+
+
+def test_step_eval_escalate_planner_target_scope():
+    """ESCALATE + planner_target:同样走单节点重设计。"""
+    engine, planner = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"访问目标","criterion":"拿到入口","depends_on":[]}]',
+            '{"update":[{"id":"s1","instruction":"改目标","criterion":"新标准"}],"reason":"redesign"}',
+            "{}",
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.ESCALATE, "s1: 目标有误", diagnosis=Diagnosis.PLANNER_TARGET),
+            EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=MockExecutor(observation="执行完成"),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    replan = planner.calls[1]
+    assert replan.feedback.scope_step_id == "s1"
+    assert replan.feedback.state_context.trigger == "step_target_redesign"
+
+
+def test_step_eval_escalate_other_no_scope():
+    """ESCALATE + 非 planner_target:维持全 DAG 重规划,不设 scope。"""
+    engine, planner = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"访问目标","criterion":"拿到入口","depends_on":[]},'
+            '{"id":"s2","instruction":"提交","criterion":"平台判定","depends_on":["s1"]}]',
+            '{"remove":["s1"],"update":[{"id":"s2","depends_on":[]}],"reason":"revise"}',
+            "{}",
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.ESCALATE, "s1: 目标不可达", observation="timeout"),
+            EvalResult(Verdict.PASS, "s2: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=MockExecutor(observation="执行完成"),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    replan = planner.calls[1]
+    assert replan.feedback.scope_step_id is None
+    assert replan.feedback.state_context.trigger == "step_escalated"
+
+
+# ===== goal 评估:逐 goal LLM 软鉴定 + _llm_wrap 记账 =====
+
+def test_goal_eval_llm_soft_adjudication_accounted(monkeypatch):
+    """步骤 PASS 后 goal 评估走真实 StepLLMEvaluator(逐 goal LLM 并行)+ _llm_wrap 记账:
+    _goal_complete 填充、GOAL_EVAL 事件落账、goal 评估 token 用量计入 _run_tokens。"""
+    import json
+
+    from agent import llm_api as ev_llm
+    from agent.evaluator import GOAL_EVAL_SYSTEM, ConfigurableEvaluator, StepLLMEvaluator
+    from agent.schema import Goal, Role
+
+    class _Understander:
+        def understand(self, raw_content):
+            return TaskInput(raw_content=raw_content, goal_list=[Goal(id="g1")])
+
+    goal_calls = {"n": 0}
+
+    def _chat(system=None, prompt=None, model=None, **kw):
+        if system == GOAL_EVAL_SYSTEM:
+            goal_calls["n"] += 1
+            return json.dumps({"complete": True, "evidence": ["s1"], "reasoning": "入口达成"})
+        return json.dumps({"verdict": "pass", "opinion": "ok", "is_completed": False})
+
+    monkeypatch.setattr(ev_llm, "chat", _chat)
+    monkeypatch.setattr(ev_llm, "role_model", lambda role=None: "stub-model")
+    monkeypatch.setattr(ev_llm, "pop_token_log",
+                        lambda: [{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}])
+
+    evaluator = ConfigurableEvaluator({
+        Role.EVALUATOR_PLAN: MockEvaluator(
+            {Role.EVALUATOR_PLAN: EvalResult(Verdict.PASS, "计划可执行")}),
+        Role.EVALUATOR_STEP: StepLLMEvaluator(),
+        Role.EVALUATOR_TASK: MockEvaluator(
+            {Role.EVALUATOR_TASK: EvalResult(Verdict.DONE, "反思完成")}),
+    })
+    engine = Engine(
+        ScriptedPlanner(_plan_responses(
+            '[{"id":"s1","instruction":"访问","criterion":"入口","depends_on":[]}]',
+            "{}")),
+        MockExecutor(observation="执行完成"), evaluator,
+        workspace=MockWorkspace(), understander=_Understander(),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    # 逐 goal LLM 软鉴定恰好 1 次(单 goal)
+    assert goal_calls["n"] == 1
+    # 软鉴定结果落账:_goal_complete + GOAL_EVAL 事件
+    assert engine._goal_complete.get("g1") == ["s1"]
+    goal_events = [e for e in engine.workspace.events if e.kind == EventKind.GOAL_EVAL]
+    assert any(getattr(e.detail, "goal_id", None) == "g1"
+               and getattr(e.detail, "complete", False) for e in goal_events)
+    # goal 评估经 _llm_wrap:token 用量计入 _run_tokens(仅 step_eval 记账不足以到该下界)
+    assert engine._run_tokens >= 45
+
+
+# ===== 早停收口:goal 全完成 + 已提交 flag → task_completed =====
+
+def test_goal_complete_with_submitted_flag_early_stops():
+    """CTF 核心目标=拿到 flag:goal 全部判完成且已提交 flag → 调度器早停,
+    跳过剩余冗余 DAG 步骤直接反思终局(治 web4_0826 赢后还烧 75% token 的浪费)。"""
+    from agent.schema import Goal
+
+    class _Understander:
+        def understand(self, raw_content):
+            return TaskInput(raw_content=raw_content,
+                             goal_list=[Goal(id="g1"), Goal(id="g2")])
+
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"下载附件","criterion":"拿到文件","depends_on":[]},'
+            '{"id":"s2","instruction":"分析找flag","criterion":"提取flag","depends_on":["s1"]}]',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.PASS, "s1: 完成"), EvalResult(Verdict.PASS, "s2: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 目标达成")],
+        executor=MockExecutor(result={"flag": "CTF2{abc}"}),
+        # s1 PASS 后一次 goal 评估即判 g1+g2 全完成
+        goal_responses=lambda ctx, goals, dag: [
+            GoalEvalDetail(goal_id="g1", complete=True, evidence=["s1"], reasoning="拿到附件"),
+            GoalEvalDetail(goal_id="g2", complete=True, evidence=["s1"], reasoning="提交 flag"),
+        ],
+        understander=_Understander(),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert engine.task_completed is True
+    # s2 未执行:s2 PASS 从未发生(早停在 SCHEDULING 前截住)
+    assert engine.bp.steps["s2"].status.value != "PASSED"
+    assert engine.submitted_flag == "CTF2{abc}"
+
+
+def test_goal_complete_without_submitted_flag_does_not_early_stop():
+    """未提交 flag(如纯 web 探测类任务):goal 全完成不置 task_completed,
+    不误停,步骤照常全部走完。"""
+    from agent.schema import Goal
+
+    class _Understander:
+        def understand(self, raw_content):
+            return TaskInput(raw_content=raw_content,
+                             goal_list=[Goal(id="g1"), Goal(id="g2")])
+
+    it = iter([
+        [GoalEvalDetail(goal_id="g1", complete=True, evidence=["s1"], reasoning="下载完成")],
+        [GoalEvalDetail(goal_id="g2", complete=True, evidence=["s2"], reasoning="分析完成")],
+    ])
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"下载附件","criterion":"拿到文件","depends_on":[]},'
+            '{"id":"s2","instruction":"分析","criterion":"完成","depends_on":["s1"]}]',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.PASS, "s1: 完成"), EvalResult(Verdict.PASS, "s2: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 目标达成")],
+        executor=MockExecutor(observation="执行完成"),
+        goal_responses=lambda ctx, goals, dag: next(it),
+        understander=_Understander(),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert engine.task_completed is False
+    assert engine.submitted_flag is None
+    assert engine.bp.steps["s1"].status.value == "PASSED"
+    assert engine.bp.steps["s2"].status.value == "PASSED"

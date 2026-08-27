@@ -99,6 +99,7 @@ class EngineLogger:
 
         for line in self._tick_lines:
             self._write(line)
+        self._tick_lines = []   # 清空:close() 兜底重放时不再重复输出
 
         self._total_ticks += 1
 
@@ -125,15 +126,24 @@ class EngineLogger:
             self._tick_lines.append(f"{_ts()} [{role_v}]")
 
     def _agent_line(self, tag: str, content: str = ""):
-        """在 agent 块内追加一行 tab 缩进。[tag] content 格式。"""
+        """在 agent 块内追加一行 tab 缩进。标签只在首行出现一次,续行走二级缩进。"""
         if content:
-            self._tick_lines.append(f"\t[{tag}] {content}")
+            pref = f"\t[{tag}] "
+            self._tick_lines.append(self._indent_cont(pref + content, "\t\t"))
         else:
             self._tick_lines.append(f"\t[{tag}]")
 
     def _agent_sub(self, text: str):
         """agent 内二级缩进(双 tab),不带 tag。"""
-        self._tick_lines.append(f"\t\t{text}")
+        self._tick_lines.append(self._indent_cont(f"\t\t{text}", "\t\t"))
+
+    @staticmethod
+    def _indent_cont(line: str, prefix: str) -> str:
+        """多行内容:续行统一加 prefix,让换行后的行与首行缩进对齐(工具输出可读)。"""
+        if "\n" not in line:
+            return line
+        lines = line.split("\n")
+        return "\n".join([lines[0]] + [prefix + ln for ln in lines[1:]])
 
     def _close_agent(self):
         self._cur_agent = None
@@ -394,10 +404,11 @@ class EngineLogger:
             elif hasattr(tc, 'output'):
                 output = getattr(tc, 'output', '')
             if output:
-                output_str = str(output)[:200]
-                if len(str(output)) > 200:
-                    output_str = output_str + f" (truncated {len(str(output))}B)"
-                self._agent_sub(f"tool_result: \"{output_str}\"")
+                output_str = self._fmt_value(output)
+                if len(output_str) > 300:
+                    output_str = output_str[:300] + f" (truncated {len(str(output))}B)"
+                self._tick_lines.append("")   # use_tool 与 tool_result 之间空一行
+                self._agent_sub(f"tool_result: {output_str}")
         # 执行报告
         obs = getattr(res, 'observation', '') or ''
         r = getattr(res, 'result', None) or {}
@@ -408,7 +419,7 @@ class EngineLogger:
             self._agent_sub(f"result={result_str}  observation=\"{obs_short}\"")
 
     def _render_evaluator_response(self, role_v, res):
-        """评估器响应:verdict + 全量 opinion + observation(不再截断 200)。"""
+        """评估器响应:verdict 单行 + opinion 多行走二级缩进(不再每行重复 [verdict])。"""
         verdict = getattr(res, 'verdict', None)
         opinion = getattr(res, 'opinion', '') or ''
         is_completed = getattr(res, 'is_completed', False)
@@ -416,10 +427,9 @@ class EngineLogger:
         verdict_str = str(verdict).upper() if verdict else "?"
         if is_completed:
             verdict_str += " is_completed=True"
-        content = verdict_str
+        self._agent_line("verdict", verdict_str)
         if opinion:
-            content += f"  opinion=\"{self._cap(opinion)}\""
-        self._agent_line("verdict", content)
+            self._agent_sub(f"opinion: {self._cap(opinion)}")
         if observation:
             self._agent_sub(f"observation: {self._cap(observation)}")
         # 统计
@@ -435,13 +445,26 @@ class EngineLogger:
         return text[:limit] + f"...(truncated {len(text)}B)"
 
     @staticmethod
+    def _fmt_value(v) -> str:
+        """参数/结果值可读格式化:字符串保留真实换行与缩进(不再 !r 转义 \n\t);
+        dict 逐键换行展开,list 保持单行紧凑。"""
+        if isinstance(v, str):
+            if "\n" in v:
+                return v.replace("\n", "\n  ")
+            return v
+        if isinstance(v, dict):
+            if not v:
+                return "{}"
+            return "\n".join(f"{k}: {EngineLogger._fmt_value(x)}" for k, x in v.items())
+        if isinstance(v, (list, tuple)):
+            return "[" + ", ".join(EngineLogger._fmt_value(x) for x in v) + "]"
+        return str(v)
+
+    @staticmethod
     def _fmt_args(args: dict) -> str:
         if not args:
             return ""
-        parts = []
-        for k, v in args.items():
-            parts.append(f"{k}={v!r}")
-        return ", ".join(parts)
+        return ", ".join(f"{k}={EngineLogger._fmt_value(v)}" for k, v in args.items())
 
     # ── 步骤生命周期 ──
 

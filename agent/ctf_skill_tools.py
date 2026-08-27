@@ -20,7 +20,7 @@ from pathlib import Path
 from agent.schema import ID_PATTERN
 from agent.skills import SKILLS_DIR, SkillLibrary, _parse_frontmatter, _strip_frontmatter
 
-INSTALL_METHODS = ("pip", "apt", "brew", "gem", "go", "manual")
+INSTALL_METHODS = ("pip", "apt", "brew", "gem", "go", "manual", "download")
 
 # install_commands() 提取命令时匹配的安装动词
 _INSTALL_VERB_RE = re.compile(
@@ -147,8 +147,13 @@ TOOL_MANIFEST: list[dict] = [
     _sys("qrencode", "qrencode", "apt", "apt-get install -y qrencode", "qrencode",
          "QR 码生成", ["brew"]),
     # ---- brew-only(install_ctf_tools.sh install_brew 中 apt 没有的) ----
-    _sys("ghidra", "ghidra", "brew", "brew install ghidra", "ghidra",
-         "NSA 逆向框架(headless 反编译)"),
+    # ghidra:官方 zip(12.x 起自带 JRE),Debian 无 brew 改 download 直装;运行时 _adapt 会前置装 curl/unzip
+    _sys("ghidra", "ghidra", "download",
+         "curl -fsSL -o /opt/ghidra.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip "
+         "&& unzip -q /opt/ghidra.zip -d /opt && rm -f /opt/ghidra.zip "
+         "&& ln -sf /opt/ghidra_12.1.3_PUBLIC/support/analyzeHeadless /usr/local/bin/analyzeHeadless",
+         "analyzeHeadless",
+         "NSA 逆向框架(headless 反编译;官方 zip 自带 JRE)"),
     _sys("wireshark", "wireshark", "brew", "brew install wireshark", "wireshark",
          "抓包图形分析"),
     _sys("bind", "bind", "brew", "brew install bind", "dig",

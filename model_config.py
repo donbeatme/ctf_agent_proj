@@ -64,7 +64,8 @@ _ENGINE_DEFAULTS = {
     "max_stalls": 3,
     "max_deadlock_attempts": 3,
     "max_step_attempts": 3,
-    "max_tool_rounds": 24,                 # 执行 Agent 单次工具循环轮数上限
+    "max_tool_rounds": 8,                  # 执行 Agent 单次工具循环轮数上限
+    "goal_eval_max_workers": 4,            # goal 评估并行 worker 上限(逐 goal LLM 线程池)
     "context_budget_tokens": None,         # token 级上下文预算: None=自动 / int=全局 / dict={"role":int|None}
     "context_budget_ratio": 0.9,           # 自动计算时,(context_window - max_output) 的占比
     "max_json_len": 64 * 1024,

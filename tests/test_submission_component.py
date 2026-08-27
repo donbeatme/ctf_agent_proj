@@ -79,6 +79,33 @@ def test_reset_clears_submission():
     assert not _ctx_has_submission(ws, Role.EVALUATOR_STEP)
 
 
+def test_record_submission_keeps_authoritative_correct():
+    """平台已确认 correct=True 后,赢后重提(correct=None, ALREADY_SOLVED)不覆盖权威判定。"""
+    ws = MockWorkspace()
+    ws.record_submission({"flag": "CTF{x}", "ok": True, "correct": True,
+                          "message": "提交成功,答案正确"})
+    # 冗余步骤再次提交 → ALREADY_SOLVED, correct=None,不得洗掉已确认的判定
+    ws.record_submission({"flag": "CTF{x}", "ok": True, "correct": None,
+                          "message": "该题已解决且为动态 flag,无法本地判定"})
+    assert ws.meta["submission"]["correct"] is True
+    ctx, _, _ = ws.assembler.assemble(Role.EVALUATOR_STEP)
+    assert "正确(平台确认)" in ctx
+    # 明确的错误判定仍可作为新的权威结论覆盖
+    ws.record_submission({"flag": "CTF{wrong}", "ok": True, "correct": False,
+                          "message": "提交错误"})
+    assert ws.meta["submission"]["correct"] is False
+
+
+def test_record_submission_unknown_after_unknown_overwrites():
+    """没有已确认判定时(correct=None),普通覆盖语义不变。"""
+    ws = MockWorkspace()
+    ws.record_submission({"flag": "CTF{a}", "ok": True, "correct": None,
+                          "message": "仅记录"})
+    ws.record_submission({"flag": "CTF{b}", "ok": True, "correct": None,
+                          "message": "仍无判定"})
+    assert ws.meta["submission"]["flag"] == "CTF{b}"
+
+
 def test_anchor_never_compressed():
     ws = MockWorkspace()
     ws.record_submission({"flag": "CTF{x}", "correct": True})

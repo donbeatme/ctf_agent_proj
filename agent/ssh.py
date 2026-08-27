@@ -5,7 +5,8 @@
 
 - `exec(cmd_str, timeout)`:在远程 shell 跑一条命令,归一为 ProcOutcome。
 - `sync(local_dir)`:SFTP 增量上传本地目录到远程工作目录(大小+mtime 相同跳过,
-  忽略 .git/__pycache__/执行脚本;不做远程删除)。
+  忽略 .git/__pycache__;不做远程删除)。注意 `_ctf_exec.py` 不能忽略:run_python
+  工具先写该脚本再 sync,忽略会导致远端缺文件无法执行。
 
 paramiko 为可选依赖:方法内 lazy import,未安装时 SshBackend 构造不失败,由
 runner 的 ssh_available() 判定不可用并回落其它目标。
@@ -17,7 +18,7 @@ from pathlib import Path
 
 from opslog import ErrorLevel, record_error
 
-_IGNORED = {".git", "__pycache__", "_ctf_exec.py"}
+_IGNORED = {".git", "__pycache__"}
 
 
 class SshBackend:

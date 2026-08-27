@@ -35,6 +35,10 @@ TRIGGER_NOTES = {
         "有步骤处于 ESCALATED(重试耗尽或判定升级):不再自动重跑,"
         "且会阻塞依赖它的后续步骤,故触发重规划。"
     ),
+    Trigger.STEP_TARGET_REDESIGN: (
+        "有步骤的目标/验收标准被评估判定为设计有误(planner 设计问题,非执行问题):"
+        "重跑该步也无法达成,本次仅重设计该步骤的 instruction/criterion。"
+    ),
     Trigger.DEADLOCK: (
         "调度死锁:没有可执行步骤但任务未完成,通常是前置步骤被升级/阻塞"
         "导致依赖链断裂,触发重规划以重新设计依赖关系。"
@@ -183,6 +187,14 @@ class Planner:
         system = PLAN_SYSTEM
         if pin.feedback and pin.feedback.state_context:
             system += "\n\n" + _render_state_context(pin.feedback.state_context)
+        if pin.feedback and pin.feedback.scope_step_id:
+            scope = pin.feedback.scope_step_id
+            system += (
+                f"\n\n【重规划范围】只允许通过 update 修改步骤 {scope} 的 "
+                "instruction/criterion(可附 skill_id/depends_on);"
+                "其余步骤必须保持原样,不得 add/remove/update。"
+                "在 reason 中说明该步骤目标为何有误及新目标。"
+            )
         # 文档注册:检索结果写入 ws.docs 注册表(投影模型),Docs 组件渲染进 ctx。
         # 保留检索返回的真实 doc_id,planner 才能把 skill_id 绑到技能文档上。
         if self.docs is not None:

@@ -179,12 +179,18 @@ class SandboxManager:
         return out
 
     def _ensure_deps(self, tool_id: str, key: str) -> None:
-        """依赖钩子:工具在沙箱内缺失时安装进该会话容器(持久)。"""
+        """依赖钩子:工具缺失时安装进该会话容器(持久)。
+
+        目录外工具(如 wine)状态为 unknown/missing → 交给 install_tools 动态解析安装;
+        解析不到或装不上在 install_tools 内部收口,这里不抛、不阻塞命令执行。
+        """
         try:
             st = self.tools.probe_tool(tool_id, session_key=key).get("status")
         except Exception:
             return  # 探测失败不阻塞执行,命令如实报错
         if st == "missing":
+            self.tools.install_tools([tool_id], session_key=key)
+        elif st == "unknown" and self.tools.catalog.get_tool(tool_id) is None:
             self.tools.install_tools([tool_id], session_key=key)
 
     # ===== 工具委托 =====

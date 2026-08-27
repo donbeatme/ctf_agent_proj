@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from agent.blueprint import Blueprint, Step
-from agent.evaluator import EvalResult, Evaluator, Verdict
+from agent.evaluator import Diagnosis, EvalResult, Evaluator, Verdict
 from agent.planner import DocStore
 from agent.schema import Role
 
@@ -258,19 +258,56 @@ class AgentAuditEvaluator(Evaluator):
             ctx=ctx,
         )
         self.step_items.append(item)
+        # 平台已确认提交正确 → 该步(含赢后冗余步)直接验收通过并判任务完成:
+        # 修正 _infer_success 关键词误判(observation 含 error/forbidden 也被判失败),
+        # 也让 is_completed 有真实语义(不再自引用 engine.task_completed 的死代码)。
+        submission = self.bindings.submission_result() or {}
+        if submission.get("correct") is True:
+            item.decision = "pass"
+            item.score = max(item.score, 0.9)
+            item.reasoning = f"{item.reasoning}；平台已确认提交正确，强制验收通过"
+            diagnosis = Diagnosis.OTHER
+            is_completed = True
+        else:
+            is_completed = bool(self.bindings.completed())
+            diagnosis = self._classify(item, observation, step, repeated)
         self._emit("audit_step_eval", {
             "step_id": step.id,
             "decision": item.decision,
             "score": item.score,
             "reasoning": item.reasoning,
+            "diagnosis": diagnosis.value,
         })
         return EvalResult(
             Verdict(item.decision),
             item.reasoning,
             observation=observation,
-            is_completed=bool(self.bindings.completed()),
+            is_completed=is_completed,
+            diagnosis=diagnosis,
             total_usage=self.step_evaluator.last_usage,
         )
+
+    @staticmethod
+    def _classify(item: StepEvaluationItem, observation: str, step, repeated: bool) -> Diagnosis:
+        """未达成原因三分类,驱动引擎分流(engine.STEP_EVAL 路由)。离线启发式。
+
+        - 工具循环达上限 → INCOMPLETE:执行未完成,retry 继承前几轮完整 ctx(不按关键词判 pass)。
+        - 同工具+参数反复失败 → DRIFT:方向偏,retry 走压缩 ctx,纠偏意见已随 reasoning 落 agent_comm。
+        - 该步重试耗尽仍失败 → PLANNER_TARGET:步骤目标/验收设计有问题,escalate 单节点重设计。
+        """
+        obs = observation or ""
+        if "工具循环超上限" in obs:
+            item.decision = "retry"
+            item.reasoning = f"{item.reasoning}；执行 Agent 工具循环达上限,步骤未完成,retry 继承前几轮 ctx".strip("；")
+            return Diagnosis.INCOMPLETE
+        if item.success is False and item.decision == "escalate":
+            if step is not None and step.attempts >= step.max_attempts:
+                return Diagnosis.PLANNER_TARGET
+            if repeated:
+                item.decision = "retry"
+                item.reasoning = f"{item.reasoning}；执行方向偏离,retry 继承压缩 ctx 纠偏".strip("；")
+                return Diagnosis.DRIFT
+        return Diagnosis.OTHER
 
     def reflect(self, ctx: str) -> EvalResult:
         attempt = self._ensure_attempt()
@@ -447,4 +484,9 @@ class AgentAuditEvaluator(Evaluator):
     @staticmethod
     def _plan_opinion(evaluation: PlanEvaluation) -> str:
         details = evaluation.issues or evaluation.suggestions
-        return "；".join(details) if details else "计划结构和验收条件完整"
+        if details:
+            return "；".join(details)
+        # 兜底文本要跟随决策:revise 不能说"结构完整"(否则日志自相矛盾)。
+        if evaluation.decision == "revise":
+            return "判定为 revise,但评审未提供具体修订原因/建议"
+        return "计划结构和验收条件完整"

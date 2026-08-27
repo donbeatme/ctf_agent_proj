@@ -242,7 +242,7 @@ class RealExecutor(Executor):
         self.runner = runner or CommandRunner()
         self.workspace = workspace
         if max_tool_rounds is None:
-            max_tool_rounds = get_engine_config().get("max_tool_rounds", 24)
+            max_tool_rounds = get_engine_config().get("max_tool_rounds", 8)
         self.max_tool_rounds = max_tool_rounds
         self.model = model or llm_api.role_model("executor")
         self.workdir = workdir

@@ -27,6 +27,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DF = os.path.join(HERE, "Dockerfile.ctf-sandbox")
 SCRIPT = os.path.join(ROOT, "skills", "ctf-skills", "scripts", "install_ctf_tools.sh")
+# ghidra 官方 zip(经本机代理下载到 downloads/;VM 直连 GitHub 不通,构建改 COPY 烘焙)
+GHIDRA_ZIP = os.path.join(ROOT, "downloads", "ghidra_12.1.3_PUBLIC_20260817.zip")
 REMOTE = "/root/ctf-build"
 
 
@@ -66,13 +68,29 @@ def main() -> None:
         print("[skip-build] 仅复查,不重新构建")
         _exec(client, f"docker run --rm {REMOTE.replace('/ctf-build', '/ctf/scripts')} 2>/dev/null || true")
     else:
-        print(f"[upload] {DF} + install_ctf_tools.sh -> {REMOTE}")
+        if not os.path.exists(GHIDRA_ZIP):
+            sys.exit(
+                f"缺少 ghidra zip: {GHIDRA_ZIP}\n"
+                "请先经代理下载:D:\\pythonProject\\ctf_agent_proj 下\n"
+                "curl -fSL -x http://127.0.0.1:7897 -o downloads/ghidra_12.1.3_PUBLIC_20260817.zip "
+                "https://github.com/NationalSecurityAgency/ghidra/releases/download/"
+                "Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip"
+            )
+        print(f"[upload] {DF} + install_ctf_tools.sh + ghidra.zip -> {REMOTE}")
         _exec(client, f"rm -rf {REMOTE} && mkdir -p {REMOTE}/skills/ctf-skills/scripts")
         sftp = client.open_sftp()
         with sftp.open(f"{REMOTE}/Dockerfile.ctf-sandbox", "wb") as f:
             f.write(_lf(DF))
         with sftp.open(f"{REMOTE}/skills/ctf-skills/scripts/install_ctf_tools.sh", "wb") as f:
             f.write(_lf(SCRIPT))
+        print(f"[upload] ghidra.zip({os.path.getsize(GHIDRA_ZIP)//1024//1024} MB)...", flush=True)
+        with sftp.open(f"{REMOTE}/ghidra.zip", "wb") as f:
+            with open(GHIDRA_ZIP, "rb") as src:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
         sftp.close()
         print("[upload] ok")
 
@@ -92,7 +110,7 @@ def main() -> None:
     _exec(client, "docker run --rm ctf-sandbox:latest bash /opt/install_ctf_tools.sh --verify")
 
     print("\n===== 工具点检 =====")
-    _exec(client, "docker run --rm ctf-sandbox:latest bash -lc 'for c in tshark capinfos exiftool binwalk foremost steghide 7z zsteg r2 objdump vol file gdb; do printf \"%-14s %s\\n\" \"$c\" \"$(command -v $c || echo MISSING)\"; done'")
+    _exec(client, "docker run --rm ctf-sandbox:latest bash -lc 'for c in tshark capinfos exiftool binwalk foremost steghide 7z zsteg r2 objdump vol file gdb analyzeHeadless; do printf \"%-14s %s\\n\" \"$c\" \"$(command -v $c || echo MISSING)\"; done'")
 
     client.close()
     if build_rc != 0:

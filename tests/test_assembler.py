@@ -218,6 +218,23 @@ def test_clear_scope_resets_levels(ws):
     assert all(c.level == 0 for c in a.components("planner"))
 
 
+def test_assemble_start_levels_presets_trace_level(ws):
+    """start_levels 指定组件起始压缩档位:drift 重试把 trace 预压到 summary 档。
+    无 compress 注入时摘要档 render 回落到索引;未知 key/档位保持 raw。"""
+    from agent.ctx import TraceComponent
+
+    a = CtxAssembler(ws)
+    a.register_class("executor", (TraceComponent, (), {"agent": "executor"}))
+    ws.record_tool_call("s1", "cmd", {"cmd": "id"})
+    ctx_raw, _, _ = a.assemble("executor")
+    assert "# 本轮工具轨迹" in ctx_raw
+    assert "(索引)" not in ctx_raw
+    ctx_comp, _, _ = a.assemble("executor", start_levels={"trace": "summary"})
+    assert "本轮工具轨迹(索引)" in ctx_comp
+    ctx_other, _, _ = a.assemble("executor", start_levels={"trace": "bogus", "nope": "summary"})
+    assert "(索引)" not in ctx_other
+
+
 def test_run_end_deletes_all_components(ws):
     a = make_assembler(ws)
     a.assemble("planner", raw_content={"q": "x"})

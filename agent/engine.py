@@ -48,7 +48,7 @@ from agent.schema import (
     Trigger,
 )
 from agent.executor import ExecResult
-from agent.evaluator import EvalResult, Verdict
+from agent.evaluator import Diagnosis, EvalResult, Verdict
 from agent.checks import SkillEnvProbe
 from agent import tools
 from agent.tools import ToolRegistry
@@ -172,6 +172,7 @@ class Engine:
         self.replans = 0
         self._stalls = 0
         self._deadlock_attempts = 0
+        self._retry_mode: str | None = None  # 下一步 EXECUTING 的 ctx 档位(raw/compressed),STEP_EVAL 分流后设置
         self.task_completed = False
         self.submitted_flag: str | None = None  # 已提交的 flag(执行层报告后填充,审计/反思用)
         self.goals: list[Goal] = []            # 任务理解层下发的固定目标(仅 id)
@@ -302,6 +303,7 @@ class Engine:
         self.replans = 0
         self._stalls = 0
         self._deadlock_attempts = 0
+        self._retry_mode = None
         self.task_completed = False
         self.submitted_flag = None
         self.fail_reason = None
@@ -675,11 +677,15 @@ class Engine:
         结构检测,无评估角色)或 assembler 缺失时直写 workspace。
         """
         sid = step_id or (self.current.id if self.current else None)
+        # 仅 ee(step_eval)的失败分类落账;其它来源意见不含 diagnosis,避免无关噪声
+        diagnosis = (getattr(res, "diagnosis", None)
+                     if source == EvalSource.STEP_EVAL else None)
         a = self._assembler()
         role = EVAL_ROLE.get(source)
         if a is not None and role is not None:
             a.ingest(role, verdict=res.verdict, opinion=res.opinion,
-                     observation=res.observation, step_id=sid)
+                     observation=res.observation, step_id=sid,
+                     diagnosis=diagnosis)
             self.signals.emit(Signal.CTX_INGEST, role=role,
                               detail=f"record_opinion ({source.value}, verdict={res.verdict.value})")
             return
@@ -688,6 +694,7 @@ class Engine:
                 source, res.verdict, res.opinion,
                 observation=res.observation,
                 step_id=sid,
+                diagnosis=diagnosis,
             )
 
     def _step_tool_digest(self, step_id: str, max_calls=40, out_chars=200) -> str:
@@ -730,19 +737,27 @@ class Engine:
             for sid, s in bp.steps.items()
         )
 
-    def _state_context(self, source: EvalSource) -> StateContext | None:
+    def _state_context(self, source: EvalSource,
+                       diagnosis=None) -> StateContext | None:
         """调度器状态注入:组装"本轮为何重规划"的结构化事实。只陈述,不下指令。
 
         提示词内容(触发解释/状态语义)在 planner 侧维护;引擎只给触发类型与具体事实。
+        diagnosis 仅用于 STEP_EVAL 分流:判定步骤目标设计有误时走单节点重设计触发。
         """
         if source == EvalSource.PLAN_REVIEW:
             sc = StateContext(trigger=Trigger.PLAN_REVIEW_FAIL)
         elif source == EvalSource.STEP_EVAL:
             sid = self.current.id if self.current else "?"
-            sc = StateContext(
-                trigger=Trigger.STEP_ESCALATED,
-                detail=f"步骤 {sid} 判定升级/失败,处于 ESCALATED",
-            )
+            if diagnosis == Diagnosis.PLANNER_TARGET:
+                sc = StateContext(
+                    trigger=Trigger.STEP_TARGET_REDESIGN,
+                    detail=f"步骤 {sid} 目标/验收标准设计有误(诊断 planner_target),仅重设计该步骤",
+                )
+            else:
+                sc = StateContext(
+                    trigger=Trigger.STEP_ESCALATED,
+                    detail=f"步骤 {sid} 判定升级/失败,处于 ESCALATED",
+                )
         elif source == EvalSource.SCHEDULING:
             sc = StateContext(trigger=Trigger.DEADLOCK, detail=self._blocked_report())
         elif source == EvalSource.REFLECT:
@@ -884,7 +899,13 @@ class Engine:
         dag_summary = self._dag_summary_for_goals()
         raw_goals = [g.model_dump() for g in incomplete]
         try:
-            results = self.evaluator.eval_goals(step_ctx, raw_goals, dag_summary)
+            # goal 评估是 ee 的 LLM 子能力(N 个独立调用,内部线程池并行):
+            # 包 _llm_wrap 统一记账(逐 goal 线程不 drain 全局 log,聚合用量在此兜底)
+            results = self._llm_wrap(
+                Role.EVALUATOR_STEP,
+                lambda: self.evaluator.eval_goals(step_ctx, raw_goals, dag_summary),
+                ctx_size=count_tokens(step_ctx),
+            )
         except Exception as exc:
             self._log.engine_error(f"goal eval 异常: {type(exc).__name__}: {exc}")
             return
@@ -915,6 +936,14 @@ class Engine:
             # 外部评估返回的 detail 契约违规(如空 reasoning)不应崩 run,按同路径降级
             self._log.engine_error(f"goal eval 异常: {type(exc).__name__}: {exc}")
             return
+        if self._goals_all_complete() and self.submitted_flag:
+            # 目标全部达成且已提交 flag(CTF 核心目标=拿到 flag)→ 置位任务完成,
+            # 调度器据此早停收口:跳过剩余冗余步骤直接反思终局。
+            self.task_completed = True
+
+    def _goals_all_complete(self) -> bool:
+        """全部任务目标已被 goal_eval 判为完成(goal_id 均在 _goal_complete)。"""
+        return bool(self.goals) and all(g.id in self._goal_complete for g in self.goals)
 
     def _llm_wrap(self, role, fn, ctx_size=0):
         """包裹一次外部 agent 调用,前后发 llm_call_start/end + response。
@@ -1103,8 +1132,11 @@ class Engine:
             a = self._assembler()
             if a is not None:
                 a.precompress(Role.PLANNER)
+            retry_mode = self._retry_mode or "raw"
+            self._retry_mode = None
+            start_levels = {"trace": "summary"} if retry_mode == "compressed" else None
             ctx = self._assemble_ctx(Role.EXECUTOR, step_id=self.current.id,
-                                     system=self.executor.system)
+                                     system=self.executor.system, start_levels=start_levels)
             t = PhaseTimer("executing", deadline_ms=self._phase_deadline("executing"))
             with t:
                 res: ExecResult = self._safe_call(
@@ -1163,8 +1195,18 @@ class Engine:
                 # ee 已判任务达成:同步把未决 goal 置完成,消除报告矛盾
                 for g in self.goals:
                     self._goal_complete.setdefault(g.id, [])
+            diagnosis = getattr(res, "diagnosis", Diagnosis.OTHER)
             if res.verdict == Verdict.RETRY:
-                if self.current.attempts >= self.current.max_attempts:
+                if diagnosis == Diagnosis.PLANNER_TARGET:
+                    # 目标本身错了:不浪费重试,升级并触发该步骤单节点重设计
+                    self.bp.set_status(self.current.id, StepStatus.ESCALATED)
+                    self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
+                    self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
+                                      verdict=Verdict.ESCALATE, observation=self._obs or "",
+                                      attempts=self.current.attempts)
+                    self._replan(EvalSource.STEP_EVAL, res,
+                                 scope_step_id=self.current.id)
+                elif self.current.attempts >= self.current.max_attempts:
                     self.bp.set_status(self.current.id, StepStatus.ESCALATED)
                     self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
                     self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
@@ -1180,6 +1222,8 @@ class Engine:
                                       verdict=Verdict.RETRY, observation=self._obs or "",
                                       attempts=self.current.attempts)
                     self._log.hint_tick_extra("retry")
+                    # 漂移重试继承压缩 ctx(旧轨迹摘要,避免被错误路径继续带偏);其余保留原始轨迹
+                    self._retry_mode = "compressed" if diagnosis == Diagnosis.DRIFT else "raw"
                     self._go(EngineState.EXECUTING,
                              f"step {self.current.id} retry {self.current.attempts}/{self.current.max_attempts}")
             elif res.verdict == Verdict.ESCALATE:
@@ -1188,7 +1232,8 @@ class Engine:
                 self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
                                   verdict=Verdict.ESCALATE, observation=self._obs or "",
                                   attempts=self.current.attempts)
-                self._replan(EvalSource.STEP_EVAL, res)
+                scope = self.current.id if diagnosis == Diagnosis.PLANNER_TARGET else None
+                self._replan(EvalSource.STEP_EVAL, res, scope_step_id=scope)
             elif res.verdict == Verdict.PASS:
                 self.bp.set_status(self.current.id, StepStatus.PASSED)
                 self._record_step(Verdict.PASS, is_completed=self.task_completed)
@@ -1254,11 +1299,13 @@ class Engine:
         self._fail(f"Planner LLM 调用失败: {type(exc).__name__}: {exc}")
         return None
 
-    def _replan(self, source: EvalSource, res, to_done=False) -> None:
+    def _replan(self, source: EvalSource, res, to_done=False,
+                scope_step_id=None) -> None:
         sid = self.current.id if self.current else None
         self.turn.append(
             EvalEvent(source=source, opinion=res.opinion,
-                      observation=res.observation, step_id=sid)
+                      observation=res.observation, step_id=sid,
+                      diagnosis=getattr(res, "diagnosis", None))
         )
         self._record_opinion(source, res)
         self.replans += 1
@@ -1277,7 +1324,9 @@ class Engine:
             feedback=Feedback(
                 dag=prev_bp.to_dict(),
                 turn=list(self.turn[self._turn_consumed:]),
-                state_context=self._state_context(source),
+                state_context=self._state_context(
+                    source, diagnosis=getattr(res, "diagnosis", None)),
+                scope_step_id=scope_step_id,
             ),
         )
         self._turn_consumed = len(self.turn)

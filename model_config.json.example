@@ -16,7 +16,8 @@
     "max_stalls": 3,
     "max_deadlock_attempts": 3,
     "max_step_attempts": 3,
-    "max_tool_rounds": 24,
+    "max_tool_rounds": 8,
+    "goal_eval_max_workers": 4,
     "context_budget_tokens": {
       "planner": null,
       "evaluator_plan": null,

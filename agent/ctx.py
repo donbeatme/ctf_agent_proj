@@ -327,27 +327,35 @@ class CtxAssembler:
         self._ingest_eval(EvalSource.REFLECT, **kw)
 
     def _ingest_eval(self, source, verdict=None, opinion="", observation=None,
-                     step_id=None, **kw):
+                     step_id=None, diagnosis=None, **kw):
         """评估返回 → agent_comm 通道(record_opinion;pass 是闸门,非 pass 进 ctx)。"""
         ws = self._ws
         if ws is None or source is None or verdict is None:
             return
         ws.record_opinion(source, verdict, opinion,
-                          observation=observation, step_id=step_id)
+                          observation=observation, step_id=step_id,
+                          diagnosis=diagnosis)
 
-    def assemble(self, role, budget=None, protect=None, purpose=None, **kw):
+    def assemble(self, role, budget=None, protect=None, purpose=None,
+                 start_levels=None, **kw):
         """组装某 role 的上下文。
 
         - 每个组件重置档位(level=0)→ create 投影本轮输入/workspace 状态(压缩 api 经 kw 注入)
         - target="ctx" 拼正文,超预算则溢出压缩:LLM 优先,机械降级兜底(protect 保护点名 key)
         - target="system" 拼系统提示词,永不压、不进 ctx 预算
         - purpose: 当前触发压缩的 agent 目的(默认取 ROLE_PURPOSE,可覆盖)
+        - start_levels: 指定组件起始压缩档位 {key: level_name}(如 drift 重试把
+          trace 压到 summary 档);create 后覆盖 level=0,不在表内或名字非法则保持 raw
         返回 (ctx, system, over)。
         """
         ctx_comps, sys_comps = [], []
         for c in self.components(role):
             c.level = 0
             c.create(self._ws, compress=self.compress, **kw)
+            if start_levels and c.key in start_levels:
+                name = start_levels[c.key]
+                if name in c.LEVELS:
+                    c.level = c.LEVELS.index(name)
             (sys_comps if c.target == "system" else ctx_comps).append(c)
         ctx = self._join(ctx_comps)
         over = 0

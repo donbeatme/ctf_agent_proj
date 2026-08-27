@@ -3,7 +3,7 @@
 覆盖:
 - 首次同步上传全部文件,并逐级建 workdir
 - 二次同步:大小+mtime 未变 → 跳过(不重复 put)
-- 文件改动 → 重新上传;忽略 .git/__pycache__/_ctf_exec.py
+- 文件改动 → 重新上传;忽略 .git/__pycache__(但 _ctf_exec.py 必须上传——run_python 依赖它)
 - _needs_upload 判定:不存在/大小不同/mtime 不同 → 需上传
 """
 
@@ -91,7 +91,8 @@ def test_sync_uploads_new_files_and_mkdirs(tmp_path):
     _backend(sftp).sync(tmp_path)
 
     uploaded = {remote for _, remote in sftp.put_calls}
-    assert uploaded == {"/root/ctf/a.txt", "/root/ctf/sub/b.txt"}
+    # _ctf_exec.py 必须上传:run_python 先本地写脚本再 sync,忽略会导致远端缺文件
+    assert uploaded == {"/root/ctf/a.txt", "/root/ctf/sub/b.txt", "/root/ctf/_ctf_exec.py"}
     assert "/root/ctf" in sftp.mkdirs
     assert "/root/ctf/sub" in sftp.mkdirs
 

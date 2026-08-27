@@ -195,8 +195,24 @@ def test_apply_tool_adds_to_ws():
     res = _apply_registry(ws).call_tool("apply_tool", {"tool_ids": ["sqlmap", "ghidra", "no.such"]})
     assert "sqlmap" in ws.tools and "ghidra" in ws.tools
     assert res["added"] == ["sqlmap", "ghidra"]
-    assert res["unknown"] == ["no.such"]
+    # 目录外名称(wine 这类按需包):接受为 pending,进活动工具集,不是拒绝
+    assert res["pending"] == ["no.such"]
+    assert res["unknown"] == [] and res["rejected"] == []
+    assert "no.such" in ws.tools
     assert ws.tools["sqlmap"]["description"]  # 从目录取到 description
+
+
+def test_apply_tool_rejects_unsafe_name():
+    ws = MockWorkspace()
+    ws.tool_catalog = CtfSkillToolCatalog()
+    res = _apply_registry(ws).call_tool(
+        "apply_tool", {"tool_ids": ["wine", "x; rm -rf /", "a b", "3x"]}
+    )
+    assert res["added"] == []
+    assert res["pending"] == ["wine", "3x"]
+    assert res["rejected"] == ["x; rm -rf /", "a b"]
+    assert res["unknown"] == ["x; rm -rf /", "a b"]
+    assert "wine" in ws.tools and "x; rm -rf /" not in ws.tools
 
 
 def test_apply_tool_no_catalog_error():

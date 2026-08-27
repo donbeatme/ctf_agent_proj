@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -68,6 +69,51 @@ class LlmChatClient:
         return self.complete(messages, temperature=temperature).content
 
 
+_SCORE_KEYS = ("score", "质量分", "quality")
+_REASON_KEYS = ("reasoning", "reason", "comment", "opinion", "说明", "依据")
+_VERDICT_KEYS = ("verdict", "decision", "结论")
+_VERDICT_SCORE = {"pass": 0.9, "retry": 0.5, "escalate": 0.1}
+
+
+def _first_field(parsed: dict, keys: tuple, default: Any) -> Any:
+    for key in keys:
+        value = parsed.get(key)
+        if value is not None and value != "":
+            return value
+    return default
+
+
+def _score_safe_content(content: str) -> str:
+    """openevals 解析路径直接 parsed["score"]/parsed["reasoning"],缺键即 KeyError。
+
+    模型未必遵守注入的 JSON schema(可能按 STEP_PROMPT 口径返回 verdict 风格 JSON,
+    或带 markdown 围栏)。这里保证返回给它的 JSON 必有 score/reasoning 两字段:
+    score 缺失时按 verdict 推断,再兜底 0.5;reasoning 缺失用任意解释字段或原文。
+    """
+    try:
+        parsed = json.loads(content or "")
+    except (TypeError, ValueError):
+        block = re.search(r"\{.*\}", content or "", re.S)
+        try:
+            parsed = json.loads(block.group(0)) if block else None
+        except (TypeError, ValueError):
+            parsed = None
+    if not isinstance(parsed, dict):
+        return json.dumps({"score": 0.5, "reasoning": (content or "")[:500]}, ensure_ascii=False)
+    score = _first_field(parsed, _SCORE_KEYS, None)
+    if score is None:
+        verdict = str(_first_field(parsed, _VERDICT_KEYS, "")).lower()
+        score = _VERDICT_SCORE.get(verdict, 0.5)
+    try:
+        score = max(0.0, min(1.0, float(score)))
+    except (TypeError, ValueError):
+        score = 0.5
+    reasoning = _first_field(parsed, _REASON_KEYS, None) or (content or "")[:500]
+    return json.dumps(
+        {"score": round(score, 4), "reasoning": str(reasoning)}, ensure_ascii=False
+    )
+
+
 class LlmApiAgentEvalsClient:
     """满足 AgentEvals ModelClient 协议的客户端，底层走 agent.llm_api。"""
 
@@ -101,6 +147,9 @@ class _LlmApiCompletions:
             temperature=float(request.get("temperature", 0)),
         )
         # token 日志保留在 llm_api 全局日志中，由外层 StepAcceptanceEvaluator 统一 pop。
+        # 仅 schema 驱动的 agentevals 路径做矫正;普通 LlmChatClient 调用不受影响。
+        if schema is not None:
+            content = _score_safe_content(content)
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
             usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0, total_tokens=0),

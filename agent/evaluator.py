@@ -5,13 +5,13 @@
 """
 
 import json
-import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
 
 from agent import llm_api
 from agent.schema import GoalEvalDetail, Role
-from model_config import get as cfg_get
+from model_config import get as cfg_get, get_engine_config
 
 
 class Verdict(StrEnum):
@@ -25,6 +25,21 @@ class Verdict(StrEnum):
     REPLAN = "replan"
 
 
+class Diagnosis(StrEnum):
+    """ee 对"未达成"的结构化分类:失败属于哪一类,引擎据此分流处理。
+
+    INCOMPLETE    执行 Agent 未在 8 轮工具调用内达成验收标准(进度不足/卡壳)
+    DRIFT         执行方向偏了(解题路径偏离,但步骤目标本身正确)
+    PLANNER_TARGET 步骤目标/验收标准本身设计有误,重跑也达不成,需重设计该步
+    OTHER         其它情况(默认)
+    """
+
+    INCOMPLETE = "incomplete"
+    DRIFT = "drift"
+    PLANNER_TARGET = "planner_target"
+    OTHER = "other"
+
+
 @dataclass
 class EvalResult:
     """评估 Agent 的输出。engine 组装 PlannerInput.turn 时映射成 EvalEvent。"""
@@ -33,6 +48,7 @@ class EvalResult:
     observation: str | None = None  # 仅 ee 携带执行观察/产物摘要
     is_completed: bool = False   # 仅 ee:任务是否已完成(不以全部节点终态为准,由 ee 判定)
     total_usage: dict | None = None  # {prompt_tokens, completion_tokens, total_tokens}
+    diagnosis: Diagnosis = Diagnosis.OTHER  # 仅 ee:失败分类(引擎路由重试策略/单节点重设计)
 
 
 class Evaluator:
@@ -136,6 +152,7 @@ ROLE_SYSTEMS: dict[str, str] = {
         "【可用上下文】任务、当前步骤(instruction/criterion/status/attempts)、"
         "提交判定(submission correct=true 表示该步产出已被平台确认)、本轮评估意见、执行历史。\n"
         "【输出】只返回一行 JSON:{\"verdict\":\"pass\"|\"retry\"|\"escalate\","
+        "\"diagnosis\":\"incomplete\"|\"drift\"|\"planner_target\"|\"other\","
         "\"is_completed\":true|\"false\",\"opinion\":\"验收意见\"}\n"
         "- pass: 步骤达成。is_completed 是'任务整体达成'信号,不是'本步骤达成':"
         "仅当任务核心目标(拿到格式合法 flag)已达成时才置 true,单步 PASS 默认置 false。\n"
@@ -145,7 +162,12 @@ ROLE_SYSTEMS: dict[str, str] = {
         "即使提交判定 correct=None(平台未确认/鉴权失败),也可置 is_completed=true。\n"
         "- 侦察/探测等前置步骤即使 PASS 也不置 is_completed=true(任务未达核心目标)。\n"
         "- retry: 未达成但有修复空间;escalate: 证据不足/无法达成。\n"
-        "不解题、不猜 flag;基于证据给出 verdict + opinion。"
+        "- diagnosis 是'未达成原因'的三分类分析,pass 时置 other;未达成必须归入下列之一:\n"
+        "  - incomplete:执行 Agent 在 8 轮工具调用内未达成验收标准(进度不足/卡壳/工具循环超上限)→ verdict 应置 retry。\n"
+        "  - drift:执行 Agent 解题方向偏了(路径/思路偏离,但步骤目标本身正确)→ verdict 应置 retry。\n"
+        "  - planner_target:步骤的 instruction/criterion 本身设计有误,重跑该步也无法达成,需重设计该步骤目标 → verdict 应置 escalate。\n"
+        "  - other:其它情况(默认)。\n"
+        "不解题、不猜 flag;基于证据给出 verdict + diagnosis + opinion。"
     ),
     Role.EVALUATOR_TASK: (
         "你是任务反思 Agent。任务结束(完成或失败)时全局校验,决定 DONE 或重规划。\n"
@@ -157,6 +179,18 @@ ROLE_SYSTEMS: dict[str, str] = {
         "不猜 flag;基于证据与过程指标全局评估。"
     ),
 }
+
+
+GOAL_EVAL_SYSTEM = (
+    "你是目标达成评估 Agent。评估单个任务目标当前是否已达成。\n"
+    "【可用上下文】任务、目标 id、DAG 各步骤状态与产物、最近执行上下文/观察、提交判定。\n"
+    "【输出】只返回一行 JSON:{\"complete\":true|\"false\","
+    "\"evidence\":[\"step_id\",...],\"reasoning\":\"推理\"}\n"
+    "- complete 仅当有可引用证据:已提取格式合法 flag、提交判定 correct=true、"
+    "或关键步骤 PASSED 且其产物达成该目标。\n"
+    "- evidence 是支撑判定的 DAG step_id 列表,可为空。\n"
+    "- 保守:证据不足置 complete=false,不臆测、不猜 flag。"
+)
 
 
 def _parse_json(raw: str) -> dict:
@@ -188,11 +222,12 @@ class _LLMEvaluator(Evaluator):
     default_verdict: Verdict = Verdict.PASS
     legal: frozenset = frozenset()
 
-    def _call(self, ctx: str) -> tuple[dict, str, dict | None]:
+    def _call(self, ctx: str, system: str | None = None,
+              drain_usage: bool = True) -> tuple[dict, str, dict | None]:
         try:
-            raw = llm_api.chat(system=ROLE_SYSTEMS.get(self.role, ""),
+            raw = llm_api.chat(system=system or ROLE_SYSTEMS.get(self.role, ""),
                                prompt=ctx, model=llm_api.role_model(self.role))
-            usage = _sum_usage(llm_api.pop_token_log())
+            usage = _sum_usage(llm_api.pop_token_log()) if drain_usage else None
             return _parse_json(raw), raw, usage
         except Exception as exc:  # noqa: BLE001 — LLM 故障不能阻塞评估,走兜底
             return {}, f"(LLM 调用失败: {type(exc).__name__}: {exc})", None
@@ -202,6 +237,13 @@ class _LLMEvaluator(Evaluator):
         if v in self.legal:
             return Verdict(v)
         return default or self.default_verdict
+
+    @staticmethod
+    def _coerce_diagnosis(value) -> Diagnosis:
+        v = str(value or "").strip().lower()
+        if v in {d.value for d in Diagnosis}:
+            return Diagnosis(v)
+        return Diagnosis.OTHER
 
     def _result(self, parsed, raw, usage, opinion_field="opinion", **extra) -> EvalResult:
         verdict = self._coerce(parsed.get("verdict"))
@@ -239,27 +281,42 @@ class StepLLMEvaluator(_LLMEvaluator):
     def step_eval(self, ctx: str) -> EvalResult:
         parsed, raw, usage = self._call(ctx)
         is_completed = bool(parsed.get("is_completed"))
-        return self._result(parsed, raw, usage, is_completed=is_completed)
+        diagnosis = self._coerce_diagnosis(parsed.get("diagnosis"))
+        return self._result(parsed, raw, usage, is_completed=is_completed,
+                            diagnosis=diagnosis)
 
     def eval_goals(self, ctx: str, goals: list[dict], dag_summary: str) -> list[GoalEvalDetail]:
-        """轻量确定性:仅当 DAG 全部进入终态(PASSED/SKIPPED)且存在 PASSED 步骤时判定 goal 完成。
+        """逐 goal LLM 软鉴定:每个未达成 goal 独立调用 LLM(可线程池并行),保序返回。
 
-        保守:不因个别步骤通过(如侦察通过≠拿到 flag)就宣告任务目标达成,避免在剩余
-        步骤未执行时提前完成目标、触发早停收口跳过真正解题步骤。
+        每个 goal 的判定互不依赖 → 同一决策点多个独立 LLM 调用,ThreadPoolExecutor 并行。
+        LLM 失败/解析失败保守收口 complete=False(不臆测达成),仅引擎层聚合用量(_llm_wrap)。
         """
-        statuses = re.findall(r"\[(\w+)\]\s+status=(\w+)", dag_summary or "")
-        passed = [sid for sid, st in statuses if st == "PASSED"]
-        complete = bool(passed) and all(st in ("PASSED", "SKIPPED") for _, st in statuses)
-        evidence = passed if complete else []
-        reasoning = (
-            f"evidence: {passed}" if complete
-            else f"DAG 未全部终态(已过:{passed or '无'}),goal 未达成"
+        if not goals:
+            return []
+        n = max(1, min(len(goals),
+                       int(get_engine_config().get("goal_eval_max_workers", 4) or 1)))
+        if n == 1:
+            return [self._call_goal(g, ctx, dag_summary) for g in goals]
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            return list(pool.map(lambda g: self._call_goal(g, ctx, dag_summary), goals))
+
+    def _call_goal(self, goal, ctx: str, dag_summary: str) -> GoalEvalDetail:
+        """单个 goal 的 LLM 软鉴定。drain_usage=False:不抢全局 token log,用量留给引擎聚合。"""
+        goal_id = str(goal.get("id", ""))
+        prompt = (
+            f"【目标】{goal_id}\n\n"
+            f"【世界模型(DAG)】\n{dag_summary or '(无计划)'}\n\n"
+            f"【执行上下文】\n{ctx}\n"
         )
-        return [
-            GoalEvalDetail(goal_id=str(g.get("id", "")), complete=complete,
-                           evidence=evidence, reasoning=reasoning)
-            for g in goals
-        ]
+        parsed, raw, _ = self._call(prompt, system=GOAL_EVAL_SYSTEM, drain_usage=False)
+        complete = bool(parsed.get("complete"))
+        evidence = parsed.get("evidence")
+        evidence = [str(x) for x in evidence if x] if isinstance(evidence, list) else []
+        reasoning = str(parsed.get("reasoning") or "").strip()[:500]
+        if not reasoning:
+            reasoning = raw[:200] if raw else f"(goal {goal_id} 评估未给出推理)"
+        return GoalEvalDetail(goal_id=goal_id, complete=complete,
+                              evidence=evidence, reasoning=reasoning)
 
 
 class TaskLLMEvaluator(_LLMEvaluator):

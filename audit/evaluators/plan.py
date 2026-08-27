@@ -5,6 +5,7 @@
 """
 
 import json
+import re
 from dataclasses import asdict
 from typing import Any, Dict, List, Set
 
@@ -27,7 +28,9 @@ PLAN_REVIEW_SYSTEM = """你是计划评审 Agent。在执行前评审规划 Agen
 - 工具/技能绑定：skill_id 是否与步骤内容匹配
 
 【输出】
-- pass / revise 判定 + 问题列表 issues + 修改建议 suggestions
+只返回一行 JSON：{"decision":"pass"|"revise","score":0..1,"issues":[...],"suggestions":[...]}
+- pass：计划结构完整、可执行；revise：存在需修订的结构问题。
+- 非阻塞性建议放入 suggestions，不阻塞通过。
 - 不解题、不猜 flag；只评审计划结构合理性"""
 
 
@@ -75,6 +78,10 @@ class PlanEvaluator:
         suggestions = structural.suggestions + [str(item) for item in parsed.get("suggestions", [])]
         # LLM 不能覆盖确定性的 DAG/字段错误。
         decision = "revise" if structural.decision == "revise" or semantic_decision != "pass" else "pass"
+        # 决策与理由一致性:revise 却无任何结构化 issue/suggestion → 保留原始输出诊断,
+        # 避免 _plan_opinion 用"计划结构和验收条件完整"这类误导性兜底文本。
+        if decision == "revise" and not issues and not suggestions:
+            issues.append("评审未给出结构化修订项,原始输出: %s" % (raw or "").strip()[:500])
         return PlanEvaluation(
             decision=decision,
             score=round(min(structural.score, semantic_score), 4),
@@ -174,16 +181,41 @@ class PlanEvaluator:
 
         return any(visit(node) for node in graph)
 
+    # 匹配 markdown 自由文本里的明确判定,如 "判定：**pass**" / "评审结论：revise"。
+    # 只认显式关键字:解析不出时若 LLM 明确说 pass,不能误判成 revise(否则 ep 无限回环)。
+    _DECISION_RE = re.compile(
+        r"(?:判定|结论|decision|verdict)[：:]\s*[*]{0,2}(pass|revise)[*]{0,2}",
+        re.IGNORECASE,
+    )
+
     @staticmethod
     def _parse_json(raw: str) -> Dict[str, Any]:
-        text = raw.strip()
+        text = (raw or "").strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
+        result = None
         try:
-            result = json.loads(text)
-            return result if isinstance(result, dict) else {}
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                result = parsed
         except json.JSONDecodeError:
-            return {"decision": "revise", "issues": [raw], "suggestions": []}
+            pass
+        if result is not None:
+            if isinstance(result.get("decision"), str):
+                return result
+            # JSON 缺 decision 字段 → 用文本里的显式判定兜底
+            extracted = PlanEvaluator._extract_decision(text)
+            result["decision"] = extracted["decision"]
+            return result
+        return PlanEvaluator._extract_decision(raw or "")
+
+    @staticmethod
+    def _extract_decision(raw: str) -> Dict[str, Any]:
+        m = PlanEvaluator._DECISION_RE.search(raw)
+        if m:
+            return {"decision": m.group(1).lower(), "issues": [raw], "suggestions": []}
+        # 无明确判定 → 保守 revise(不臆测 pass),原文本留给 issues 诊断。
+        return {"decision": "revise", "issues": [raw], "suggestions": []}
 
     @staticmethod
     def _clamp(value: float) -> float:

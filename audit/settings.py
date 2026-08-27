@@ -32,7 +32,13 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        mode = str(_cfg("CTF_AUDIT_MODE", "offline")).strip().lower()
+        explicit = _cfg("CTF_AUDIT_MODE")
+        if explicit:
+            mode = str(explicit).strip().lower()
+        else:
+            # 未显式配置时按 LLM 可用性自动判定:有 key → online(评估 agent 走 LLM,
+            # token 结算才统计得到);否则 offline 确定性规则。显式 offline 仍被尊重。
+            mode = "online" if (_cfg("LLM_API_KEY") or _cfg("DEEPSEEK_API_KEY")) else "offline"
         if mode not in {"offline", "online"}:
             raise ValueError("CTF_AUDIT_MODE must be offline or online, got: %s" % mode)
         return cls(

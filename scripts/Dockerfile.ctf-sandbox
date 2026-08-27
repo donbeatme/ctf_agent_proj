@@ -41,6 +41,16 @@ RUN bash /opt/install_ctf_tools.sh all; bash /opt/install_ctf_tools.sh --verify
 RUN /root/.ctf-tools/venv/bin/pip install --index-url https://pypi.org/simple cysignals angr \
     && GOPROXY=https://goproxy.cn,direct go install github.com/ffuf/ffuf/v2@latest
 
+# Ghidra 逆向框架:官方 zip(12.x 自带 JRE),Debian 无 brew 走直装。
+# VM 直连 GitHub 不通,zip 经本机代理下载后烘焙进镜像:文件在构建上下文 ghidra.zip
+# (build_sandbox_image.py 从 downloads/ 上传到 /root/ctf-build)。
+# install_ctf_tools.sh 的 brew 分支在容器内跳过,这里显式预装 headless 反编译。
+COPY ghidra.zip /opt/ghidra.zip
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends unzip \
+    && unzip -q /opt/ghidra.zip -d /opt && rm -f /opt/ghidra.zip \
+    && ln -sf /opt/ghidra_12.1.3_PUBLIC/support/analyzeHeadless /usr/local/bin/analyzeHeadless \
+    && rm -rf /var/lib/apt/lists/*
+
 # 让后续 docker exec 会话复用 venv 与 go 工具的 PATH
 ENV PATH="/root/.ctf-tools/venv/bin:/root/go/bin:${PATH}"
 

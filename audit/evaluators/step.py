@@ -45,7 +45,9 @@ STEP_PROMPT = """你是步骤验收 Agent。验收执行 Agent 对当前步骤�
 【轨迹】
 {outputs}
 
-对上述轨迹给出 0..1 的过程质量分与说明（JSON）。"""
+对上述轨迹给出 0..1 的过程质量分与说明。只返回一个 JSON 对象，字段如下：
+{{"score": 0..1 的过程质量分, "reasoning": "打分依据", "verdict": "pass|retry|escalate"}}
+不要输出 JSON 之外的任何内容。"""
 
 
 def _sum_usage(usage_log: List[dict]) -> Dict[str, int] | None:

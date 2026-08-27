@@ -6,6 +6,7 @@ import pytest
 
 from agent.evaluator import (
     ConfigurableEvaluator,
+    Diagnosis,
     EvalResult,
     MockEvaluator,
     PlanLLMEvaluator,
@@ -122,23 +123,107 @@ def test_step_llm_invalid_verdict_defaults_retry(stub_llm):
     assert r.is_completed is False
 
 
-def test_step_llm_eval_goals():
-    ev = StepLLMEvaluator()
-    goals = [{"id": "g1"}, {"id": "g2"}]
-    # 部分步骤未终态(有 RUNNING)→ 不判定完成,即使已有 PASSED 步骤
-    dag = "[s1] status=PASSED instruction=侦察\n[s2] status=RUNNING instruction=提取"
-    results = ev.eval_goals("ctx", goals, dag)
+def test_step_llm_parses_diagnosis(stub_llm):
+    stub_llm(json.dumps({"verdict": "retry", "diagnosis": "drift", "opinion": "方向偏"}))
+    r = StepLLMEvaluator().step_eval("ctx")
+    assert r.verdict == Verdict.RETRY
+    assert r.diagnosis == Diagnosis.DRIFT
+
+
+def test_step_llm_invalid_diagnosis_defaults_other(stub_llm):
+    stub_llm(json.dumps({"verdict": "retry", "diagnosis": "bogus"}))
+    assert StepLLMEvaluator().step_eval("ctx").diagnosis == Diagnosis.OTHER
+
+
+def test_step_llm_missing_diagnosis_defaults_other(stub_llm):
+    stub_llm(json.dumps({"verdict": "retry"}))
+    assert StepLLMEvaluator().step_eval("ctx").diagnosis == Diagnosis.OTHER
+
+
+def test_role_systems_step_has_diagnosis_contract():
+    from agent.evaluator import ROLE_SYSTEMS
+
+    sys_txt = ROLE_SYSTEMS[Role.EVALUATOR_STEP]
+    assert '"diagnosis"' in sys_txt
+    for v in ("incomplete", "drift", "planner_target", "other"):
+        assert v in sys_txt
+
+
+def test_step_llm_eval_goals(stub_llm):
+    """逐 goal LLM 软鉴定:按 goal id 返回 JSON,结果保序、字段解析正确。"""
+    def _chat(system=None, prompt=None, model=None, **kw):
+        if "g1" in (prompt or ""):
+            return json.dumps({"complete": True, "evidence": ["s1"], "reasoning": "g1 达成"})
+        return json.dumps({"complete": False, "evidence": [], "reasoning": "g2 证据不足"})
+
+    stub_llm(_chat)
+    results = StepLLMEvaluator().eval_goals("ctx", [{"id": "g1"}, {"id": "g2"}],
+                                            "[s1] status=PASSED")
     assert len(results) == 2
-    assert all(not r.complete for r in results)
-    assert all(r.evidence == [] for r in results)
-    assert {r.goal_id for r in results} == {"g1", "g2"}
-    # 全部终态且存在 PASSED → 判定完成,证据为 PASSED 步骤
-    done = ev.eval_goals("ctx", goals, "[s1] status=PASSED\n[s2] status=SKIPPED")
-    assert all(r.complete for r in done)
-    assert done[0].evidence == ["s1"]
-    # 全部终态但无 PASSED → 不完成
-    failed = ev.eval_goals("ctx", goals, "[s2] status=FAILED")
-    assert failed[0].complete is False and failed[0].evidence == []
+    assert [r.goal_id for r in results] == ["g1", "g2"]   # 保序
+    assert results[0].complete is True and results[0].evidence == ["s1"]
+    assert results[0].reasoning == "g1 达成"
+    assert results[1].complete is False and results[1].evidence == []
+    assert results[1].reasoning == "g2 证据不足"
+
+
+def test_step_llm_eval_goals_empty():
+    assert StepLLMEvaluator().eval_goals("ctx", [], "[s1] status=PASSED") == []
+
+
+def test_step_llm_eval_goals_llm_failure_conservative(stub_llm):
+    """LLM 失败:保守收口 complete=False + 失败信息,不臆测达成。"""
+    def _boom(**kw):
+        raise RuntimeError("llm down")
+
+    stub_llm(_boom)
+    results = StepLLMEvaluator().eval_goals("ctx", [{"id": "g1"}], "[s1] status=PASSED")
+    assert len(results) == 1
+    r = results[0]
+    assert r.complete is False and r.evidence == []
+    assert "LLM 调用失败" in r.reasoning
+
+
+def test_step_llm_eval_goals_does_not_drain_log(monkeypatch):
+    """drain_usage=False:逐 goal 线程不 drain 全局 token log(聚合留给引擎 _llm_wrap)。"""
+    import agent.evaluator as ev_mod
+
+    monkeypatch.setattr(ev_mod.llm_api, "chat",
+                        lambda **kw: json.dumps({"complete": True, "reasoning": "ok"}))
+    monkeypatch.setattr(ev_mod.llm_api, "role_model", lambda role=None: "stub")
+    drained = []
+    monkeypatch.setattr(ev_mod.llm_api, "pop_token_log",
+                        lambda: drained.append(1) or [])
+    StepLLMEvaluator().eval_goals("ctx", [{"id": "g1"}, {"id": "g2"}], "dag")
+    assert drained == []   # 逐 goal 调用不 drain
+
+
+def test_step_llm_eval_goals_parallel(monkeypatch):
+    """多 goal 线程池并行:确实并发(max 活跃数 >=2)且墙钟 < 串行和。"""
+    import threading
+    import time as _time
+    import agent.evaluator as ev_mod
+
+    active = {"n": 0, "max": 0}
+    lock = threading.Lock()
+
+    def _chat(**kw):
+        with lock:
+            active["n"] += 1
+            active["max"] = max(active["max"], active["n"])
+        _time.sleep(0.2)
+        with lock:
+            active["n"] -= 1
+        return json.dumps({"complete": False, "reasoning": "x"})
+
+    monkeypatch.setattr(ev_mod.llm_api, "chat", _chat)
+    monkeypatch.setattr(ev_mod.llm_api, "role_model", lambda role=None: "stub")
+    monkeypatch.setattr(ev_mod.llm_api, "pop_token_log", lambda: [])
+    t0 = _time.monotonic()
+    StepLLMEvaluator().eval_goals("ctx", [{"id": g} for g in "abcd"], "dag")
+    wall = _time.monotonic() - t0
+    assert active["max"] >= 2          # 确实并发
+    assert wall < 0.2 * 4 - 0.05       # 墙钟明显低于串行和(0.8s)
 
 
 # ── TaskLLMEvaluator(et) ─────────────────────────────────────
