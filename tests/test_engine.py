@@ -180,6 +180,123 @@ def test_engine_wires_sandbox_session_lifecycle(monkeypatch):
     assert len(pool._idle) == 1                                            # 连接还池
 
 
+def test_wave_runs_steps_concurrently(monkeypatch):
+    """并行 wave(max_concurrency=2):两个独立入口步骤并发执行,每步独立容器租约。
+
+    用执行区间互相重叠证明真并发(串行会退化为接续);docker run 容器名带各自
+    actor(step.id)后缀;结束后连接全还池、租约清空。
+    """
+    import time as _time
+
+    def fake_install(self, tool_ids, *, session_key=None, force=False):
+        return {"installed": list(tool_ids)}
+
+    monkeypatch.setattr("sandbox_env.base.SandboxManager.install_tools", fake_install)
+
+    conns = []
+
+    def factory():
+        c = FakeSsh()
+        conns.append(c)
+        return c
+
+    pool = SshProvider(factory=factory, max_connections=2)
+    provider = SandboxProvider(pool, settings=SandboxSettings(ssh_host="vm"))
+    sched = ExecutionScheduler(providers=[provider])
+
+    intervals = {}
+
+    async def run_fn(step, ctx, tool_exec=None):
+        t0 = _time.monotonic()
+        await asyncio.sleep(0.05)
+        intervals[step.id] = (t0, _time.monotonic())
+        return ExecResult(observation=f"{step.id}: 完成")
+
+    class _Exec(MockExecutor):
+        allowed_cwd = "/challenge/x"
+
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"读题","criterion":"拿到文本","depends_on":[]},'
+            '{"id":"s2","instruction":"编码","criterion":"可逆","depends_on":[]}]',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.PASS, "s1: 完成"), EvalResult(Verdict.PASS, "s2: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=_Exec(observation="", fn=run_fn),
+        scheduler=sched,
+        max_concurrency=2,
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert set(intervals) == {"s1", "s2"}
+    # 两步骤执行区间互相重叠 → 真并发
+    assert intervals["s1"][0] < intervals["s2"][1]
+    assert intervals["s2"][0] < intervals["s1"][1]
+    # 每步独立容器:docker run 容器名带各自 actor(step.id)后缀
+    names = [c for conn in conns for c, _ in conn.execs if "docker run -d --name" in c]
+    assert any("-s1" in n for n in names)
+    assert any("-s2" in n for n in names)
+    # 各自 release:连接全还池 + 租约清空
+    assert len(pool._idle) == 2
+    assert len(provider._active) == 0
+
+
+def test_wave_retry_degrades_to_single_step(monkeypatch):
+    """并行 wave 中某步 retry:退化为该步单步重放,其余未评估步骤回 PENDING 待重调度,
+    不误判死锁;s1 重试成功后 s2 正常调度执行到 DONE。"""
+
+    def fake_install(self, tool_ids, *, session_key=None, force=False):
+        return {"installed": list(tool_ids)}
+
+    monkeypatch.setattr("sandbox_env.base.SandboxManager.install_tools", fake_install)
+
+    conns = []
+
+    def factory():
+        c = FakeSsh()
+        conns.append(c)
+        return c
+
+    pool = SshProvider(factory=factory, max_connections=2)
+    provider = SandboxProvider(pool, settings=SandboxSettings(ssh_host="vm"))
+    sched = ExecutionScheduler(providers=[provider])
+    ran = []
+
+    async def run_fn(step, ctx, tool_exec=None):
+        ran.append(step.id)
+        return ExecResult(observation=f"{step.id}: 完成")
+
+    class _Exec(MockExecutor):
+        allowed_cwd = "/challenge/x"
+
+    engine, planner = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"读题","criterion":"拿到文本","depends_on":[]},'
+            '{"id":"s2","instruction":"编码","criterion":"可逆","depends_on":[]}]',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        # s1 第一拍 retry(占 ee 第 1 次),重试后 pass(第 2 次);s2 pass
+        ee=[EvalResult(Verdict.RETRY, "s1: 不完整"),
+            EvalResult(Verdict.PASS, "s1: 完成"),
+            EvalResult(Verdict.PASS, "s2: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=_Exec(observation="", fn=run_fn),
+        scheduler=sched,
+        max_concurrency=2,
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert ran.count("s1") == 2          # s1 第一拍 + retry 重放
+    # s2 第一拍随 wave 被 abandon(结果丢弃、回 PENDING),之后重调度再执行一次
+    assert ran.count("s2") == 2
+    assert len(planner.calls) == 2       # 初始规划 + 终局反思(无多余 replan)
+    assert len(pool._idle) == 2
+    assert len(provider._active) == 0
+
+
 def test_request_stop_fails_run():
     """前端停跑接口:request_stop 在主循环下一拍转 FAILED。"""
 

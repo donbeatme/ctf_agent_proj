@@ -7,7 +7,9 @@
   - STEP_EVAL:retry → EXECUTING 重放(超 max_attempts 转 escalate);escalate → PLANNING;pass → SCHEDULING
   - REFLECTING:反思修订 DAG → PLANNING → DONE(终局修订,不再重入评审/调度)
 执行/评估均为接口桩(外部团队实现),当前可挂 MockExecutor / MockEvaluator。
-串行 MVP:一次只取并执行一个 ready 步骤,不并行。
+并行 wave:max_concurrency=1 保持串行原路径(一次一个 ready 步骤);>1 时一拍并发
+执行多个 ready step(每步独立容器租约/ctx,contextvars 隔离归因),STEP_EVAL 顺序
+逐步骤评估,retry 退化为单步,replan 收口。
 ctx 注入统一走 workspace:planner 与外部 agent(ep/ex/ee/et)都经 assembler.assemble
 组装(组件是 workspace 只读投影;外部桩接口收单串 ctx 文本)。system 提示词经
 SystemPromptComponent 渲染(角色各自把它当系统消息传给 LLM,engine 只传组件不并入 ctx,
@@ -142,7 +144,8 @@ class Engine:
                  max_cycles=None, max_replans=None, max_stalls=None,
                  max_deadlock_attempts=None, compress=None, context_budget=None,
                  run_token_budget_tokens=None, understander=None, tool_catalog=None,
-                 checker=None, subscribers=None, scheduler=None):
+                 checker=None, subscribers=None, scheduler=None,
+                 max_concurrency=1):
         from model_config import get_engine_config
         cfg = get_engine_config()
         self.workspace = workspace or MockWorkspace()
@@ -161,6 +164,11 @@ class Engine:
         self.evaluator = evaluator
         self.understander = understander or MockTaskUnderstander()
         self._scheduler = scheduler  # 可选执行环境调度器(None=执行器自建沙箱,旧路径)
+        # 并行 wave:max_concurrency>1 时一拍拍多个 ready step 并发执行(每步独立容器租约),
+        # 取消/重试退化为单步;=1 保持串行原路径(会话级租约,横跨步骤持久)
+        self._max_concurrency = max(1, int(max_concurrency or 1))
+        self._wave: list[Step] = []              # 当前调度拍的待执行步骤
+        self._wave_results: list[tuple] = []     # 执行/评估结果 [(step, ExecResult)]
         self.scheduler = Scheduler()
         self.bp = None
         self.current: Step | None = None
@@ -310,7 +318,8 @@ class Engine:
         self._cancel_reason = None
         run_timer = PhaseTimer("run", deadline_ms=self._run_timeout_ms)
         run_timer.__enter__()
-        env_lease = await self._open_env_session()
+        # 串行:run 级会话租约(容器跨步骤持久);并行:每步各自租约,不开 run 级会话
+        env_lease = None if self._max_concurrency > 1 else await self._open_env_session()
         try:
             for self._cycle in range(self.max_cycles):
                 if self.scheduler.state in (EngineState.DONE, EngineState.FAILED):
@@ -384,6 +393,8 @@ class Engine:
         self._stalls = 0
         self._deadlock_attempts = 0
         self._retry_mode = None
+        self._wave = []
+        self._wave_results = []
         self.task_completed = False
         self.submitted_flag = None
         self.fail_reason = None
@@ -401,7 +412,8 @@ class Engine:
     def resume(cls, run_id, planner, executor, evaluator,
                root=None, max_cycles=None, max_replans=None,
                max_stalls=None, max_deadlock_attempts=None,
-               compress=None, context_budget=None, subscribers=None) -> "Engine":
+               compress=None, context_budget=None, subscribers=None,
+               max_concurrency=1) -> "Engine":
         """从 Workspace.load 恢复引擎并继续 _dispatch 循环。
 
         恢复内容:
@@ -421,7 +433,7 @@ class Engine:
                      max_stalls=max_stalls,
                      max_deadlock_attempts=max_deadlock_attempts,
                      compress=compress, context_budget=context_budget,
-                     subscribers=subscribers)
+                     subscribers=subscribers, max_concurrency=max_concurrency)
         engine.raw_content = ws.meta.get("task", {})
         engine.task_input = TaskInput(
             raw_content=engine.raw_content,
@@ -1081,6 +1093,246 @@ class Engine:
             product=product,
         )
 
+    # ===== 步骤执行 / 校验(串行与并行 wave 共用) =====
+
+    async def _run_step(self, step) -> ExecResult | None:
+        """单步完整执行(EXECUTING 主体)。返回 ExecResult;取消返回 None(已转 STEP_EVAL)。
+
+        并行 wave(max_concurrency>1):每步各自 acquire 容器租约(actor=step.id,跨步骤
+        不共享),executor.run 注入该步 runner;取消不接入 wave(下一拍 _check_stop 收口)。
+        串行:无租约,用执行器会话 runner(_open_env_session 已注入 handle)。
+        """
+        self.bp.set_status(step.id, StepStatus.RUNNING)
+        step.attempts += 1
+        set_run_context(node_id=step.id, round=step.attempts)
+        self.signals.emit(Signal.STEP_STARTED, step_id=step.id,
+                          attempt=step.attempts, max_attempts=step.max_attempts)
+        if self._checker is not None and step.skill_id:
+            cat = step.skill_id.split(".")[0]
+            rep = {
+                "tools": self._checker.probe_tools(list(self.workspace.tools)),
+                "category": self._checker.probe_category(cat),
+            }
+            self.signals.emit(Signal.ENV_CHECK, scope="step",
+                              step_id=step.id, report=rep)
+        a = self._assembler()
+        if a is not None:
+            await a.precompress(Role.PLANNER)
+        retry_mode = self._retry_mode or "raw"
+        self._retry_mode = None
+        start_levels = {"trace": "summary"} if retry_mode == "compressed" else None
+        ctx = await self._assemble_ctx(Role.EXECUTOR, step_id=step.id,
+                                       system=self.executor.system, start_levels=start_levels)
+        runner, lease = None, None
+        if self._max_concurrency > 1:
+            lease = await self._acquire_step_lease(step)
+            if lease is None:
+                return ExecResult(
+                    observation="无法获取执行环境租约(无 Provider 或无法确定工作目录)")
+            runner = self._runner_for(lease.handle)
+        t = PhaseTimer("executing", deadline_ms=self._phase_deadline("executing"))
+        with t:
+            # executor 跑子任务 + 主循环 wait cancel 事件:request_stop/cancel_current
+            # 触发 → task.cancel 硬中断(含长 ssh.exec),取消路径落 SKIPPED + step_cancel。
+            # runner 仅并行 wave 注入(每步独立容器);串行缺省走执行器会话 runner,
+            # 调用签名与旧路径一致(不传 runner,兼容测试自定义 run 覆写)。
+            exec_kwargs = {"tool_exec": self._tool_registry.call_tool}
+            if runner is not None:
+                exec_kwargs["runner"] = runner
+            exec_task = asyncio.create_task(
+                self._safe_call(
+                    lambda: self._llm_wrap(Role.EXECUTOR,
+                        lambda: self.executor.run(step, ctx, **exec_kwargs),
+                        ctx_size=count_tokens(ctx)),
+                    lambda exc: ExecResult(
+                        observation=f"执行异常: {type(exc).__name__}: {exc}"),
+                ))
+            if self._max_concurrency > 1:
+                res: ExecResult | None = await exec_task   # 并行不接取消(wave 原子拍)
+            else:
+                cancel_wait = asyncio.create_task(self._cancel_evt.wait())
+                done, pending = await asyncio.wait(
+                    {exec_task, cancel_wait}, return_when=asyncio.FIRST_COMPLETED)
+                for tsk in pending:
+                    tsk.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                if exec_task in done and not exec_task.cancelled():
+                    res = exec_task.result()
+                else:
+                    res = None
+        if res is None:
+            if lease is not None:
+                await lease.release()
+            self._finish_cancelled_step()
+            return None
+        if t.timed_out:
+            self.signals.emit(Signal.PHASE_TIMEOUT, phase="executing",
+                              elapsed_ms=t.elapsed_ms, step_id=step.id)
+            # 超时只追加标记,不丢弃执行产出:executor 可能已提取/提交 flag,
+            # result/submission/tool_calls 是 ee 软鉴定判完成的关键证据。
+            note = f"[执行超时({t.elapsed_ms:.0f}ms)]"
+            res.observation = f"{res.observation}\n{note}".strip()
+        self._obs = res.observation
+        step.result = res.result
+        submitted = self._extract_flag(res)
+        if submitted is not None:
+            self.submitted_flag = submitted
+        submission = self._extract_submission(res)
+        if submission is not None:
+            self.workspace.record_submission(submission)
+        if a is not None and res.tool_calls:
+            a.ingest(Role.EXECUTOR, step_id=step.id, tool_calls=res.tool_calls)
+            n = len(res.tool_calls)
+            self.signals.emit(Signal.CTX_INGEST, role=Role.EXECUTOR,
+                              detail=f"step_id={step.id} tool_calls={n}  {n} use_tool + {n} tool_result  trace 通道")
+        if lease is not None:
+            await lease.release()
+        return res
+
+    async def _run_wave(self):
+        """并行 wave:每步独立任务并发执行(各持各的容器租约/ctx),结果按序收集。"""
+        async def one(step):
+            res = await self._run_step(step)
+            return step, res if res is not None else ExecResult(
+                observation=f"{step.id}: 执行被中断")
+        self._wave_results = list(await asyncio.gather(*(one(s) for s in self._wave)))
+        self._go(EngineState.STEP_EVAL,
+                 f"wave of {len(self._wave)} steps executed")
+
+    async def _step_eval_wave(self):
+        """并行 wave 步骤校验:顺序逐步评估(pass 继续;retry 退化为该步单步重放;
+        replan 收口)。中途 abandon 时把未评估的 RUNNING 残留步骤回 PENDING,避免死锁。"""
+        last = self._wave_results[-1][0]
+        for step, res in self._wave_results:
+            self.current = step
+            self._obs = res.observation or ""
+            set_run_context(node_id=step.id, round=step.attempts)
+            action, _ = await self._step_eval_one(step)
+            if action == "pass":
+                if step is not last:
+                    continue
+                self.current = None
+                set_run_context(node_id=None, round=None)
+                self._go(EngineState.SCHEDULING, "wave passed")
+                return
+            # 本拍中止(retry/replan):未评估的 RUNNING 兄弟步骤回 PENDING,等下一拍重调度
+            for s, _ in self._wave_results:
+                if s is not step and s.status == StepStatus.RUNNING:
+                    self.bp.set_status(s.id, StepStatus.PENDING, force=True)
+            if action == "retry":
+                self._wave = [step]
+                self._wave_results = [(step, res)]
+                self._go(EngineState.EXECUTING,
+                         f"step {step.id} retry {step.attempts}/{step.max_attempts}")
+            else:
+                await self._replan(EvalSource.STEP_EVAL, res,
+                                   scope_step_id=step.id if action == "replan_step" else None)
+            return
+
+    async def _step_eval_one(self, step) -> tuple[str, EvalResult]:
+        """单个步骤校验(STEP_EVAL 主体)。返回 (action, res),不做状态迁移。
+
+        action: "pass" / "retry"(重试重放) / "replan"(整图重排) / "replan_step"(单步重设计)。
+        串行与并行 wave 共用,保证两者判定分支一致。
+        """
+        ctx = await self._assemble_ctx(
+            Role.EVALUATOR_STEP, step_id=step.id,
+            system=self.evaluator.system_for(Role.EVALUATOR_STEP))
+        digest = self._step_tool_digest(step.id)
+        obs_parts = [p for p in (self._obs, digest) if p]
+        if obs_parts:
+            obs = "\n\n".join(obs_parts).strip()
+            ctx = f"{ctx}\n\nobservation: {obs}".strip()
+        t = PhaseTimer("step_eval", deadline_ms=self._phase_deadline("step_eval"))
+        with t:
+            res = await self._safe_call(
+                lambda: self._llm_wrap(Role.EVALUATOR_STEP,
+                    lambda: self.evaluator.step_eval(ctx), ctx_size=count_tokens(ctx)),
+                lambda exc: EvalResult(Verdict.ESCALATE,
+                    f"步骤校验异常: {type(exc).__name__}: {exc}"),
+            )
+        if t.timed_out:
+            self.signals.emit(Signal.PHASE_TIMEOUT, phase="step_eval",
+                              elapsed_ms=t.elapsed_ms, step_id=step.id)
+            res = EvalResult(Verdict.ESCALATE, f"步骤校验超时({t.elapsed_ms:.0f}ms)")
+        if res.is_completed:
+            self.task_completed = True
+            # ee 已判任务达成:同步把未决 goal 置完成,消除报告矛盾
+            for g in self.goals:
+                self._goal_complete.setdefault(g.id, [])
+        diagnosis = getattr(res, "diagnosis", Diagnosis.OTHER)
+        if res.verdict == Verdict.RETRY:
+            if diagnosis == Diagnosis.PLANNER_TARGET:
+                # 目标本身错了:不浪费重试,升级并触发该步骤单节点重设计
+                self.bp.set_status(step.id, StepStatus.ESCALATED)
+                self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
+                self.signals.emit(Signal.STEP_ENDED, step_id=step.id,
+                                  verdict=Verdict.ESCALATE, observation=self._obs or "",
+                                  attempts=step.attempts)
+                return "replan_step", res
+            if step.attempts >= step.max_attempts:
+                self.bp.set_status(step.id, StepStatus.ESCALATED)
+                self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
+                self.signals.emit(Signal.STEP_ENDED, step_id=step.id,
+                                  verdict=Verdict.ESCALATE, observation=self._obs or "",
+                                  attempts=step.attempts)
+                return "replan", res
+            self.bp.set_status(step.id, StepStatus.RETRY)
+            self._record_step(Verdict.RETRY, is_completed=self.task_completed)
+            self._record_opinion(EvalSource.STEP_EVAL, res, step_id=step.id)
+            self.signals.emit(Signal.STEP_ENDED, step_id=step.id,
+                              verdict=Verdict.RETRY, observation=self._obs or "",
+                              attempts=step.attempts)
+            self._log.hint_tick_extra("retry")
+            # 漂移重试继承压缩 ctx(旧轨迹摘要,避免被错误路径继续带偏);其余保留原始轨迹
+            self._retry_mode = "compressed" if diagnosis == Diagnosis.DRIFT else "raw"
+            return "retry", res
+        if res.verdict == Verdict.ESCALATE:
+            self.bp.set_status(step.id, StepStatus.ESCALATED)
+            self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
+            self.signals.emit(Signal.STEP_ENDED, step_id=step.id,
+                              verdict=Verdict.ESCALATE, observation=self._obs or "",
+                              attempts=step.attempts)
+            return ("replan_step" if diagnosis == Diagnosis.PLANNER_TARGET
+                    else "replan"), res
+        if res.verdict == Verdict.PASS:
+            self.bp.set_status(step.id, StepStatus.PASSED)
+            self._record_step(Verdict.PASS, is_completed=self.task_completed)
+            self.signals.emit(Signal.STEP_ENDED, step_id=step.id,
+                              verdict=Verdict.PASS, observation=self._obs or "",
+                              attempts=step.attempts)
+            # 步骤通过后,评估 goal list:比对未完成 goal 与当前世界模型(DAG)
+            await self._eval_goals_after_pass(ctx)
+            return "pass", res
+        self.bp.set_status(step.id, StepStatus.ESCALATED)
+        self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
+        self.signals.emit(Signal.STEP_ENDED, step_id=step.id,
+                          verdict=Verdict.ESCALATE, observation=self._obs or "",
+                          attempts=step.attempts)
+        return "replan", res
+
+    async def _acquire_step_lease(self, step):
+        """并行 wave:为单步 acquire 一个容器租约(actor=step.id,隔离)。无 scheduler /
+        无法确定 cwd → None(该步以失败观察收场,不拖垮整波)。"""
+        if self._scheduler is None:
+            return None
+        cwd = getattr(self.executor, "allowed_cwd", None)
+        if not cwd:
+            return None
+        req = self._scheduler.requirement_for(actor_id=step.id, cwd=cwd)
+        return await self._scheduler.acquire(req)
+
+    def _runner_for(self, handle):
+        """用租约 handle 构造该步的 CommandRunner(复用执行器 runner 的时限/输出上限;
+        mock 执行器无 runner 时用 CommandRunner 缺省)。"""
+        from agent.runner import CommandRunner
+
+        r = getattr(self.executor, "runner", None)
+        if r is None:
+            return CommandRunner(sandbox=handle)
+        return CommandRunner(sandbox=handle, timeout=r.timeout,
+                             max_out=r.max_out, max_err=r.max_err)
+
     async def _dispatch(self):
         s = self.scheduler.state
         if s == EngineState.PLANNING:
@@ -1126,8 +1378,9 @@ class Engine:
                         reason="plan review passed", revised=cleared)
                 self._go(EngineState.SCHEDULING, "plan review passed")
         elif s == EngineState.SCHEDULING:
-            step = self.bp.next_step()
-            if step is None or self.task_completed:
+            # 一拍取一批 ready step(并行 wave);max_concurrency=1 时与 next_step() 等价
+            wave = self.bp.ready_steps()[: self._max_concurrency]
+            if not wave or self.task_completed:
                 # ee 已判任务完成(is_completed)→ 早停收口:跳过剩余 DAG 步骤直接反思终局
                 if self.task_completed or self.bp.is_done():
                     self._go(EngineState.REFLECTING, "task completed")
@@ -1137,173 +1390,52 @@ class Engine:
                 if self._capability_blocked():
                     self._fail("环境阻塞: 靶机不可达或沙箱不可用(能力探测复查仍失败),后续步骤无法执行")
                     return
-                self.current = step
-                set_run_context(node_id=step.id)
+                self._wave = wave
+                self._wave_results = []
+                self.current = wave[0]
+                set_run_context(node_id=wave[0].id)
                 self._deadlock_attempts = 0
-                self._go(EngineState.EXECUTING, f"step {step.id} ready")
+                reason = (f"step {wave[0].id} ready" if len(wave) == 1
+                          else f"wave of {len(wave)} steps ready")
+                self._go(EngineState.EXECUTING, reason)
         elif s == EngineState.EXECUTING:
-            if (self._cancel_requested and self.current is not None
-                    and self.current.id == self._cancel_step_id):
-                # 步骤刚调度即被取消(如 SCHEDULING 与 EXECUTING 之间 request_stop):不启动执行
-                self._finish_cancelled_step()
-                return
-            self.bp.set_status(self.current.id, StepStatus.RUNNING)
-            self.current.attempts += 1
-            set_run_context(node_id=self.current.id, round=self.current.attempts)
-            self.signals.emit(Signal.STEP_STARTED, step_id=self.current.id,
-                              attempt=self.current.attempts,
-                              max_attempts=self.current.max_attempts)
-            if self._checker is not None and self.current.skill_id:
-                cat = self.current.skill_id.split(".")[0]
-                rep = {
-                    "tools": self._checker.probe_tools(list(self.workspace.tools)),
-                    "category": self._checker.probe_category(cat),
-                }
-                self.signals.emit(Signal.ENV_CHECK, scope="step",
-                                  step_id=self.current.id, report=rep)
-            a = self._assembler()
-            if a is not None:
-                await a.precompress(Role.PLANNER)
-            retry_mode = self._retry_mode or "raw"
-            self._retry_mode = None
-            start_levels = {"trace": "summary"} if retry_mode == "compressed" else None
-            ctx = await self._assemble_ctx(Role.EXECUTOR, step_id=self.current.id,
-                                           system=self.executor.system, start_levels=start_levels)
-            t = PhaseTimer("executing", deadline_ms=self._phase_deadline("executing"))
-            with t:
-                # executor 跑子任务 + 主循环 wait cancel 事件:request_stop/cancel_current
-                # 触发 → task.cancel 硬中断(含长 ssh.exec),取消路径落 SKIPPED + step_cancel。
-                exec_task = asyncio.create_task(
-                    self._safe_call(
-                        lambda: self._llm_wrap(Role.EXECUTOR,
-                            lambda: self.executor.run(self.current, ctx,
-                                                      tool_exec=self._tool_registry.call_tool),
-                            ctx_size=count_tokens(ctx)),
-                        lambda exc: ExecResult(
-                            observation=f"执行异常: {type(exc).__name__}: {exc}"),
-                    ))
-                cancel_wait = asyncio.create_task(self._cancel_evt.wait())
-                done, pending = await asyncio.wait(
-                    {exec_task, cancel_wait}, return_when=asyncio.FIRST_COMPLETED)
-                for tsk in pending:
-                    tsk.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                if exec_task in done and not exec_task.cancelled():
-                    res: ExecResult = exec_task.result()
-                else:
+            if self._max_concurrency > 1:
+                await self._run_wave()
+            else:
+                if (self._cancel_requested and self.current is not None
+                        and self.current.id == self._cancel_step_id):
+                    # 步骤刚调度即被取消(如 SCHEDULING 与 EXECUTING 之间 request_stop):不启动执行
                     self._finish_cancelled_step()
                     return
-            if t.timed_out:
-                self.signals.emit(Signal.PHASE_TIMEOUT, phase="executing",
-                                  elapsed_ms=t.elapsed_ms, step_id=self.current.id)
-                # 超时只追加标记,不丢弃执行产出:executor 可能已提取/提交 flag,
-                # result/submission/tool_calls 是 ee 软鉴定判完成的关键证据。
-                note = f"[执行超时({t.elapsed_ms:.0f}ms)]"
-                res.observation = f"{res.observation}\n{note}".strip()
-            self._obs = res.observation
-            self.current.result = res.result
-            submitted = self._extract_flag(res)
-            if submitted is not None:
-                self.submitted_flag = submitted
-            submission = self._extract_submission(res)
-            if submission is not None:
-                self.workspace.record_submission(submission)
-            if a is not None and res.tool_calls:
-                a.ingest(Role.EXECUTOR, step_id=self.current.id,
-                         tool_calls=res.tool_calls)
-                n = len(res.tool_calls)
-                self.signals.emit(Signal.CTX_INGEST, role=Role.EXECUTOR,
-                                  detail=f"step_id={self.current.id} tool_calls={n}  {n} use_tool + {n} tool_result  trace 通道")
-            self._go(EngineState.STEP_EVAL, f"step {self.current.id} executed")
+                res = await self._run_step(self.current)
+                if res is None:
+                    return  # 取消路径已转 STEP_EVAL
+                self._wave_results = [(self.current, res)]
+                self._go(EngineState.STEP_EVAL,
+                         f"step {self.current.id} executed")
         elif s == EngineState.STEP_EVAL:
-            if self.current is not None and self.current.status.value == "SKIPPED":
+            if self._max_concurrency > 1:
+                await self._step_eval_wave()
+            elif self.current is not None and self.current.status.value == "SKIPPED":
                 # 被取消的步骤:SKIPPED 即终态,跳过评估直接回调度(取消路径经 _finish_cancelled_step 转入)
                 self.current = None
                 set_run_context(node_id=None, round=None)
                 self._go(EngineState.SCHEDULING, "step cancelled")
                 return
-            ctx = await self._assemble_ctx(
-                Role.EVALUATOR_STEP, step_id=self.current.id,
-                system=self.evaluator.system_for(Role.EVALUATOR_STEP))
-            digest = self._step_tool_digest(self.current.id)
-            obs_parts = [p for p in (self._obs, digest) if p]
-            if obs_parts:
-                obs = "\n\n".join(obs_parts).strip()
-                ctx = f"{ctx}\n\nobservation: {obs}".strip()
-            t = PhaseTimer("step_eval", deadline_ms=self._phase_deadline("step_eval"))
-            with t:
-                res = await self._safe_call(
-                    lambda: self._llm_wrap(Role.EVALUATOR_STEP,
-                        lambda: self.evaluator.step_eval(ctx), ctx_size=count_tokens(ctx)),
-                    lambda exc: EvalResult(Verdict.ESCALATE,
-                        f"步骤校验异常: {type(exc).__name__}: {exc}"),
-                )
-            if t.timed_out:
-                self.signals.emit(Signal.PHASE_TIMEOUT, phase="step_eval",
-                                  elapsed_ms=t.elapsed_ms, step_id=self.current.id)
-                res = EvalResult(Verdict.ESCALATE, f"步骤校验超时({t.elapsed_ms:.0f}ms)")
-            if res.is_completed:
-                self.task_completed = True
-                # ee 已判任务达成:同步把未决 goal 置完成,消除报告矛盾
-                for g in self.goals:
-                    self._goal_complete.setdefault(g.id, [])
-            diagnosis = getattr(res, "diagnosis", Diagnosis.OTHER)
-            if res.verdict == Verdict.RETRY:
-                if diagnosis == Diagnosis.PLANNER_TARGET:
-                    # 目标本身错了:不浪费重试,升级并触发该步骤单节点重设计
-                    self.bp.set_status(self.current.id, StepStatus.ESCALATED)
-                    self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
-                    self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
-                                      verdict=Verdict.ESCALATE, observation=self._obs or "",
-                                      attempts=self.current.attempts)
-                    await self._replan(EvalSource.STEP_EVAL, res,
-                                       scope_step_id=self.current.id)
-                elif self.current.attempts >= self.current.max_attempts:
-                    self.bp.set_status(self.current.id, StepStatus.ESCALATED)
-                    self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
-                    self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
-                                      verdict=Verdict.ESCALATE, observation=self._obs or "",
-                                      attempts=self.current.attempts)
-                    await self._replan(EvalSource.STEP_EVAL, res)
-                else:
-                    self.bp.set_status(self.current.id, StepStatus.RETRY)
-                    self._record_step(Verdict.RETRY, is_completed=self.task_completed)
-                    self._record_opinion(EvalSource.STEP_EVAL, res,
-                                         step_id=self.current.id)
-                    self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
-                                      verdict=Verdict.RETRY, observation=self._obs or "",
-                                      attempts=self.current.attempts)
-                    self._log.hint_tick_extra("retry")
-                    # 漂移重试继承压缩 ctx(旧轨迹摘要,避免被错误路径继续带偏);其余保留原始轨迹
-                    self._retry_mode = "compressed" if diagnosis == Diagnosis.DRIFT else "raw"
+            else:
+                action, res = await self._step_eval_one(self.current)
+                if action == "pass":
+                    self.current = None
+                    set_run_context(node_id=None, round=None)
+                    self._go(EngineState.SCHEDULING, "step passed")
+                elif action == "retry":
                     self._go(EngineState.EXECUTING,
                              f"step {self.current.id} retry {self.current.attempts}/{self.current.max_attempts}")
-            elif res.verdict == Verdict.ESCALATE:
-                self.bp.set_status(self.current.id, StepStatus.ESCALATED)
-                self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
-                self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
-                                  verdict=Verdict.ESCALATE, observation=self._obs or "",
-                                  attempts=self.current.attempts)
-                scope = self.current.id if diagnosis == Diagnosis.PLANNER_TARGET else None
-                await self._replan(EvalSource.STEP_EVAL, res, scope_step_id=scope)
-            elif res.verdict == Verdict.PASS:
-                self.bp.set_status(self.current.id, StepStatus.PASSED)
-                self._record_step(Verdict.PASS, is_completed=self.task_completed)
-                self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
-                                  verdict=Verdict.PASS, observation=self._obs or "",
-                                  attempts=self.current.attempts)
-                # 步骤通过后,评估 goal list:比对未完成 goal 与当前世界模型(DAG)
-                await self._eval_goals_after_pass(ctx)
-                self.current = None
-                set_run_context(node_id=None, round=None)
-                self._go(EngineState.SCHEDULING, "step passed")
-            else:
-                self.bp.set_status(self.current.id, StepStatus.ESCALATED)
-                self._record_step(Verdict.ESCALATE, is_completed=self.task_completed)
-                self.signals.emit(Signal.STEP_ENDED, step_id=self.current.id,
-                                  verdict=Verdict.ESCALATE, observation=self._obs or "",
-                                  attempts=self.current.attempts)
-                await self._replan(EvalSource.STEP_EVAL, res)
+                elif action == "replan_step":
+                    await self._replan(EvalSource.STEP_EVAL, res,
+                                       scope_step_id=self.current.id)
+                else:
+                    await self._replan(EvalSource.STEP_EVAL, res)
         elif s == EngineState.REFLECTING:
             ctx = await self._assemble_ctx(
                 Role.EVALUATOR_TASK,

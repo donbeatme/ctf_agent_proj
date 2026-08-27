@@ -31,7 +31,7 @@ class Executor:
     # 系统提示词(经 engine 传入 SystemPromptComponent 渲染;mock 为空)
     system: str = ""
 
-    async def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
+    async def run(self, step, ctx: str, tool_exec=None, runner=None) -> ExecResult:
         raise NotImplementedError
 
     def match_experience(self) -> list[dict]:
@@ -51,7 +51,7 @@ class MockExecutor(Executor):
         self._tool_calls = tool_calls
         self._fn = fn
 
-    async def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
+    async def run(self, step, ctx: str, tool_exec=None, runner=None) -> ExecResult:
         if self._fn is not None:
             try:
                 r = self._fn(step, ctx, tool_exec)
@@ -501,14 +501,16 @@ class RealExecutor(Executor):
 
     # ===== 执行 =====
 
-    async def run(self, step, ctx: str, tool_exec=None) -> ExecResult:
+    async def run(self, step, ctx: str, tool_exec=None, runner=None) -> ExecResult:
+        """执行一个步骤。runner 可选:并行 wave 每步注入独立 CommandRunner(各持各的
+        容器租约);缺省用 self.runner(串行会话 runner,引擎已注入 handle)。"""
         category = self._category(step)
 
         async def exec_tool(name: str, args: dict):
             if name == "run_command":
-                return await self._run_command(args, category)
+                return await self._run_command(args, category, runner)
             if name == "run_python":
-                return await self._run_python(args, category)
+                return await self._run_python(args, category, runner)
             if name == "submit_flag":
                 return self._submit_flag(args)
             if name == "answer":
@@ -543,7 +545,7 @@ class RealExecutor(Executor):
             total_usage=getattr(tr, "total_usage", None),
         )
 
-    async def _run_command(self, args: dict, category: str) -> dict:
+    async def _run_command(self, args: dict, category: str, runner=None) -> dict:
         cmd = args.get("command")
         if not cmd or not str(cmd).strip():
             return {"error": "run_command 需要 command"}
@@ -551,7 +553,7 @@ class RealExecutor(Executor):
             cwd = self._cwd(args)
         except ValueError as exc:
             return {"error": str(exc)}
-        out = await self.runner.run(
+        out = await (runner or self.runner).run(
             str(cmd),
             cwd=cwd,
             category=category,
@@ -560,7 +562,7 @@ class RealExecutor(Executor):
         )
         return out.as_dict()
 
-    async def _run_python(self, args: dict, category: str) -> dict:
+    async def _run_python(self, args: dict, category: str, runner=None) -> dict:
         code = args.get("code")
         if not code:
             return {"error": "run_python 需要 code"}
@@ -568,7 +570,7 @@ class RealExecutor(Executor):
             cwd = self._cwd(args)
         except ValueError as exc:
             return {"error": str(exc)}
-        out = await self.runner.run_python(
+        out = await (runner or self.runner).run_python(
             code,
             cwd=cwd,
             category=category,
