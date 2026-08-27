@@ -106,10 +106,10 @@ async def test_run_python_writes_syncs_and_runs(tmp_path):
     m = SandboxManager(backend=bk)
     out = await m.run_python("print('x')", cwd=tmp_path)
     assert out.ok
-    assert (tmp_path / "_ctf_exec.py").read_text(encoding="utf-8") == "print('x')"
     key = session_key_for(tmp_path)
+    assert (tmp_path / f"_ctf_exec_{key}.py").read_text(encoding="utf-8") == "print('x')"
     assert bk.synced == [(tmp_path.resolve(), key)]
-    assert bk.calls == ["python3 /work/_ctf_exec.py"]
+    assert bk.calls == [f"python3 /work/_ctf_exec_{key}.py"]
 
 
 async def test_cleanup_delegates(tmp_path):

@@ -70,7 +70,7 @@ async def test_run_python_does_not_write_script_locally(tmp_path):
     sbx = StubSandbox()
     r = CommandRunner(sandbox=sbx)
     await r.run_python("print(1)", cwd=tmp_path)
-    assert not (tmp_path / "_ctf_exec.py").exists()  # 脚本由沙箱自管,runner 不写
+    assert not any(p.name.startswith("_ctf_exec") for p in tmp_path.iterdir())  # 脚本由沙箱自管,runner 不写
 
 
 async def test_docker_backend_target_name(tmp_path):

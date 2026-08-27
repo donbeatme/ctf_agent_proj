@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 
-from opslog import ErrorLevel, attach, detach, emit, record_error, reset, set_log_path
+from opslog import (
+    ErrorLevel, attach, detach, emit, get_run_context, record_error, reset,
+    set_log_path, set_run_context,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -94,3 +98,29 @@ def test_record_error_without_exc(log):
     rec = json.loads(log.read_text(encoding="utf-8").strip().splitlines()[0])
     assert rec["level"] == "cleanup"
     assert rec["error"] == ""
+
+
+# ===== run_context:按执行单元隔离(ContextVar,非线程) =====
+
+
+def test_run_context_isolated_per_async_task(log):
+    """actor mode 前提:并发 async task 各设各的 run_context,读回各自值,互不泄漏。
+
+    threading.local 会被同一线程上的所有 task 共享(最后设的赢),此测必挂;
+    ContextVar 随 task context 切换,任务间天然隔离。
+    """
+
+    async def worker(node_id, arrived, go):
+        set_run_context(node_id=node_id, round=1)
+        arrived.append(node_id)          # 登记已设好
+        if len(arrived) == 2:
+            go.set()                     # 双方都设好才放行(确定性交错)
+        await go.wait()
+        await asyncio.sleep(0)           # 让出控制权,制造并发读
+        return get_run_context()["node_id"]
+
+    async def main():
+        arrived, go = [], asyncio.Event()
+        return await asyncio.gather(worker("sA", arrived, go), worker("sB", arrived, go))
+
+    assert asyncio.run(main()) == ["sA", "sB"]

@@ -102,7 +102,7 @@ def _make_tree(root: Path):
     (sub / "b.txt").write_text("world", encoding="utf-8")
     # 忽略项
     (root / ".git").mkdir()
-    (root / "_ctf_exec.py").write_text("print(1)", encoding="utf-8")
+    (root / "_ctf_exec_abc123.py").write_text("print(1)", encoding="utf-8")
     (root / "__pycache__").mkdir()
 
 
@@ -112,8 +112,8 @@ async def test_sync_uploads_new_files_and_mkdirs(tmp_path):
     await _backend(sftp).sync(tmp_path)
 
     uploaded = {remote for _, remote in sftp.put_calls}
-    # _ctf_exec.py 必须上传:run_python 先本地写脚本再 sync,忽略会导致远端缺文件
-    assert uploaded == {"/root/ctf/a.txt", "/root/ctf/sub/b.txt", "/root/ctf/_ctf_exec.py"}
+    # _ctf_exec_*.py 必须上传:run_python 先本地写脚本再 sync,忽略会导致远端缺文件
+    assert uploaded == {"/root/ctf/a.txt", "/root/ctf/sub/b.txt", "/root/ctf/_ctf_exec_abc123.py"}
     assert "/root/ctf" in sftp.mkdirs
     assert "/root/ctf/sub" in sftp.mkdirs
 

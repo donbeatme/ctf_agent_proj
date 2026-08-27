@@ -169,12 +169,13 @@ class SandboxManager:
 
     async def run_python(self, code, *, cwd=None, category=None, tool_id=None,
                          target=None, timeout=None):
-        """沙箱内执行 Python:写 _ctf_exec.py → sync → python3 运行。"""
+        """沙箱内执行 Python:写 _ctf_exec_{key}.py → sync → python3 运行。"""
         work = Path(cwd or os.getcwd()).resolve()
         work.mkdir(parents=True, exist_ok=True)
-        script = work / "_ctf_exec.py"
-        script.write_text(code, encoding="utf-8")
         key = self.session_key(work)
+        # 文件名带 session key:同 cwd 多 actor 各写各的,避免共享 _ctf_exec.py 被覆盖
+        script = work / f"_ctf_exec_{key}.py"
+        script.write_text(code, encoding="utf-8")
         await self.backend.ensure(key)
         try:
             await self.backend.sync(work, session_key=key)
@@ -185,7 +186,7 @@ class SandboxManager:
             emit("sandbox", "sync", cwd=str(work), session_key=key)
         if self.settings.install_auto and tool_id:
             await self._ensure_deps(tool_id, key)
-        argv = ["python3", "/work/_ctf_exec.py"]
+        argv = ["python3", f"/work/_ctf_exec_{key}.py"]
         t0 = time.perf_counter()
         raw = await self.backend.exec(shlex.join(argv), session_key=key, timeout=timeout)
         out = self._to_outcome(raw, argv, target or self.backend.name, t0)

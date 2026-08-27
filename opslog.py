@@ -8,7 +8,7 @@ run.log(人类可读)与 workspace.events.jsonl(断点续跑账本)是它的投�
 - seq     全进程单调序号,ops.log 追加顺序即事件顺序(事件源重放的索引)
 - node_id DAG 步骤 id(引擎当前 step),未进入步骤时省略
 - round   执行轮次(步骤 attempt 或步骤内工具调用轮),未进入执行轮时省略
-node_id/round 通常经 set_run_context 以线程环境自动落到每条事件,也可在 emit
+node_id/round 通常经 set_run_context 以执行环境(随 task context)自动落到每条事件,也可在 emit
 显式传参覆盖(显式 None 省略该字段)。
 
 用法:
@@ -22,6 +22,7 @@ node_id/round 通常经 set_run_context 以线程环境自动落到每条事件,
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import threading
@@ -37,7 +38,11 @@ _sinks: list = []
 _MAX_FIELD = 500          # 标量字段截断(短字段)
 _MAX_DETAIL = 64 * 1024   # 结构化 payload(dict/list)截断(长 detail 保留足够保真)
 _seq = 0                  # 全进程单调序号(单源有序流)
-_ctx = threading.local()  # run 作用域环境:run_id / node_id / round
+# run 作用域环境:run_id / node_id / round。
+# 用 ContextVar 而非 threading.local:actor mode 下多个 actor 是同一线程上的并发
+# async task,threading.local 被所有 task 共享会跨 actor 泄漏;ContextVar 随 task
+# context 切换,按执行单元(step task)隔离。
+_CTX: contextvars.ContextVar[dict | None] = contextvars.ContextVar("run_context", default=None)
 _UNSET = object()         # 区分"未传(用环境)"与"显式 None(省略该字段)"
 
 
@@ -72,24 +77,27 @@ def detach(sink) -> None:
 
 
 def set_run_context(*, run_id=_UNSET, node_id=_UNSET, round=_UNSET) -> None:
-    """设置当前线程的 run 作用域环境:此后 emit 未显式指定的 run_id/node_id/round
+    """设置当前执行环境的 run 作用域环境:此后 emit 未显式指定的 run_id/node_id/round
     自动落到这些值。显式 None 清除对应字段;run_id 置 None 结束 run 作用域。
     引擎在 run 开始/步骤切换/执行轮切换时调用,使外围事件自动携带归属。
     """
+    cur = dict(_CTX.get() or {})
     if run_id is not _UNSET:
-        _ctx.run_id = run_id
+        cur["run_id"] = run_id
     if node_id is not _UNSET:
-        _ctx.node_id = node_id
+        cur["node_id"] = node_id
     if round is not _UNSET:
-        _ctx.round = round
+        cur["round"] = round
+    _CTX.set(cur)
 
 
 def get_run_context() -> dict:
-    """当前线程的 run 作用域环境(保存/恢复、测试断言用)。"""
+    """当前执行环境的 run 作用域环境(保存/恢复、测试断言用)。"""
+    cur = _CTX.get() or {}
     return {
-        "run_id": getattr(_ctx, "run_id", None),
-        "node_id": getattr(_ctx, "node_id", None),
-        "round": getattr(_ctx, "round", None),
+        "run_id": cur.get("run_id"),
+        "node_id": cur.get("node_id"),
+        "round": cur.get("round"),
     }
 
 
@@ -98,9 +106,7 @@ def reset() -> None:
     global _seq
     _sinks.clear()
     _seq = 0
-    _ctx.run_id = None
-    _ctx.node_id = None
-    _ctx.round = None
+    _CTX.set({})
 
 
 def emit(domain: str, event: str, *, run_id=_UNSET, node_id=_UNSET,
@@ -110,12 +116,13 @@ def emit(domain: str, event: str, *, run_id=_UNSET, node_id=_UNSET,
     run_id/node_id/round:显式传值覆盖线程环境;未传回落到环境;显式 None 省略该字段。
     绝不抛异常。
     """
+    cur = _CTX.get() or {}
     if run_id is _UNSET:
-        run_id = getattr(_ctx, "run_id", None)
+        run_id = cur.get("run_id")
     if node_id is _UNSET:
-        node_id = getattr(_ctx, "node_id", None)
+        node_id = cur.get("node_id")
     if round is _UNSET:
-        round = getattr(_ctx, "round", None)
+        round = cur.get("round")
     record = {
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "domain": domain,
