@@ -55,6 +55,17 @@ class StepRecordDetail:
 
 
 @dataclass
+class StepCancelDetail:
+    """步骤中断事件:正在执行的 step 实例被打断(重规划重建/用户停跑)。
+
+    运行侧前置契约(projections.py):并行下 replan 重建 RUNNING 实例必须先取消
+    旧实例(token + SKIP + 抑制其 step_record);本事件是该中断的事件源落账,resume
+    重放据此抑制迟到 step_record。step_id 在 Event 顶层,detail 只带 reason。
+    """
+    reason: str = ""       # 取消原因(如"用户停止"/"replan rebuild")
+
+
+@dataclass
 class SubmissionDetail:
     """提交判定事件:executor 提交 flag 后的平台结果(正确/错误/仅记录/异常)。"""
     flag: str = ""
@@ -158,6 +169,7 @@ EVENT_SCHEMA: dict[str, type] = {
     "reflect":          OpinionDetail,
     "scheduling":       OpinionDetail,
     "step_record":      StepRecordDetail,
+    "step_cancel":      StepCancelDetail,
     "use_tool":         ToolCallDetail,
     "tool_result":      ToolResultDetail,
     "goal_eval":        GoalEvalDetail,
@@ -352,6 +364,7 @@ class EventKind(StrEnum):
     REFLECT = "reflect"
     SCHEDULING = "scheduling"
     STEP_RECORD = "step_record"
+    STEP_CANCEL = "step_cancel"            # 正在执行的 step 实例被打断(重规划/用户停跑)
     USE_TOOL = "use_tool"
     TOOL_RESULT = "tool_result"
     GOAL_EVAL = "goal_eval"

@@ -14,9 +14,11 @@ turn_consumed)。
 
 step 实例身份不显式打标,由 REPLAN 谱系派生:step 被 remove 后重加 = 新实例
 (隐式版本),replay 的状态叠加按出生下标过滤,旧实例的 step_record 不污染新实例。
-**运行侧前置契约**:并行下 replan 若重建正在 RUNNING 的 step 实例,必须先取消
-旧实例(token + SKIP + 抑制其 step_record),否则同 step_id 双实例并存——这是
-中断机制(step_cancel)的硬前提,重建侧(本模块)与运行侧由它衔接。
+**运行侧前置契约**(已在 engine 落地):并行下 replan 若重建正在 RUNNING 的 step
+实例,必须先取消旧实例——token = engine.cancel_current + task.cancel(硬中断),
+SKIP = set_status(SKIPPED),抑制其 step_record = 引擎取消路径不调 _record_step
+(运行时纪律)+ 本模块 _cancelled 折叠(迟到记录防御)。中断落 step_cancel 事件
+(事件源化,resume 可重建),重建侧(本模块)与运行侧由它衔接。
 """
 
 from __future__ import annotations
@@ -57,6 +59,9 @@ class Projection:
     last_replan_idx: int = -1                    # 最后 replan 事件在事件流的下标
     history_events: list = field(default_factory=list)     # list[Event]: step_record + replan
     goal_ids: list[str] = field(default_factory=list)      # run 级目标 id(replay 时注入)
+    # 内部折叠书签(不序列化、不入公共读模型):
+    _cancelled: set[str] = field(default_factory=set)          # 被 step_cancel 取消且未重生成的 step_id
+    _suppressed_records: set[int] = field(default_factory=set)  # 被抑制的 step_record 下标(折叠与 overlay 精确一致)
 
     def _mark_task_completed(self):
         """ee 判定任务已完成:全部目标置"有证据的完成"(空证据列表),与 _rebuild_from_events 对齐。"""
@@ -106,18 +111,28 @@ def apply(proj: Projection, ev, idx: int) -> None:
             proj.stalls += 1
         else:
             proj.stalls = 0
+        # lift:replan 谱系里出现的 step 解除取消抑制(承认其新状态 = 实例重生成/新意图)
+        dag = getattr(detail, "dag", None)
+        if dag:
+            proj._cancelled -= set((dag.get("steps") or {}).keys())
+    elif kind == EventKind.STEP_CANCEL:
+        proj._cancelled.add(ev.step_id)
     elif kind == EventKind.STEP_RECORD:
-        is_completed = bool(getattr(detail, "is_completed", False))
-        proj.steps[ev.step_id] = StepResult(
-            step_id=ev.step_id,
-            verdict=ev.verdict or "",
-            observation=getattr(detail, "observation", "") or "",
-            result=getattr(detail, "result", None) or {},
-            attempts=int(getattr(detail, "attempts", 0) or 0),
-            is_completed=is_completed,
-        )
-        if is_completed:
-            proj._mark_task_completed()
+        if ev.step_id in proj._cancelled:
+            # 旧实例取消后的迟到记录:抑制 steps 折叠(记录下标,overlay 同步跳过)
+            proj._suppressed_records.add(idx)
+        else:
+            is_completed = bool(getattr(detail, "is_completed", False))
+            proj.steps[ev.step_id] = StepResult(
+                step_id=ev.step_id,
+                verdict=ev.verdict or "",
+                observation=getattr(detail, "observation", "") or "",
+                result=getattr(detail, "result", None) or {},
+                attempts=int(getattr(detail, "attempts", 0) or 0),
+                is_completed=is_completed,
+            )
+            if is_completed:
+                proj._mark_task_completed()
     elif kind == EventKind.GOAL_EVAL:
         if getattr(detail, "complete", False):
             proj.goal_complete[detail.goal_id] = list(getattr(detail, "evidence", None) or [])
@@ -171,10 +186,13 @@ def replay(events, goal_ids=None) -> Projection:
     #   ① birth 判别——被 replan remove+重加 = 新实例,旧实例的 step_record 不叠;
     #   ② 快照终态守卫——快照已是 PASSED/SKIPPED(取消/已执行)= 最新意图,旧记录
     #      不叠(同时避免 SKIPPED 撞旧记录触发终态保护抛 DAGError)。
+    #   ③ 取消抑制——step_cancel 取消实例的迟到 step_record 不叠(与折叠 _suppressed_records 精确一致)。
     if proj.blueprint is not None:
         birth = _derive_birth_index(events)
         for idx, e in enumerate(events):
             if e.kind != EventKind.STEP_RECORD or e.step_id not in proj.blueprint.steps:
+                continue
+            if idx in proj._suppressed_records:
                 continue
             if birth.get(e.step_id, -1) > idx:
                 continue

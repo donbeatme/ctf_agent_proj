@@ -313,7 +313,11 @@ class Workspace:
         self.add_event(agent, EventKind.STEP_RECORD, step_id=step_id, verdict=verdict,
                        observation=observation, result=result or {},
                        attempts=attempts, is_completed=is_completed, status=status, **kw)
-        return self.steps[step_id]
+        if step_id in self.proj.steps:
+            return self.proj.steps[step_id]
+        # 取消抑制(step_cancel 后旧实例迟到记录):折叠不落投影,返回构造产物满足调用方契约
+        return StepResult(step_id=step_id, verdict=verdict, observation=observation,
+                          result=result or {}, attempts=attempts, is_completed=is_completed)
 
     def set_env(self, key, val):
         self.env_state[key] = val

@@ -4,7 +4,7 @@ from agent.blueprint import Blueprint, Step, StepStatus
 from agent.projections import Projection, apply, replay
 from agent.schema import (
     EventKind, GoalEvalDetail, LLMUsageDetail, OpinionDetail, ReplanDetail,
-    StepRecordDetail, SubmissionDetail,
+    StepCancelDetail, StepRecordDetail, SubmissionDetail,
 )
 from agent.workspace import Event, Workspace
 
@@ -198,3 +198,50 @@ def test_task_completed_sticky_across_readd():
     ]
     p = replay(events, goal_ids=["g1"])
     assert p.task_completed is True
+
+
+# ===== 运行侧中断(step_cancel):取消折叠 + 迟到记录抑制 =====
+
+
+def test_step_cancel_suppresses_late_record():
+    """step_cancel 后同实例的迟到 step_record:steps 折叠与 blueprint overlay 双抑制。"""
+    events = [
+        _event(EventKind.REPLAN, ReplanDetail(changes="init", dag=_dag("s1", "s2")), agent="planner"),
+        _event(EventKind.STEP_CANCEL, StepCancelDetail(reason="rebuild"),
+               step_id="s2", agent="system"),
+        _event(EventKind.STEP_RECORD, StepRecordDetail(observation="stale", status="PASSED"),
+               step_id="s2", verdict="pass", agent="evaluator_step"),
+    ]
+    p = replay(events)
+    assert "s2" not in p.steps                       # 迟到记录被抑制
+    assert p.blueprint.steps["s2"].status == StepStatus.PENDING  # overlay 同步跳过,快照原状
+
+
+def test_step_cancel_rebirth_lifts_suppression():
+    """重生成(lift):取消 → remove → readd = 新实例,新实例的 step_record 正常折叠。"""
+    events = [
+        _event(EventKind.REPLAN, ReplanDetail(changes="init", dag=_dag("s1", "s2")), agent="planner"),
+        _event(EventKind.STEP_CANCEL, StepCancelDetail(reason="rebuild"),
+               step_id="s2", agent="system"),
+        _event(EventKind.REPLAN, ReplanDetail(changes="rm s2", dag=_dag("s1")), agent="planner"),
+        _event(EventKind.REPLAN, ReplanDetail(changes="readd s2", dag=_dag("s1", "s2")), agent="planner"),
+        _event(EventKind.STEP_RECORD, StepRecordDetail(observation="o", status="RETRY"),
+               step_id="s2", verdict="retry", agent="evaluator_step"),
+    ]
+    p = replay(events)
+    assert p.steps["s2"].verdict == "retry"                        # 新实例记录未被抑制
+    assert p.blueprint.steps["s2"].status == StepStatus.RETRY      # overlay 生效
+
+
+def test_step_cancel_preserves_pre_cancel_record():
+    """取消前的真实记录不误杀:record → cancel 时序下,取消前的折叠与 overlay 保留。"""
+    events = [
+        _event(EventKind.REPLAN, ReplanDetail(changes="init", dag=_dag("s1", "s2")), agent="planner"),
+        _event(EventKind.STEP_RECORD, StepRecordDetail(observation="o", status="RETRY"),
+               step_id="s2", verdict="retry", agent="evaluator_step"),
+        _event(EventKind.STEP_CANCEL, StepCancelDetail(reason="rebuild"),
+               step_id="s2", agent="system"),
+    ]
+    p = replay(events)
+    assert p.steps["s2"].verdict == "retry"
+    assert p.blueprint.steps["s2"].status == StepStatus.RETRY
