@@ -25,10 +25,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 @dataclass
 class ReplanDetail:
-    """planner 产出/重规划落账:规划理由 + 触发源 + 变更摘要。"""
+    """planner 产出/重规划落账:规划理由 + 触发源 + 变更摘要 + DAG 快照。
+
+    dag 是 REPLAN 事件携带的完整 Blueprint.to_dict() 快照——事件流重放重建 DAG
+    的素材;live path 引擎直接持有物化 blueprint,快照只服务 load/resume。
+    """
     reason: str = ""
     source: str = ""       # EvalSource.value(plan_review/step_eval/reflect/scheduling)
     changes: str = ""      # _patch_summary 变更摘要
+    dag: dict | None = None  # 当前 DAG 全量快照(重放重建用)
 
 
 @dataclass
@@ -41,11 +46,52 @@ class OpinionDetail:
 
 @dataclass
 class StepRecordDetail:
-    """步骤验收记录:执行观察 + 产物 + 重试次数 + 任务完成标记。"""
+    """步骤验收记录:执行观察 + 产物 + 重试次数 + 任务完成标记 + 验收时 DAG 状态。"""
     observation: str = ""
     result: dict = field(default_factory=dict)
     attempts: int = 0
     is_completed: bool = False  # 该步验收时 ee 判定任务已完成
+    status: str | None = None   # 验收时刻的 DAG 步骤状态(事件自洽)
+
+
+@dataclass
+class SubmissionDetail:
+    """提交判定事件:executor 提交 flag 后的平台结果(正确/错误/仅记录/异常)。"""
+    flag: str = ""
+    ok: bool | None = None
+    correct: bool | None = None
+    message: str | None = None
+
+
+@dataclass
+class LLMUsageDetail:
+    """token 用量事件:单次 LLM 调用的记账(per-run run_tokens 的投影源)。"""
+    role: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    latency_ms: int = 0
+    ctx_size: int = 0
+    ok: bool = True
+
+
+@dataclass
+class PlanReviewPassDetail:
+    """计划评审 PASS 事件:评审通过后残留 REVISE 步骤回 PENDING 的状态迁移。"""
+    reason: str = ""
+    revised: list[str] = field(default_factory=list)  # 被清 REVISE 的步骤列表
+
+
+@dataclass
+class StepResult:
+    """该步的执行产物/观察/verdict(每个 step 一条,存 state.json/投影缓存)。"""
+
+    step_id: str
+    verdict: str = ""
+    observation: str = ""
+    result: dict = field(default_factory=dict)
+    attempts: int = 0
+    is_completed: bool = False  # ee 判定任务是否已完成
 
 
 # 步骤产物数据模型(可扩展,extra="allow" 允许 executor 添加任意字段)
@@ -115,6 +161,9 @@ EVENT_SCHEMA: dict[str, type] = {
     "use_tool":         ToolCallDetail,
     "tool_result":      ToolResultDetail,
     "goal_eval":        GoalEvalDetail,
+    "submission":       SubmissionDetail,
+    "llm_usage":        LLMUsageDetail,
+    "plan_review_pass": PlanReviewPassDetail,
     "audit_plan_review": PlanReviewAuditDetail,
     "audit_step_eval":  StepEvalAuditDetail,
     "audit_reflect":    ReflectAuditDetail,
@@ -306,6 +355,9 @@ class EventKind(StrEnum):
     USE_TOOL = "use_tool"
     TOOL_RESULT = "tool_result"
     GOAL_EVAL = "goal_eval"
+    SUBMISSION = "submission"            # executor 提交 flag 后的平台判定
+    LLM_USAGE = "llm_usage"              # 单次 LLM 调用的 token 记账
+    PLAN_REVIEW_PASS = "plan_review_pass"  # 计划评审通过后 REVISE→PENDING 状态迁移
     AUDIT_PLAN_REVIEW = "audit_plan_review"  # audit 评估器富详情通道(经 event_sink 落 events.jsonl)
     AUDIT_STEP_EVAL = "audit_step_eval"
     AUDIT_REFLECT = "audit_reflect"

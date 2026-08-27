@@ -32,7 +32,7 @@ from agent.ctx import (
     TraceComponent,
 )
 from agent.schema import (
-    EVENT_SCHEMA, EventKind, Role, SOURCE_AGENT, normalize_event_detail,
+    EVENT_SCHEMA, EventKind, Role, SOURCE_AGENT, StepResult, normalize_event_detail,
 )
 
 _RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
@@ -68,18 +68,6 @@ def _exp_enabled(role: Role) -> bool:
 
 def _now():
     return time.strftime("%Y-%m-%d %H:%M:%S")
-
-
-@dataclass
-class StepResult:
-    """该步的执行产物/观察/verdict(每个 step 一条,存 state.json)。"""
-
-    step_id: str
-    verdict: str = ""
-    observation: str = ""
-    result: dict = field(default_factory=dict)
-    attempts: int = 0
-    is_completed: bool = False  # ee 判定任务是否已完成
 
 
 @dataclass
