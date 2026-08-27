@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from agent.blueprint import Blueprint
+from agent.blueprint import Blueprint, StepStatus
 from agent.schema import (
     EvalEvent, EvalSource, EventKind, Role, StepResult,
 )
@@ -134,4 +134,12 @@ def replay(events, goal_ids=None) -> Projection:
         if e.kind == EventKind.REPLAN and getattr(e.detail, "dag", None):
             proj.blueprint = Blueprint.from_dict(e.detail.dag)
             break
+    # REPLAN 快照是规划时刻的 DAG,执行态(步骤状态)可能落后;以 step_record 事件的
+    # status 叠加各步最终 DAG 状态(最后一次胜出)——事件源合一,resume 拿到真实终态。
+    if proj.blueprint is not None:
+        for e in events:
+            if e.kind == EventKind.STEP_RECORD and e.step_id in proj.blueprint.steps:
+                st = getattr(e.detail, "status", None)
+                if st:
+                    proj.blueprint.set_status(e.step_id, StepStatus(st), force=True)
     return proj

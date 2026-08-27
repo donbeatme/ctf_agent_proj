@@ -7,7 +7,7 @@
 
 import pytest
 
-from agent.blueprint import Blueprint, Step
+from agent.blueprint import Blueprint, Step, StepStatus
 from agent.ctx import (
     AgentCommComponent,
     CtxAssembler,
@@ -411,3 +411,21 @@ async def test_dag_render_includes_skill_binding(ws):
     assert "skill_id" in ctx and "doc0" in ctx
     ctx2, _, _ = await ws.assembler.assemble("executor", step_id="s1")
     assert "skill: doc0" in ctx2
+
+
+async def test_render_unchanged_after_event_replay(ws):
+    """事件溯源:同一事件流重放(load)后,History/AgentComm/DAG 渲染逐字不变。"""
+    bp = Blueprint(meta={"task": "t"})
+    bp.add_step(Step(id="s1", instruction="做", criterion="可验收"))
+    ws.set_blueprint(bp)
+    ws.record_opinion(EvalSource.STEP_EVAL, "retry", "s1 要更具体", step_id="s1")
+    bp.set_status("s1", StepStatus.PASSED, force=True)   # 与 live path 一致:先 set_status 再 record_step
+    ws.record_step("s1", "pass", "完成", status="PASSED")
+
+    a = make_assembler(ws)
+    ctx1, _, _ = await a.assemble("planner", raw_content={"q": "x"}, goal_list=[Goal(id="目标一")])
+    ws.sync()
+    ws2 = Workspace.load("run-asm", root=ws.root.parent)
+    a2 = make_assembler(ws2)
+    ctx2, _, _ = await a2.assemble("planner", raw_content={"q": "x"}, goal_list=[Goal(id="目标一")])
+    assert ctx1 == ctx2

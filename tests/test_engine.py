@@ -1520,6 +1520,59 @@ def test_resume_rebuilds_turn_from_events(tmp_path):
     assert engine.turn[1].opinion == "计划仍需修订"
 
 
+def test_resume_after_kill_rebuilds_terminal_state_from_events(tmp_path):
+    """事件溯源确定性:清空 state.json 的 blueprint/steps(kill 崩溃窗口)后 resume,
+    终态从事件流重建,与快照完整的对照 run 完全一致(DAG/步骤状态/计数器)。"""
+    import json
+
+    from agent.workspace import Workspace
+
+    ws = Workspace.create("run-rk", MOCK_TASK, root=tmp_path)
+    responses = [
+        '{"add":[{"id":"s1","instruction":"扫描","criterion":"flag","depends_on":[]}],"reason":"i"}',
+        '{}',   # 反思终局修订:空补丁收尾
+    ]
+    state = {"i": 0}
+
+    def llm(**kw):
+        r = responses[min(state["i"], len(responses) - 1)]
+        state["i"] += 1
+        return r
+
+    planner = Planner(llm_call=llm, workspace=ws)
+    evaluator = MockEvaluator({
+        "evaluator_plan": lambda ctx: EvalResult(Verdict.PASS, "ok"),
+        "evaluator_step": lambda ctx: EvalResult(Verdict.PASS, "通过"),
+        "evaluator_task": lambda ctx: EvalResult(Verdict.DONE, "收尾"),
+    })
+    engine = Engine(planner, MockExecutor(observation="完成"), evaluator, workspace=ws)
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+
+    ref = Engine.resume("run-rk", _NoopPlanner(),
+                        MockExecutor(observation="x"),
+                        MockEvaluator({}), root=tmp_path)
+
+    # 模拟 kill:state.json 的 blueprint/steps 丢失,事件流保留
+    st_path = ws.root / "state.json"
+    st = json.loads(st_path.read_text(encoding="utf-8"))
+    st["blueprint"] = None
+    st["steps"] = {}
+    st_path.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    engine2 = Engine.resume("run-rk", _NoopPlanner(),
+                            MockExecutor(observation="x"),
+                            MockEvaluator({}), root=tmp_path)
+    assert engine2.scheduler.state == EngineState.DONE
+    assert engine2.bp is not None
+    assert engine2.bp.to_dict() == ref.bp.to_dict()          # DAG 从 REPLAN 快照重建
+    assert engine2.bp.steps["s1"].status.value == "PASSED"   # 状态从 step_record.status 叠加
+    assert engine2._goal_complete == ref._goal_complete
+    assert engine2._run_tokens == ref._run_tokens            # 用量从 llm_usage 事件重建
+    assert engine2.submitted_flag == ref.submitted_flag
+    assert engine2.run_result is not None
+
+
 # ===== 13. Planner LLM 调用异常保护 (P2-9) =====
 
 class _RaisePlanner:
