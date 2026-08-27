@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
 import time
 from abc import ABC, abstractmethod
@@ -47,6 +48,12 @@ def session_key_for(cwd) -> str:
 
 def container_name_for(session_key: str) -> str:
     return f"ctf-{session_key}"
+
+
+def sanitize_actor(actor: str) -> str:
+    """actor 标识归一为 docker-safe 字符集(小写字母数字_.-);空结果兜底 'x'。"""
+    s = re.sub(r"[^a-z0-9_.-]", "", actor.lower())
+    return s or "x"
 
 
 class SandboxBackend(ABC):
@@ -88,7 +95,8 @@ class SandboxManager:
     """
 
     def __init__(self, settings: SandboxSettings | None = None, backend=None,
-                 catalog=None, max_out: int = _MAX_OUT, max_err: int = _MAX_ERR):
+                 catalog=None, max_out: int = _MAX_OUT, max_err: int = _MAX_ERR,
+                 actor: str | None = None):
         self.settings = settings or SandboxSettings.from_env()
         if backend is None:
             from .ssh_backend import SshSandboxBackend  # lazy:避免构造时引 asyncssh
@@ -104,6 +112,8 @@ class SandboxManager:
         self.tools = ToolManager(self.backend, catalog=catalog)
         self.max_out = max_out
         self.max_err = max_err
+        # actor 维度:非 None 时 session_key 折叠 f"{sha1(cwd)[:12]}-{actor}",容器按 actor 隔离
+        self._actor = sanitize_actor(actor) if actor else None
 
     @property
     def target_name(self) -> str:
@@ -113,7 +123,10 @@ class SandboxManager:
     # ===== 生命周期 =====
 
     def session_key(self, cwd=None) -> str:
-        return session_key_for(cwd or os.getcwd())
+        key = session_key_for(cwd or os.getcwd())
+        if self._actor:
+            key = f"{key}-{self._actor}"
+        return key
 
     async def ensure(self, session_key: str | None = None) -> str:
         name = await self.backend.ensure(session_key)
