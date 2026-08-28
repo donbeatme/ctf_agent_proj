@@ -133,6 +133,7 @@ def run_task(args):
     emit("engine", "run_started", run_id=run_id,
          task=(task.get("title") or task.get("name") or "")[:120])
     ws = Workspace.create(run_id, task)
+    parallel_kw = _parallel_engine_kw(args)
     understander = None
     if getattr(args, "understander", "mock") == "real":
         from task_understanding.real_understander import RealTaskUnderstander
@@ -176,6 +177,7 @@ def run_task(args):
             workspace=ws,
             understander=understander,
             compress=make_compress(),
+            **parallel_kw,
         )
         holder["engine"] = engine
         sink = _ops_sink(ws, engine, run_id)
@@ -186,6 +188,7 @@ def run_task(args):
         finally:
             evaluator.close()
             detach(sink)
+            _close_scheduler(parallel_kw.get("scheduler"))
         emit("engine", "run_ended", run_id=run_id, state=engine.scheduler.state.value)
         print(f"run_id: {run_id}")
         print(f"终态: {engine.scheduler.state.value}  重规划 {engine.replans} 次")
@@ -208,6 +211,7 @@ def run_task(args):
         workspace=ws,
         understander=understander,
         compress=make_compress(),
+        **parallel_kw,
     )
     sink = _ops_sink(ws, engine, run_id)
     attach(sink)
@@ -218,6 +222,7 @@ def run_task(args):
         detach(sink)
         emit("engine", "run_ended", run_id=run_id, state="FAILED")
         print(f"run 异常(模型输出/计划非法?): {type(exc).__name__}: {exc}")
+        _close_scheduler(parallel_kw.get("scheduler"))
         return
     detach(sink)
     emit("engine", "run_ended", run_id=run_id, state=engine.scheduler.state.value)
@@ -228,11 +233,13 @@ def run_task(args):
     print("\n最终计划:")
     if engine.bp is None:
         print("  (无计划)")
+        _close_scheduler(parallel_kw.get("scheduler"))
         return
     for sid, s in engine.bp.steps.items():
         print(f"  {sid}\t{s.status.value}\tattempts={s.attempts}\t依赖={s.depends_on}")
         print(f"       instruction: {s.instruction}")
         print(f"       criterion:   {s.criterion}")
+    _close_scheduler(parallel_kw.get("scheduler"))
 
 def _platform_adapter():
     """按 env 构造平台适配器(凭证未配返回 None → 提交回退为仅记录)。"""
@@ -257,6 +264,41 @@ def _build_executor(args, ws=None, workdir=None):
     from agent.executor import MockExecutor
 
     return MockExecutor(observation="(mock) 执行完成")
+
+
+def _parallel_engine_kw(args, settings=None) -> dict:
+    """actor mode(--actors N>1)注入 Engine 的并行参数;ssh 未配置回退串行(打印警告不抛)。
+
+    并行:每步独立容器租约并发执行,依赖 SshProvider 连接池 + SandboxProvider 容器会话,
+    ExecutionScheduler 编排;Engine 注入 {scheduler, max_concurrency}。串行/不可用返回
+    空 dict(Engine **{} 无效果,保持原路径)。settings 可注入(测试/配置),None 从环境读。
+    """
+    n = int(getattr(args, "actors", 1) or 1)
+    if n <= 1:
+        return {}
+    try:
+        from agent.env_providers import SandboxProvider, SshProvider
+        from agent.scheduler import ExecutionScheduler
+
+        ssh = SshProvider(settings=settings, max_connections=n)
+        sched = ExecutionScheduler(providers=[SandboxProvider(ssh, settings=settings)])
+    except ValueError as exc:
+        print(f"actor mode 不可用({exc}),回退串行")
+        return {}
+    print(f"actor mode: {n} 并行执行器(ssh 连接池 {n} 条,每 actor 独立容器)")
+    return {"scheduler": sched, "max_concurrency": n}
+
+
+def _close_scheduler(sched) -> None:
+    """run 结束后关掉并行调度器:连接池 idle 连接 close、live 清零。引擎不负责关,入口收尾。
+
+    Engine.run 已跑完自身事件循环,这里另起一个关连接池(asyncssh 连接可能绑定旧循环,
+    关闭失败被 provider 内部吞掉,非致命)。
+    """
+    if sched is not None:
+        import asyncio
+
+        asyncio.run(sched.close())
 
 
 def _clean_challenge_dir(raw: dict) -> None:
@@ -352,6 +394,7 @@ def run_local_challenge(args):
     run_id = args.run_id or f"local-{time.strftime('%Y%m%d-%H%M%S')}"
     emit("engine", "run_started", run_id=run_id, task=str(args.challenge_dir)[:120])
     ws = Workspace.create(run_id, raw, root=_LOCAL_RUNS_ROOT)
+    parallel_kw = _parallel_engine_kw(args)
     planner = _local_planner(args.planner_mode, ws)
     image_understander = None
     if args.image_understanding == "ollama":
@@ -402,6 +445,7 @@ def run_local_challenge(args):
             workspace=ws,
             understander=understander,
             compress=make_compress(),
+            **parallel_kw,
         )
         holder["engine"] = engine
         sink = _ops_sink(ws, engine, run_id)
@@ -412,6 +456,7 @@ def run_local_challenge(args):
         finally:
             evaluator.close()
             detach(sink)
+            _close_scheduler(parallel_kw.get("scheduler"))
         emit("engine", "run_ended", run_id=run_id, state=engine.scheduler.state.value)
         raw_content = engine.task_input.raw_content
         print(f"run_id: {run_id}")
@@ -430,6 +475,7 @@ def run_local_challenge(args):
         workspace=ws,
         understander=understander,
         compress=make_compress(),
+        **parallel_kw,
     )
     sink = _ops_sink(ws, engine, run_id)
     attach(sink)
@@ -440,9 +486,11 @@ def run_local_challenge(args):
         detach(sink)
         emit("engine", "run_ended", run_id=run_id, state="FAILED")
         print(f"run 异常: {type(exc).__name__}: {exc}")
+        _close_scheduler(parallel_kw.get("scheduler"))
         return
     detach(sink)
     emit("engine", "run_ended", run_id=run_id, state=engine.scheduler.state.value)
+    _close_scheduler(parallel_kw.get("scheduler"))
 
     raw_content = engine.task_input.raw_content
     print(f"run_id: {run_id}")
@@ -480,6 +528,12 @@ def main():
         help="mock=MockExecutor; real=RealExecutor+CommandRunner(真实命令路由)",
     )
     p.add_argument(
+        "--actors",
+        type=int,
+        default=1,
+        help="并行执行器数(actor mode):>1 时每步独立容器并发执行,需 CTF_SSH_HOST 已配置且 task 含 challenge_dir/workdir;=1 串行原路径",
+    )
+    p.add_argument(
         "--flag-rules",
         default=None,
         help="audit 评估使用的 flag 规则 JSON 文件路径",
@@ -508,6 +562,12 @@ def main():
         choices=("mock", "real"),
         default="mock",
         help="mock=MockExecutor; real=RealExecutor+CommandRunner(真实命令路由)",
+    )
+    p_local.add_argument(
+        "--actors",
+        type=int,
+        default=1,
+        help="并行执行器数(actor mode):>1 时每步独立容器并发执行,需 CTF_SSH_HOST 已配置;=1 串行原路径",
     )
     p_local.add_argument(
         "--flag-rules",
