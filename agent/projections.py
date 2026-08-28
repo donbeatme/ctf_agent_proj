@@ -134,7 +134,9 @@ def apply(proj: Projection, ev, idx: int) -> None:
             if is_completed:
                 proj._mark_task_completed()
     elif kind == EventKind.GOAL_EVAL:
-        if getattr(detail, "complete", False):
+        # 引擎门控(flag 目标未提交 flag → gated=True)与引擎侧 _goal_complete 同步,
+        # 断点续跑 replay 时同样跳过,避免绕过门控把目标错误恢复为完成。
+        if getattr(detail, "complete", False) and not getattr(detail, "gated", False):
             proj.goal_complete[detail.goal_id] = list(getattr(detail, "evidence", None) or [])
     elif kind == EventKind.SUBMISSION:
         proj.submission, proj.submitted_flag = _submission_fold(proj.submission, ev)

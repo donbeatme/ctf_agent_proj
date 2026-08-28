@@ -131,6 +131,7 @@ class GoalEvalDetail:
     complete: bool = False
     evidence: list[str] = field(default_factory=list)   # DAG step_id 列表,支撑该判定
     reasoning: str = ""
+    gated: bool = False  # 引擎门控:flag 目标未提交 flag 时,complete 软判定降级为建议
 
 
 @dataclass

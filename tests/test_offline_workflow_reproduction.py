@@ -52,9 +52,10 @@ def test_smoke_evaluator_marks_goals_complete_after_step_pass():
         workspace=ws,
     )
 
-    engine.run({"goals": [{"id": "obtain_flag"}]})
+    # 非 flag 目标(门控只拦 flag 类):goal 完成语义与 task_completed 解耦
+    engine.run({"goals": [{"id": "deliverable"}]})
 
     assert engine.scheduler.state == EngineState.DONE
     # task_completed 只由 ee 的 is_completed=true 置位,goal 全部完成不置位
     assert engine.task_completed is False
-    assert engine._goal_complete["obtain_flag"] == ["s1"]
+    assert engine._goal_complete["deliverable"] == ["s1"]

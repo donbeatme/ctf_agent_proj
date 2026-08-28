@@ -298,6 +298,68 @@ def test_wave_retry_degrades_to_single_step(monkeypatch):
     assert len(provider._active) == 0
 
 
+def test_wave_retry_and_child_reuse_chain_container(monkeypatch):
+    """链级容器租约:step 重试复用同一容器,子节点继承父容器(不新建)。
+
+    回归 pwn_t11:并行 actor 模式此前每尝试删容器重建 → /work 丢失 → 反复重下。
+    修后线性链 s1→s2 共享一个容器(docker run 只出现一次,actor=链根 s1):
+    s1 retry 与 s2 都复用它,/work 状态跨尝试/跨步保留;run 结束 release 删容器。
+    """
+
+    def fake_install(self, tool_ids, *, session_key=None, force=False):
+        return {"installed": list(tool_ids)}
+
+    monkeypatch.setattr("sandbox_env.base.SandboxManager.install_tools", fake_install)
+
+    conns = []
+
+    def factory():
+        c = FakeSsh()
+        conns.append(c)
+        return c
+
+    pool = SshProvider(factory=factory, max_connections=2)
+    provider = SandboxProvider(pool, settings=SandboxSettings(ssh_host="vm"))
+    sched = ExecutionScheduler(providers=[provider])
+    ran = []
+
+    async def run_fn(step, ctx, tool_exec=None):
+        ran.append(step.id)
+        return ExecResult(observation=f"{step.id}: 完成")
+
+    class _Exec(MockExecutor):
+        allowed_cwd = "/challenge/x"
+
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"下载","criterion":"拿到文件","depends_on":[]},'
+            '{"id":"s2","instruction":"分析","criterion":"产出结论","depends_on":["s1"]}]',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        # s1 第一拍 retry,重试 pass;s2 pass
+        ee=[EvalResult(Verdict.RETRY, "s1: 不完整"),
+            EvalResult(Verdict.PASS, "s1: 完成"),
+            EvalResult(Verdict.PASS, "s2: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=_Exec(observation="", fn=run_fn),
+        scheduler=sched,
+        max_concurrency=2,
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert ran.count("s1") == 2          # 首拍 + retry 重放
+    assert ran.count("s2") == 1          # s2 依赖 s1,不在首拍
+    # 整条链只建过 1 个容器(actor=链根 s1):s1 retry 与 s2 都复用它,不新建
+    runs = [c for conn in conns for c, _ in conn.execs if "docker run -d --name" in c]
+    assert len(runs) == 1
+    assert "-s1" in runs[0] and "ctf-" in runs[0]
+    # run 结束统一 release:连接全还池 + 链租约清空
+    assert len(pool._idle) == 1
+    assert len(provider._active) == 0
+    assert engine._chain_leases == {}
+
+
 def test_wave_step_eval_escalate_replans_with_eval_result(monkeypatch):
     """并行 wave 中某步 step_eval 判 ESCALATE → _replan 拿到的是 EvalResult。
 
@@ -2372,3 +2434,74 @@ def test_goal_complete_without_submitted_flag_does_not_early_stop():
     assert engine.submitted_flag is None
     assert engine.bp.steps["s1"].status.value == "PASSED"
     assert engine.bp.steps["s2"].status.value == "PASSED"
+
+
+# ===== flag 目标门控:未提交 flag 前,软判定降级为建议 =====
+
+def test_goal_eval_flag_goal_gated_without_submission():
+    """obtain_flag 未提交 flag 时,评估器 complete 软判定被引擎门控降级为建议:
+    不置 _goal_complete、不撬开 task_completed 闸门(治 pwn_t12 把 s1 下载步骤
+    误判达成目标);事件带 gated=True,原始 LLM complete 判定仍保留供审计。"""
+    from agent.schema import Goal
+
+    class _Understander:
+        def understand(self, raw_content):
+            return TaskInput(raw_content=raw_content, goal_list=[Goal(id="obtain_flag")])
+
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"下载附件","criterion":"拿到文件","depends_on":[]}]',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 目标达成")],
+        executor=MockExecutor(observation="执行完成"),
+        goal_responses=lambda ctx, goals, dag: [
+            GoalEvalDetail(goal_id="obtain_flag", complete=True,
+                           evidence=["s1"], reasoning="下载完成")],
+        understander=_Understander(),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert "obtain_flag" not in engine._goal_complete
+    assert engine.task_completed is False
+    assert engine.submitted_flag is None
+    goal_events = [e for e in engine.workspace.events if e.kind == EventKind.GOAL_EVAL]
+    assert len(goal_events) == 1
+    assert getattr(goal_events[0].detail, "complete", False) is True   # 原始 LLM 判定保留
+    assert getattr(goal_events[0].detail, "gated", False) is True       # 引擎门控标记
+    assert "引擎门控" in goal_events[0].detail.reasoning
+
+
+def test_goal_eval_flag_goal_accepted_after_submission():
+    """提交 flag 后门控放行:submitted_flag 已置位,obtain_flag 的 complete 判定生效,
+    task_completed 早停正常收口(门控不影响合法收口路径)。"""
+    from agent.schema import Goal
+
+    class _Understander:
+        def understand(self, raw_content):
+            return TaskInput(raw_content=raw_content, goal_list=[Goal(id="obtain_flag")])
+
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"远程取flag","criterion":"提取flag","depends_on":[]}]',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 目标达成")],
+        executor=MockExecutor(result={"flag": "CTF2{real_flag}"}),
+        goal_responses=lambda ctx, goals, dag: [
+            GoalEvalDetail(goal_id="obtain_flag", complete=True,
+                           evidence=["s1"], reasoning="已提交 flag")],
+        understander=_Understander(),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert engine._goal_complete["obtain_flag"] == ["s1"]
+    assert engine.task_completed is True
+    assert engine.submitted_flag == "CTF2{real_flag}"
+    goal_events = [e for e in engine.workspace.events if e.kind == EventKind.GOAL_EVAL]
+    assert len(goal_events) == 1
+    assert getattr(goal_events[0].detail, "gated", False) is False

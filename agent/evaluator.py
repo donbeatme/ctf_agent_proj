@@ -188,8 +188,11 @@ GOAL_EVAL_SYSTEM = (
     "【可用上下文】任务、目标 id、DAG 各步骤状态与产物、最近执行上下文/观察、提交判定。\n"
     "【输出】只返回一行 JSON:{\"complete\":true|\"false\","
     "\"evidence\":[\"step_id\",...],\"reasoning\":\"推理\"}\n"
-    "- complete 仅当有可引用证据:已提取格式合法 flag、提交判定 correct=true、"
-    "或关键步骤 PASSED 且其产物达成该目标。\n"
+    "- complete 仅当证据中直接出现该目标的产物:格式合法的 flag 字符串、提交判定 correct=true、"
+    "或步骤结果里明确给出的具体答案/产物。\n"
+    "- 仅步骤 PASSED 不是证据:步骤状态只是过程,不等于目标达成。"
+    "例如'已下载文件''已完成分析'这类中间产物本身不构成取 flag 目标的达成。\n"
+    "- 取 flag 类目标:没有格式合法 flag / 提交判定 correct=true 时一律 complete=false。\n"
     "- evidence 是支撑判定的 DAG step_id 列表,可为空。\n"
     "- 保守:证据不足置 complete=false,不臆测、不猜 flag。"
 )

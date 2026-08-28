@@ -184,6 +184,10 @@ class Engine:
         self._deadlock_attempts = 0
         self._retry_mode: str | None = None  # 下一步 EXECUTING 的 ctx 档位(raw/compressed),STEP_EVAL 分流后设置
         self._last_ee: dict | None = None  # 上一步 ee 判定(verdict/diagnosis),STEP_EVAL retry 后注入 ex 系统提示词
+        # 并行 wave 的链级容器租约:按链根 step.id 持有。线性链(s1→s2→s3)整条共享一个
+        # 容器,子节点继承父容器、重试复用——/work 里下载/解压产物跨尝试/跨步保留;
+        # 并行兄弟(同父多子)各自独立容器,避免并发写同一 /work。run 结束统一 release。
+        self._chain_leases: dict = {}
         # 中断原语运行时状态(每 run 在 _run_loop 重建;cancel_current 线程安全请求)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._cancel_evt: asyncio.Event | None = None
@@ -366,6 +370,14 @@ class Engine:
             self._persist_run_state()
             self.run_result = self._make_run_result()
         finally:
+            # 并行 wave:链级容器租约 run 结束统一 release(总删,防跨 run 撑爆磁盘);
+            # 单条释放失败不阻塞其余/收尾。
+            for l in tuple(self._chain_leases.values()):
+                try:
+                    await l.release()
+                except Exception:
+                    pass
+            self._chain_leases.clear()
             if env_lease is not None:
                 await self._scheduler.release(env_lease)  # 删容器 + 还连接(会话结束)
                 self._tool_registry.set_sandbox_probe(None)  # 清沙箱探测句柄,防跨 run 失效
@@ -427,6 +439,7 @@ class Engine:
         self._deadlock_attempts = 0
         self._retry_mode = None
         self._last_ee = None
+        self._chain_leases = {}
         self._wave = []
         self._wave_results = []
         self.task_completed = False
@@ -977,22 +990,33 @@ class Engine:
             for gr in results:
                 if gr.goal_id not in {g.id for g in self.goals}:
                     continue
-                if gr.complete:
+                # flag 目标门控:未提交 flag 前,评估器的 complete 软判定降级为建议,
+                # 不置 _goal_complete(防 s1 下载步骤被误判达成 obtain_flag 提前收口)。
+                gated = bool(gr.complete and not self.submitted_flag
+                             and self._goal_requires_flag_submission(gr.goal_id))
+                if gr.complete and not gated:
                     self._goal_complete[gr.goal_id] = list(gr.evidence)
-                # 记录 goal_eval 事件(每个 goal 一条,无论 complete 与否)
+                # 门控降级时在 reasoning 标注(事件与 turn 意见同一文案,审计可自解释)
+                reasoning = gr.reasoning
+                if gated:
+                    reasoning = (reasoning or "").rstrip() + \
+                        "\n「引擎门控」:未提交 flag,complete 判定降级为建议,目标未置完成"
+                # 记录 goal_eval 事件(每个 goal 一条,无论 complete 与否;gated 标记引擎门控)
                 ws = self.workspace
                 if hasattr(ws, "add_event"):
                     ws.add_event(
                         Role.EVALUATOR_STEP, EventKind.GOAL_EVAL,
                         goal_id=gr.goal_id, complete=gr.complete,
-                        evidence=list(gr.evidence), reasoning=gr.reasoning,
+                        evidence=list(gr.evidence), reasoning=reasoning,
+                        gated=gated,
                     )
                 # 将 goal 评估意见加入 turn(planner 可感知目标进展)
                 self.turn.append(
                     EvalEvent(
                         source=EvalSource.GOAL_EVAL,
-                        opinion=gr.reasoning,
-                        observation=f"goal_id={gr.goal_id} complete={gr.complete} evidence={list(gr.evidence)}",
+                        opinion=reasoning,
+                        observation=f"goal_id={gr.goal_id} complete={gr.complete} "
+                                    f"evidence={list(gr.evidence)} gated={gated}",
                         step_id=self.current.id if self.current else None,
                     )
                 )
@@ -1004,6 +1028,12 @@ class Engine:
             # 目标全部达成且已提交 flag(CTF 核心目标=拿到 flag)→ 置位任务完成,
             # 调度器据此早停收口:跳过剩余冗余步骤直接反思终局。
             self.task_completed = True
+
+    @staticmethod
+    def _goal_requires_flag_submission(goal_id: str) -> bool:
+        """取 flag 类目标(id 含 flag)须先提交 flag 才接受完成判定:防 goal 软鉴定
+        把中间步骤(如下载/分析)误判成达成 obtain_flag,提前撬开 task_completed 闸门。"""
+        return "flag" in (goal_id or "").lower()
 
     def _goals_all_complete(self) -> bool:
         """全部任务目标已被 goal_eval 判为完成(goal_id 均在 _goal_complete)。"""
@@ -1199,10 +1229,10 @@ class Engine:
         runner, lease = None, None
         if self._max_concurrency > 1:
             try:
-                lease = await self._acquire_step_lease(step)
+                lease = await self._acquire_chain_lease(step)
             except Exception as exc:
                 # 租约获取失败(如沙箱 VM SSH 超时)转失败观察,让 ee 裁决重试/重设计,
-                # 不把整波/整 run 拖崩。对应 _acquire_step_lease 注释的"以失败观察收场"。
+                # 不把整波/整 run 拖崩。对应 _acquire_chain_lease 注释的"以失败观察收场"。
                 self._log.engine_action(
                     f"step [{step.id}] 租约获取失败: {type(exc).__name__}: {exc} "
                     "(该步以失败观察收场,不拖垮整波)")
@@ -1245,8 +1275,7 @@ class Engine:
                 else:
                     res = None
         if res is None:
-            if lease is not None:
-                await lease.release()
+            # 取消路径:链级租约由 run 收尾统一 release,此处不删容器
             self._finish_cancelled_step()
             return None
         if t.timed_out:
@@ -1269,8 +1298,7 @@ class Engine:
             n = len(res.tool_calls)
             self.signals.emit(Signal.CTX_INGEST, role=Role.EXECUTOR,
                               detail=f"step_id={step.id} tool_calls={n}  {n} use_tool + {n} tool_result  trace 通道")
-        if lease is not None:
-            await lease.release()
+        # 链级租约跨尝试持有(重试复用容器),run 收尾统一 release
         return res
 
     async def _run_wave(self):
@@ -1396,16 +1424,43 @@ class Engine:
                           attempts=step.attempts)
         return "replan", res
 
-    async def _acquire_step_lease(self, step):
-        """并行 wave:为单步 acquire 一个容器租约(actor=step.id,隔离)。无 scheduler /
-        无法确定 cwd → None(该步以失败观察收场,不拖垮整波)。"""
+    def _chain_root_id(self, step) -> str:
+        """线性链共享容器的链根 id:父节点仅此一个子节点则向上继承,否则自成一链。
+
+        单链(s1→s2→s3)整条共享一个容器,子节点继承父容器——重试/跨步 /work 里
+        的下载解压产物持久;并行兄弟(同父多子)各自独立容器,避免并发写同一 /work。
+        """
+        if self.bp is None:
+            return step.id
+        parents = [d for d in step.depends_on if d in self.bp.steps]
+        if len(parents) != 1:
+            return step.id
+        pid = parents[0]
+        n_children = sum(1 for s in self.bp.steps.values() if pid in s.depends_on)
+        if n_children != 1:
+            return step.id
+        return self._chain_root_id(self.bp.steps[pid])
+
+    async def _acquire_chain_lease(self, step):
+        """并行 wave:为 step 所在链 acquire/复用容器租约(actor=链根,链内共享)。
+
+        链内(重试/后代)复用已持有容器——/work 状态跨尝试保留;不同链各自独立容器。
+        无 scheduler / 无法确定 cwd → None(该步以失败观察收场,不拖垮整波)。
+        租约由 run 收尾统一 release(总删,见 SandboxProvider.release)。
+        """
         if self._scheduler is None:
             return None
         cwd = getattr(self.executor, "allowed_cwd", None)
         if not cwd:
             return None
-        req = self._scheduler.requirement_for(actor_id=step.id, cwd=cwd)
-        return await self._scheduler.acquire(req)
+        root = self._chain_root_id(step)
+        lease = self._chain_leases.get(root)
+        if lease is not None:
+            return lease
+        req = self._scheduler.requirement_for(actor_id=root, cwd=cwd)
+        lease = await self._scheduler.acquire(req)
+        self._chain_leases[root] = lease
+        return lease
 
     def _runner_for(self, handle):
         """用租约 handle 构造该步的 CommandRunner(复用执行器 runner 的时限/输出上限;
