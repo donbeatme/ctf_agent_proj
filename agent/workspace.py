@@ -147,6 +147,7 @@ class Workspace:
             TaskComponent,
             AgentCommComponent,
             DagComponent,
+            HistoryComponent,
             DocsComponent,
             ToolDirectoryComponent,
             ToolComponent,

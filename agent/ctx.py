@@ -592,12 +592,14 @@ class TaskComponent(CtxComponent):
 
 
 class AgentCommComponent(CtxComponent):
-    """本轮评估意见(agent通信):最近一次 replan 之后非 pass 意见的只读投影。
+    """本轮评估意见 + planner 计划级引导(agent通信):最近一次 replan 之后的只读投影。
 
     意见由评估 Agent 产出,engine 经 ws.record_opinion 落账进事件流(kind =
     source.value:plan_review/step_eval/reflect/scheduling);**pass 是闸门**
-    (不产出内容),非 pass(FAIL/RETRY/ESCALATE/REPLAN)才进 ctx。作用域从
-    事件流推导(最近一次 replan 之后),不持瞬态——断点续跑后边界照样可推导。
+    (不产出内容),非 pass(FAIL/RETRY/ESCALATE/REPLAN)才进 ctx。例外:planner
+    的 PLAN_NOTE(计划级 plan-notes,pass 级)放行——计划期共享预期,供兄弟节点
+    executor 执行时共享。作用域从事件流推导(最近一次 replan 之后),不持瞬态——
+    断点续跑后边界照样可推导。
 
     生命周期:on_replan 清空本轮(每轮重规划后只留本轮)。
     """
@@ -605,7 +607,8 @@ class AgentCommComponent(CtxComponent):
     key = "agent_comm"
     priority = 98          # 锚点,不压
     anchor = True
-    _KINDS = (EventKind.PLAN_REVIEW, EventKind.STEP_EVAL, EventKind.REFLECT, EventKind.SCHEDULING)
+    _KINDS = (EventKind.PLAN_REVIEW, EventKind.PLAN_NOTE, EventKind.STEP_EVAL,
+              EventKind.REFLECT, EventKind.SCHEDULING)
 
     def _cut(self) -> int:
         """最近一次 replan 事件的事件列表索引;无 replan 则 -1(渲染全部)。
@@ -622,7 +625,8 @@ class AgentCommComponent(CtxComponent):
         if ws is None:
             return []
         return [e for e in ws.events[self._cut() + 1:]
-                if e.kind in self._KINDS and e.verdict != Verdict.PASS]
+                if e.kind in self._KINDS and (e.verdict != Verdict.PASS
+                                              or e.kind == EventKind.PLAN_NOTE)]
 
     def on_replan(self, **kw):
         self.clear()

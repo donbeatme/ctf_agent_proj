@@ -165,6 +165,7 @@ class ReflectAuditDetail:
 EVENT_SCHEMA: dict[str, type] = {
     "replan":           ReplanDetail,
     "plan_review":      OpinionDetail,
+    "plan_note":        OpinionDetail,
     "step_eval":        OpinionDetail,
     "reflect":          OpinionDetail,
     "scheduling":       OpinionDetail,
@@ -360,6 +361,7 @@ class EventKind(StrEnum):
     """事件类型(events.jsonl 的 kind 字段)。"""
     REPLAN = "replan"
     PLAN_REVIEW = "plan_review"
+    PLAN_NOTE = "plan_note"  # planner 计划级引导(pass 级 plan-notes,进 agent_comm 供兄弟 ex 共享)
     STEP_EVAL = "step_eval"
     REFLECT = "reflect"
     SCHEDULING = "scheduling"

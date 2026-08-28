@@ -17,7 +17,7 @@ from agent.ctx import (
     SystemPromptComponent,
     TaskComponent,
 )
-from agent.schema import EvalSource, Goal
+from agent.schema import EvalSource, EventKind, Goal, Role
 from agent.workspace import Workspace
 
 
@@ -301,6 +301,17 @@ async def test_agent_comm_boundary_scoped_to_latest_replan(ws):
     ctx2, _, _ = await a.assemble("planner")
     assert "s1 需重试" in ctx2
     assert "死锁重排" not in ctx2          # 上一轮意见落回 history,不进本轮
+
+
+async def test_agent_comm_renders_planner_plan_note(ws):
+    """planner 计划级 plan-note(pass)放行进 agent_comm;ee 的 pass 意见仍闸门。"""
+    a = make_assembler(ws)
+    ws.add_event(Role.PLANNER, EventKind.PLAN_NOTE, verdict="pass",
+                 opinion="flag 为动态格式,需提交原始文本")
+    ws.record_opinion(EvalSource.STEP_EVAL, "pass", "s1: 完成")
+    ctx, _, _ = await a.assemble("planner")
+    assert "flag 为动态格式" in ctx
+    assert "s1: 完成" not in ctx
 
 
 def test_history_only_step_record_and_replan(ws):

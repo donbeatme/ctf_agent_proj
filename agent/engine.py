@@ -579,6 +579,8 @@ class Engine:
         ingest 是前向 assemble 的逆:planner 返回写回 workspace(dag 投影源 + replan
         边界事件推进 agent_comm/trace 轮次作用域)。assembler 缺失时直写 workspace。
         reason/source/changes 写入 ReplanDetail,供 history 投影(规划决策链)。
+        计划级 plan-note:把规划理由以 pass 级 PLAN_NOTE 落账(agent=planner),进
+        agent_comm 供兄弟节点 executor 共享计划意图;replan 边界之前的事件被轮次裁剪。
         """
         a = self._assembler()
         if a is not None:
@@ -586,12 +588,17 @@ class Engine:
                      source=source, changes=changes)
             self.signals.emit(Signal.CTX_INGEST, role=Role.PLANNER,
                               detail=f"blueprint ({len(self.bp.steps)} steps) + replan boundary")
-            return
-        ws = self.workspace
-        if hasattr(ws, "set_blueprint"):
-            # set_blueprint 是单一 DAG 写路径(内部发 REPLAN 事件带 DAG 快照)
-            ws.set_blueprint(self.bp, reason=reason, source=source, changes=changes)
-            ws.sync()
+        else:
+            ws = self.workspace
+            if hasattr(ws, "set_blueprint"):
+                # set_blueprint 是单一 DAG 写路径(内部发 REPLAN 事件带 DAG 快照)
+                ws.set_blueprint(self.bp, reason=reason, source=source, changes=changes)
+                ws.sync()
+        if reason and reason.strip():
+            ws = self.workspace
+            if hasattr(ws, "add_event"):
+                ws.add_event(Role.PLANNER, EventKind.PLAN_NOTE,
+                             verdict=Verdict.PASS, opinion=reason)
 
     @staticmethod
     def _step_sig(s):
@@ -1120,7 +1127,9 @@ class Engine:
             await a.precompress(Role.PLANNER)
         retry_mode = self._retry_mode or "raw"
         self._retry_mode = None
-        start_levels = {"trace": "summary"} if retry_mode == "compressed" else None
+        start_levels = {"history": "index"}     # executor 从索引档看全局台账(共享进度,控预算)
+        if retry_mode == "compressed":
+            start_levels["trace"] = "summary"
         ctx = await self._assemble_ctx(Role.EXECUTOR, step_id=step.id,
                                        system=self.executor.system, start_levels=start_levels)
         runner, lease = None, None

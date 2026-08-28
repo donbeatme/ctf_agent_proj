@@ -297,6 +297,49 @@ def test_wave_retry_degrades_to_single_step(monkeypatch):
     assert len(provider._active) == 0
 
 
+def test_executor_ctx_includes_history_index_and_plan_note():
+    """executor ctx:history(index 档全局台账)+ agent_comm 含 planner 计划级 plan-note。
+
+    进度知识走 history(已过兄弟的判定/产物),计划期预期走 agent_comm 的
+    plan_note;task 组件保持稳定,不承载共享知识。ScriptedPlanner 不写 meta.reason,
+    这里注入 ReasonPlanner 补 reason,验证 _record_plan 的 plan-note 落账链路。
+    """
+    seen = {}
+
+    class ReasonPlanner(ScriptedPlanner):
+        def plan(self, pin):
+            bp = super().plan(pin)
+            bp.meta.setdefault("reason", "initial")
+            return bp
+
+    class CaptureExecutor(MockExecutor):
+        def run(self, step, ctx, tool_exec=None):
+            seen["ctx"] = ctx
+            return super().run(step, ctx, tool_exec)
+
+    engine = Engine(
+        ReasonPlanner(
+            ['{"add":[{"id":"s1","instruction":"扫描端口","criterion":"flag","depends_on":[]},'
+             '{"id":"s2","instruction":"扫服务","criterion":"flag","depends_on":["s1"]}],'
+             '"reason":"initial"}',
+             '{}']
+        ),
+        CaptureExecutor(observation="完成"),
+        MockEvaluator({
+            "evaluator_plan": seq([EvalResult(Verdict.PASS, "计划可执行")]),
+            "evaluator_step": seq([EvalResult(Verdict.PASS, "s1: 完成"),
+                                   EvalResult(Verdict.PASS, "s2: 完成")]),
+            "evaluator_task": seq([EvalResult(Verdict.DONE, "反思: 无问题")]),
+        }),
+        workspace=MockWorkspace(),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    ctx = seen["ctx"]
+    assert "执行历史(索引)" in ctx        # history 组件(index 档)进入 executor
+    assert "plan_note: initial" in ctx    # 计划级 plan-note 进 agent_comm
+
+
 def test_request_stop_fails_run():
     """前端停跑接口:request_stop 在主循环下一拍转 FAILED。"""
 
@@ -1946,7 +1989,8 @@ def test_retry_incomplete_keeps_raw_ctx():
     assert engine.scheduler.state == EngineState.DONE
     assert len(ctxs) == 2
     assert "本轮工具轨迹" in ctxs[1]
-    assert "(索引)" not in ctxs[1]           # incomplete 重试保留原始轨迹
+    # incomplete 重试保留原始轨迹:trace 不压缩(history 固定 index 档是共享进度预算,与 retry_mode 无关)
+    assert "本轮工具轨迹(索引)" not in ctxs[1]
 
 
 def test_retry_planner_target_routes_to_single_node_replan():
