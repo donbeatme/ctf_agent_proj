@@ -45,7 +45,7 @@ class SubmitResult:
     message: str = ""
 
 
-_CHALLENGE_DIR_KEEP = ("metadata.yml", "distfiles")
+_CHALLENGE_DIR_KEEP = ("metadata.yml", "distfiles", "task.md", "README.md")
 
 
 def clean_challenge_dir(

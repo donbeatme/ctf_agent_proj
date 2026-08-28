@@ -99,10 +99,12 @@ def test_target_defaults_noop(tmp_path, monkeypatch):
 # ── 环境打开清理:非依赖/非附件遗留产物 ──────────────────────────────
 
 def test_clean_challenge_dir_keeps_metadata_and_distfiles(tmp_path):
-    """仅保留 metadata.yml + distfiles/,删除其余顶层文件与子目录。"""
+    """仅保留源文件(metadata.yml/distfiles/task.md/README.md),删除运行遗留产物。"""
     root = tmp_path / "ch"
     (root / "distfiles").mkdir(parents=True)
     (root / "metadata.yml").write_text("m", encoding="utf-8")
+    (root / "task.md").write_text("t", encoding="utf-8")
+    (root / "README.md").write_text("r", encoding="utf-8")
     (root / "distfiles" / "x.bin").write_bytes(b"data")
     (root / "solve_extract.py").write_text("s", encoding="utf-8")
     (root / "_ctf_exec.py").write_text("e", encoding="utf-8")
@@ -112,6 +114,8 @@ def test_clean_challenge_dir_keeps_metadata_and_distfiles(tmp_path):
     removed = clean_challenge_dir(root)
 
     assert (root / "metadata.yml").is_file()
+    assert (root / "task.md").read_text(encoding="utf-8") == "t"
+    assert (root / "README.md").read_text(encoding="utf-8") == "r"
     assert (root / "distfiles" / "x.bin").read_bytes() == b"data"
     assert not (root / "solve_extract.py").exists()
     assert not (root / "_ctf_exec.py").exists()

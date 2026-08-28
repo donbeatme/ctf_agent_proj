@@ -1230,7 +1230,7 @@ class Engine:
             self.current = step
             self._obs = res.observation or ""
             set_run_context(node_id=step.id, round=step.attempts)
-            action, _ = await self._step_eval_one(step)
+            action, eval_res = await self._step_eval_one(step)
             if action == "pass":
                 if step is not last:
                     continue
@@ -1248,7 +1248,7 @@ class Engine:
                 self._go(EngineState.EXECUTING,
                          f"step {step.id} retry {step.attempts}/{step.max_attempts}")
             else:
-                await self._replan(EvalSource.STEP_EVAL, res,
+                await self._replan(EvalSource.STEP_EVAL, eval_res,
                                    scope_step_id=step.id if action == "replan_step" else None)
             return
 

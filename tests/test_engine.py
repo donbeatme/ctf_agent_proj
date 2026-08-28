@@ -297,6 +297,68 @@ def test_wave_retry_degrades_to_single_step(monkeypatch):
     assert len(provider._active) == 0
 
 
+def test_wave_step_eval_escalate_replans_with_eval_result(monkeypatch):
+    """并行 wave 中某步 step_eval 判 ESCALATE → _replan 拿到的是 EvalResult。
+
+    回归:此前 wave 分支把 ExecResult 传给 _replan(取 res.opinion 崩
+    AttributeError);串行路径传 EvalResult。修后 wave 也传 EvalResult,
+    升级意见进 turn、重排删 s1、s2 重调度后通过到 DONE。
+    """
+
+    def fake_install(self, tool_ids, *, session_key=None, force=False):
+        return {"installed": list(tool_ids)}
+
+    monkeypatch.setattr("sandbox_env.base.SandboxManager.install_tools", fake_install)
+
+    conns = []
+
+    def factory():
+        c = FakeSsh()
+        conns.append(c)
+        return c
+
+    pool = SshProvider(factory=factory, max_connections=2)
+    provider = SandboxProvider(pool, settings=SandboxSettings(ssh_host="vm"))
+    sched = ExecutionScheduler(providers=[provider])
+    ran = []
+
+    async def run_fn(step, ctx, tool_exec=None):
+        ran.append(step.id)
+        return ExecResult(observation=f"{step.id}: 完成")
+
+    class _Exec(MockExecutor):
+        allowed_cwd = "/challenge/x"
+
+    engine, planner = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"读题","criterion":"拿到文本","depends_on":[]},'
+            '{"id":"s2","instruction":"提交","criterion":"平台判定","depends_on":[]}]',
+            '{"remove":["s1"],"update":[{"id":"s2","depends_on":[]}],"reason":"escalate recovery"}',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行"), EvalResult(Verdict.PASS, "计划可执行")],
+        # wave 中 s1 首评 ESCALATE → replan 删 s1;s2 随 wave 回 PENDING,重调度后 pass
+        ee=[EvalResult(Verdict.ESCALATE, "s1: 需重新设计"),
+            EvalResult(Verdict.PASS, "s2: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=_Exec(observation="", fn=run_fn),
+        scheduler=sched,
+        max_concurrency=2,
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    # 升级意见进 turn:证明 _replan 拿到的是 EvalResult(带 opinion),非 ExecResult
+    assert engine.turn[0].source == EvalSource.STEP_EVAL
+    assert engine.turn[0].opinion == "s1: 需重新设计"
+    assert "s1" not in engine.bp.steps          # 升级后被重排删除
+    assert engine.bp.steps["s2"].status.value == "PASSED"
+    assert ran.count("s1") == 1                 # 只在首拍 wave 执行一次
+    assert ran.count("s2") == 2                 # 首拍 wave + 重调度再执行
+    assert len(planner.calls) == 3              # 初始 + escalate replan + reflect
+    assert len(pool._idle) == 2
+    assert len(provider._active) == 0
+
+
 def test_executor_ctx_includes_history_index_and_plan_note():
     """executor ctx:history(index 档全局台账)+ agent_comm 含 planner 计划级 plan-note。
 
