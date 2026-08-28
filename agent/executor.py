@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,7 +46,8 @@ class ExecState:
 EXEC_STATE_NOTES = {
     "first": (
         "本步骤首次执行。务必在工具预算内产出结论性交付物(flag/答案/可检验清单),"
-        "优先做针对性验证,不要宽泛枚举式侦察(全量 objdump/grep/strings 烧预算)。"
+        "优先做针对性验证,不要宽泛枚举式侦察(grep/strings 全家桶烧预算)。"
+        "逆向默认用 ghidra;objdump 已禁用。"
     ),
     "retry_incomplete": (
         "上一步执行被评估判定为进度不足(incomplete),未达成验收标准。本次必须:"
@@ -75,6 +77,23 @@ def render_exec_state(sc) -> str:
     if sc.attempts >= sc.max_attempts:
         parts.append("# 最后一次尝试: 本次失败该步骤将升级,不再重试,必须一次达成。")
     return "\n\n".join(parts)
+
+
+# objdump 已禁用:全量反汇编反复烧预算,且容器内已有 ghidra 可做逆向。命令边界硬拦——
+# 即便 LLM 直接输 objdump 也被拦;readelf/nm/objcopy 等其它 binutils 不受影响。
+# 前/后视界避免误伤含 objdump 的文件名(如 cat objdump.txt)。
+OBJDUMP_BLOCK_RE = re.compile(r"(?<![\w.])objdump(?=\s|[/;|&]|$)", re.I)
+OBJDUMP_DISABLED_MSG = (
+    "objdump 已禁用(命令被拦截):逆向改用 ghidra(容器已装)/radare2;"
+    "符号/节/段信息用 nm / readelf / objcopy。"
+)
+
+
+def block_objdump(cmd: str) -> str | None:
+    """objdump 工具禁用检查:命中返回拦截原因,否则 None。"""
+    if OBJDUMP_BLOCK_RE.search(cmd):
+        return OBJDUMP_DISABLED_MSG
+    return None
 
 
 class Executor:
@@ -139,6 +158,7 @@ EXEC_SYSTEM = (
     "\n"
     "【执行准则】\n"
     "- 用 run_command 跑 shell,run_python 跑 Python（命令只在沙箱 SSH 容器内执行）\n"
+    "- 逆向用 ghidra（容器已装）/radare2；objdump 命令已被禁用，会被拦截\n"
     "- 需要技能文档或工具时，先 get_doc / apply_tool\n"
     "- 逐步对齐 criterion；拿 flag 用 submit_flag 提交，无 flag 的结论用 answer 给出\n"
     "- 命令失败时根据错误信息调整，不盲目重试同一命令"
@@ -611,6 +631,9 @@ class RealExecutor(Executor):
         cmd = args.get("command")
         if not cmd or not str(cmd).strip():
             return {"error": "run_command 需要 command"}
+        err = block_objdump(str(cmd))
+        if err:
+            return {"error": err}
         try:
             cwd = self._cwd(args)
         except ValueError as exc:

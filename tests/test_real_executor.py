@@ -14,7 +14,7 @@ from agent.blueprint import Blueprint, Step
 from agent.engine import Engine, EngineState
 from ctf_platform.errors import DownloadError
 from agent.evaluator import EvalResult, MockEvaluator, Verdict
-from agent.executor import ExecResult, RealExecutor
+from agent.executor import ExecResult, RealExecutor, block_objdump
 from agent.llm_api import ToolResult
 from agent.schema import PlannerMode, Role, parse_plan
 from agent.workspace import MockWorkspace
@@ -135,6 +135,50 @@ async def test_run_command_forwards_category_and_tool_id():
     assert cmd == "gdb -q ./pwn1"
     assert kw["category"] == "ctf-pwn"        # 从 skill_id 前缀解析
     assert kw["tool_id"] == "gdb"
+
+
+# ===== objdump 禁用:任何 objdump 命令被拦,其它 binutils 不受影响 =====
+
+
+async def test_objdump_blocked_all_invocations():
+    for cmd in [
+        "objdump -d -M intel try2findme",
+        "objdump -D ./pwn1",
+        "objdump -s -j .rodata try2findme",       # 元数据也禁:工具整体禁用
+        "/usr/bin/objdump -d -M intel ./pwn1",     # 绝对路径
+        "cd /tmp/x && objdump -d ./pwn1",          # 复合命令
+        "objdump -d -M intel ./pwn1 > dis.txt",
+    ]:
+        assert block_objdump(cmd), f"应拦截: {cmd}"
+
+
+async def test_objdump_blocked_allows_other_tools():
+    for cmd in [
+        "readelf -h try2findme",
+        "nm -D try2findme",
+        "objcopy -O binary --only-section=.text ./pwn1 out.bin",
+        "gdb -q ./pwn1",
+        "strings a.bin",
+        "cat objdump.txt",                          # 含 objdump 的文件名不误伤
+        "ghidra headless",
+    ]:
+        assert block_objdump(cmd) is None, f"不应拦截: {cmd}"
+
+
+async def test_run_command_objdump_blocked_not_executed():
+    calls = []
+
+    async def llm(*, system, prompt, tools, tool_exec, **kw):
+        calls.append(await tool_exec("run_command",
+                                     {"command": "objdump -d -M intel ./pwn1"}))
+        return _tool_result(_tr("run_command", '{"command": "objdump -d ./pwn1"}', "x"))
+
+    runner = _FakeRunner()
+    await RealExecutor(llm_fn=llm, runner=runner).run(None, "ctx")
+    assert runner.calls == []                       # 命令未执行
+    r = calls[0]
+    assert "objdump 已禁用" in r["error"]
+    assert "ghidra" in r["error"]
 
 
 async def test_run_python_forwards_tool_id():
