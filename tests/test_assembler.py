@@ -440,3 +440,64 @@ async def test_render_unchanged_after_event_replay(ws):
     a2 = make_assembler(ws2)
     ctx2, _, _ = await a2.assemble("planner", raw_content={"q": "x"}, goal_list=[Goal(id="目标一")])
     assert ctx1 == ctx2
+
+
+# ===== 并行隔离:共享实例竞态 / 折叠缓存 actor 维度 =====
+
+def make_executor_class_assembler(ws):
+    """以 register_class 注册 EXECUTOR 组件(懒加载 + _specs 常驻,供 fresh 重建)。"""
+    a = CtxAssembler(ws)
+    a.register_class("executor", HistoryComponent)
+    return a
+
+
+async def test_fresh_components_rebuild_new_instances(ws):
+    """fresh_components 按注册类规格重建全新实例:并行每 actor 独立组件,不共享状态。"""
+    a = make_executor_class_assembler(ws)
+    reg = a.components("executor")
+    fresh = a.fresh_components("executor")
+    assert len(fresh) == len(reg)
+    for fc, rc in zip(fresh, reg):
+        assert fc is not rc
+        assert fc._role == "executor"
+    fresh2 = a.fresh_components("executor")   # 多次调用各得新实例,互不复用
+    for f1, f2 in zip(fresh, fresh2):
+        assert f1 is not f2
+
+
+async def test_parallel_actor_assembly_isolates_history_cache(ws):
+    """并行 EXECUTOR(fresh + actor):每 actor 独立 history 折叠缓存,共享 key 不受污染。"""
+    a = make_executor_class_assembler(ws)
+    ws.set_blueprint(two_step_bp())
+    ws.record_step("s1", "pass", "s1 完成")
+    ws.record_step("s2", "pass", "s2 完成")
+
+    async def compress(prompt, chunk):
+        return f"<折叠 {len(chunk)}>"
+
+    a.compress = compress
+    ctx1, _, _ = await a.assemble("executor", actor="s1",
+                                  fresh=True, start_levels={"history": "summary"})
+    ctx2, _, _ = await a.assemble("executor", actor="s2",
+                                  fresh=True, start_levels={"history": "summary"})
+    assert "executor:s1:history" in ws.summaries
+    assert "executor:s2:history" in ws.summaries
+    assert ws.summaries["executor:s1:history"]["passes"] == 2
+    assert ws.summaries["executor:s2:history"]["passes"] == 2
+    assert "executor:history" not in ws.summaries    # 注册实例零污染
+    assert ctx1 == ctx2                               # 隔离只改归属不改内容
+
+
+async def test_serial_assembly_keeps_shared_cache_key(ws):
+    """无 actor(串行):history 缓存键保持 role:key,跨步骤增量折叠(原行为不变)。"""
+    a = make_executor_class_assembler(ws)
+    ws.set_blueprint(two_step_bp())
+    ws.record_step("s1", "pass", "s1 完成")
+
+    async def compress(prompt, chunk):
+        return f"<折叠 {len(chunk)}>"
+
+    a.compress = compress
+    await a.assemble("executor", start_levels={"history": "summary"})
+    assert "executor:history" in ws.summaries
+    assert not any(k.startswith("executor:s") for k in ws.summaries)

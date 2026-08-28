@@ -340,6 +340,30 @@ def test_executor_ctx_includes_history_index_and_plan_note():
     assert "plan_note: initial" in ctx    # 计划级 plan-note 进 agent_comm
 
 
+def test_llm_usage_events_carry_step_node_id_and_round():
+    """executor 的 llm_usage 事件携带 node_id/round(执行环境 ContextVar 落事件)。
+
+    _run_step 经 set_run_context 置 node_id=step.id / round=attempts,exec_task 复制
+    上下文 → _emit_llm_usage 读到归属;planner/evaluator(非步骤作用域)usage 不带。
+    """
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"读题","criterion":"可验收","depends_on":[]}]',
+            '{}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=MockExecutor(observation="执行完成"),
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    usage = [e for e in engine.workspace.events if e.kind == EventKind.LLM_USAGE]
+    exec_usage = [e for e in usage if e.detail.role == "executor"]
+    assert exec_usage, "应有 executor llm_usage 事件"
+    assert exec_usage[0].node_id == "s1"
+    assert exec_usage[0].round == 1
+
 def test_request_stop_fails_run():
     """前端停跑接口:request_stop 在主循环下一拍转 FAILED。"""
 

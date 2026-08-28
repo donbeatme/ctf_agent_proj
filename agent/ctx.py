@@ -181,6 +181,7 @@ class CtxAssembler:
         self.compress = compress   # 注入的语义压缩回调;None = 无 LLM 压缩(溢出走机械降级)
         self._registry: dict[str, list[CtxComponent]] = {}
         self._class_registry: dict[str, list] = {}  # 懒加载:组件类在首次 assemble 时才实例化
+        self._specs: dict[str, list] = {}  # 类规格常驻副本:并行组装可重建全新实例(fresh_components)
         self._last_compression: list[dict] | None = None  # 最近一次压缩记录(供 logger 取用)
         self.signals = None  # 可选 SignalBus(引擎注入后,assemble 自动 emit CTX_ASSEMBLED)
 
@@ -194,10 +195,30 @@ class CtxAssembler:
     def register_class(self, role, *specs) -> "CtxAssembler":
         """注册组件类(懒加载):specs 为 CtxComponent 子类或 (cls, args, kwargs) 元组。
         组件在首次 assemble 该 role 时才实例化,避免 Workspace/MockWorkspace 构造时
-        预先创建全部 28 个组件实例。
+        预先创建全部 28 个组件实例。类规格同时存入 _specs 常驻副本,供并行组装时
+        为每个 actor 重建全新实例(fresh_components)。
         """
         self._class_registry.setdefault(role, []).extend(specs)
+        self._specs.setdefault(role, []).extend(specs)
         return self
+
+    def fresh_components(self, role) -> list[CtxComponent]:
+        """按注册类规格重建该 role 的全新组件实例(不触碰 _registry/_class_registry)。
+
+        并行组装专用:并行 EXECUTOR 每个 actor 需要独立的组件实例——共享实例在
+        assemble 的异步压缩点(await _fold)交错时会互相污染缓存/折叠进度。fresh
+        实例是瞬态的,create→render 后即弃,只写各自 actor 作用域的 workspace 缓存。
+        """
+        instances = []
+        for spec in self._specs.get(role, []):
+            if isinstance(spec, type):
+                instances.append(spec())
+            else:
+                cls, args, kwargs = spec
+                instances.append(cls(*args, **kwargs))
+        for c in instances:
+            c._role = role
+        return instances
 
     def _materialize(self, role):
         """将 _class_registry 中的组件类实例化并移到 _registry。"""
@@ -341,7 +362,7 @@ class CtxAssembler:
                           diagnosis=diagnosis)
 
     async def assemble(self, role, budget=None, protect=None, purpose=None,
-                       start_levels=None, **kw):
+                       start_levels=None, fresh=False, **kw):
         """组装某 role 的上下文。
 
         - 每个组件重置档位(level=0)→ create 投影本轮输入/workspace 状态(压缩 api 经 kw 注入)
@@ -350,10 +371,13 @@ class CtxAssembler:
         - purpose: 当前触发压缩的 agent 目的(默认取 ROLE_PURPOSE,可覆盖)
         - start_levels: 指定组件起始压缩档位 {key: level_name}(如 drift 重试把
           trace 压到 summary 档);create 后覆盖 level=0,不在表内或名字非法则保持 raw
+        - fresh: 用 fresh_components 重建全新实例(并行每 actor 独立实例,消除共享
+          实例在异步压缩点的交错竞态);False 用注册实例(串行/顺序调用)
         返回 (ctx, system, over)。
         """
+        comps = self.fresh_components(role) if fresh else self.components(role)
         ctx_comps, sys_comps = [], []
-        for c in self.components(role):
+        for c in comps:
             c.level = 0
             c.create(self._ws, compress=self.compress, **kw)
             if start_levels and c.key in start_levels:
@@ -768,10 +792,12 @@ class HistoryComponent(CtxComponent):
         self._compress = None
         self._summary = ""
         self._folded_passes = 0
+        self._actor = None
 
     def create(self, ws, **kw):
         super().create(ws, **kw)
         self._compress = kw.get("compress")
+        self._actor = kw.get("actor")
         self._load_cache()
         return self
 
@@ -779,6 +805,7 @@ class HistoryComponent(CtxComponent):
         self._summary = ""
         self._folded_passes = 0
         self._compress = None
+        self._actor = None
         return super().delete()
 
     def can_advance(self):
@@ -832,9 +859,16 @@ class HistoryComponent(CtxComponent):
         self._folded_passes = len(evs)
         self._persist()
 
+    def _cache_key(self) -> str:
+        """摘要缓存键:actor 存在时按 actor 隔离(并行每步独立折叠进度,互不覆盖);
+        无 actor(串行/顺序)保持原 role:key,跨步骤增量折叠。"""
+        if self._actor:
+            return f"{self._role}:{self._actor}:{self.key}"
+        return f"{self._role}:{self.key}"
+
     def _persist(self):
         if self._ws is not None:
-            self._ws.summaries[f"{self._role}:{self.key}"] = {
+            self._ws.summaries[self._cache_key()] = {
                 "text": self._summary,
                 "passes": self._folded_passes,
             }
@@ -844,7 +878,7 @@ class HistoryComponent(CtxComponent):
         self._folded_passes = 0
         if self._ws is None:
             return
-        c = self._ws.summaries.get(f"{self._role}:{self.key}")
+        c = self._ws.summaries.get(self._cache_key())
         if c:
             self._summary = c.get("text", "")
             # 折叠标记取 min:events 追加写,只可能落后,不会超前(截断兜底)

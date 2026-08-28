@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from opslog import ErrorLevel, record_error, set_run_context
+from opslog import ErrorLevel, get_run_context, record_error, set_run_context
 
 from agent.blueprint import DONE_STATUSES, Step, StepStatus
 from agent.schema import (
@@ -569,7 +569,12 @@ class Engine:
         if "goal_list" not in kw and self.goals:
             kw["goal_list"] = self.goals
         budget = budget if budget is not None else self._role_budget(role)
-        ctx, _system, over = await a.assemble(role, budget=budget, system=system, **kw)
+        fresh = kw.pop("fresh", None)
+        if fresh is None:
+            # 并行执行:每个 actor 用全新组件实例组装,消除共享实例在异步压缩点的交错竞态
+            fresh = role == Role.EXECUTOR and self._max_concurrency > 1
+        ctx, _system, over = await a.assemble(role, budget=budget, system=system,
+                                              fresh=fresh, **kw)
         # 溢出信号由 assembler 内发射(带 role/overflow/method 完整字段),这里不重复
         return ctx
 
@@ -1010,15 +1015,21 @@ class Engine:
             raise
 
     def _emit_llm_usage(self, role, pt, ct, ms, ctx_size, ok):
-        """单次 LLM 调用记账落事件流(llm_usage 事件;run_tokens 的投影源)。"""
+        """单次 LLM 调用记账落事件流(llm_usage 事件;run_tokens 的投影源)。
+
+        node_id/round 从执行环境(read opslog ContextVar)取:executor 的 llm_usage
+        归到当前 step 与重试轮次;planner/evaluator(非步骤作用域)为空——run 级。
+        """
         ws = self.workspace
         if ws is None or not hasattr(ws, "add_event"):
             return
+        rc = get_run_context()
         ws.add_event(
             Role.SYSTEM, EventKind.LLM_USAGE,
             role=role.value if hasattr(role, "value") else str(role),
             prompt_tokens=pt, completion_tokens=ct, total_tokens=pt + ct,
-            latency_ms=ms, ctx_size=ctx_size, ok=ok)
+            latency_ms=ms, ctx_size=ctx_size, ok=ok,
+            node_id=rc.get("node_id"), round=rc.get("round"))
 
     @staticmethod
     def _extract_flag(res) -> str | None:
@@ -1130,8 +1141,11 @@ class Engine:
         start_levels = {"history": "index"}     # executor 从索引档看全局台账(共享进度,控预算)
         if retry_mode == "compressed":
             start_levels["trace"] = "summary"
-        ctx = await self._assemble_ctx(Role.EXECUTOR, step_id=step.id,
-                                       system=self.executor.system, start_levels=start_levels)
+        assemble_kw = {"step_id": step.id, "system": self.executor.system,
+                       "start_levels": start_levels}
+        if self._max_concurrency > 1:
+            assemble_kw["actor"] = step.id      # 并行:每 actor 独立折叠缓存/组件实例
+        ctx = await self._assemble_ctx(Role.EXECUTOR, **assemble_kw)
         runner, lease = None, None
         if self._max_concurrency > 1:
             lease = await self._acquire_step_lease(step)
