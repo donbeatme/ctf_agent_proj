@@ -9,6 +9,8 @@
 - logger 写 check[run_start] / check[step] 与 run-end 汇总
 """
 
+import asyncio
+
 import pytest
 
 from agent.checks import SkillEnvProbe
@@ -213,6 +215,31 @@ def test_apply_tool_returns_probe():
     assert "sqlmap" in res["probe"]
     assert res["probe"]["sqlmap"]["status"] in \
         {"available", "missing", "manual", "unknown"}
+
+
+def test_apply_tool_sandbox_probe_awaited():
+    """沙箱句柄注入后,apply_tool 探测改走沙箱(command -v),结果与真实执行面一致。"""
+    ws = MockWorkspace()
+    ws.tool_catalog = CtfSkillToolCatalog()
+    reg = ToolRegistry()
+    reg.set_workspace(ws)
+
+    async def fake_sandbox_probe(tid):
+        # 沙箱内真实可用性(与本地 shutil.which 无关):ghidra 有、radare2 无
+        return {"tool_id": tid, "status": "available" if tid == "ghidra" else "missing",
+                "check": f"command -v {tid}"}
+
+    reg.set_sandbox_probe(fake_sandbox_probe)
+    res = asyncio.run(reg.call_tool("apply_tool", {"tool_ids": ["ghidra", "radare2"]}))
+    assert res["added"] == ["ghidra", "radare2"]
+    assert res["probe"]["ghidra"]["status"] == "available"
+    assert res["probe"]["radare2"]["status"] == "missing"
+    assert res["probe"]["radare2"]["check"].startswith("command -v")
+
+    reg.set_sandbox_probe(None)              # 清除句柄 → 回退同步本地探测
+    res2 = reg.call_tool("apply_tool", {"tool_ids": ["ghidra"]})
+    assert isinstance(res2, dict)
+    assert "probe" in res2
 
 
 # ===== engine ENV_CHECK 打点 =====

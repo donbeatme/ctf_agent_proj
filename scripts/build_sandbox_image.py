@@ -27,8 +27,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DF = os.path.join(HERE, "Dockerfile.ctf-sandbox")
 SCRIPT = os.path.join(ROOT, "skills", "ctf-skills", "scripts", "install_ctf_tools.sh")
-# ghidra 官方 zip(经本机代理下载到 downloads/;VM 直连 GitHub 不通,构建改 COPY 烘焙)
+# ghidra 官方 zip + git 方法源码包(经本机代理下载到 downloads/;VM 直连 GitHub 不通,
+# 构建改 COPY 烘焙)。pycdc/RsaCtfTool 与 ghidra 同模式,Dockerfile 里 COPY 解包。
 GHIDRA_ZIP = os.path.join(ROOT, "downloads", "ghidra_12.1.3_PUBLIC_20260817.zip")
+PYCDC_TGZ = os.path.join(ROOT, "downloads", "pycdc.tar.gz")
+RSACTFTOOL_TGZ = os.path.join(ROOT, "downloads", "RsaCtfTool.tar.gz")
 REMOTE = "/root/ctf-build"
 
 
@@ -68,29 +71,37 @@ def main() -> None:
         print("[skip-build] 仅复查,不重新构建")
         _exec(client, f"docker run --rm {REMOTE.replace('/ctf-build', '/ctf/scripts')} 2>/dev/null || true")
     else:
-        if not os.path.exists(GHIDRA_ZIP):
+        missing = [p for p in (GHIDRA_ZIP, PYCDC_TGZ, RSACTFTOOL_TGZ) if not os.path.exists(p)]
+        if missing:
             sys.exit(
-                f"缺少 ghidra zip: {GHIDRA_ZIP}\n"
-                "请先经代理下载:D:\\pythonProject\\ctf_agent_proj 下\n"
-                "curl -fSL -x http://127.0.0.1:7897 -o downloads/ghidra_12.1.3_PUBLIC_20260817.zip "
-                "https://github.com/NationalSecurityAgency/ghidra/releases/download/"
-                "Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip"
+                "缺少构建上下文文件:\n" + "\n".join(f"  {p}" for p in missing) + "\n"
+                "请先经代理下载到 downloads/(curl -fSL -x http://127.0.0.1:7897 -o <path> <url>):\n"
+                "  ghidra_12.1.3_PUBLIC_20260817.zip  https://github.com/NationalSecurityAgency/"
+                "ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip\n"
+                "  pycdc.tar.gz        https://github.com/zrax/pycdc (git clone 后 tar czf)\n"
+                "  RsaCtfTool.tar.gz   https://github.com/RsaCtfTool/RsaCtfTool (git clone 后 tar czf)"
             )
-        print(f"[upload] {DF} + install_ctf_tools.sh + ghidra.zip -> {REMOTE}")
+
+        def _upload(sftp_, local: str, remote: str) -> None:
+            print(f"[upload] {os.path.basename(local)} "
+                  f"({os.path.getsize(local)//1024//1024} MB)...", flush=True)
+            with sftp_.open(remote, "wb") as f, open(local, "rb") as src:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+        print(f"[upload] {DF} + install_ctf_tools.sh + 3 个源码包 -> {REMOTE}")
         _exec(client, f"rm -rf {REMOTE} && mkdir -p {REMOTE}/skills/ctf-skills/scripts")
         sftp = client.open_sftp()
         with sftp.open(f"{REMOTE}/Dockerfile.ctf-sandbox", "wb") as f:
             f.write(_lf(DF))
         with sftp.open(f"{REMOTE}/skills/ctf-skills/scripts/install_ctf_tools.sh", "wb") as f:
             f.write(_lf(SCRIPT))
-        print(f"[upload] ghidra.zip({os.path.getsize(GHIDRA_ZIP)//1024//1024} MB)...", flush=True)
-        with sftp.open(f"{REMOTE}/ghidra.zip", "wb") as f:
-            with open(GHIDRA_ZIP, "rb") as src:
-                while True:
-                    chunk = src.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
+        _upload(sftp, GHIDRA_ZIP, f"{REMOTE}/ghidra.zip")
+        _upload(sftp, PYCDC_TGZ, f"{REMOTE}/pycdc.tar.gz")
+        _upload(sftp, RSACTFTOOL_TGZ, f"{REMOTE}/RsaCtfTool.tar.gz")
         sftp.close()
         print("[upload] ok")
 

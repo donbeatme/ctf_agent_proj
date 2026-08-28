@@ -368,6 +368,7 @@ class Engine:
         finally:
             if env_lease is not None:
                 await self._scheduler.release(env_lease)  # 删容器 + 还连接(会话结束)
+                self._tool_registry.set_sandbox_probe(None)  # 清沙箱探测句柄,防跨 run 失效
             run_timer.__exit__()
             self._log.close()
 
@@ -393,6 +394,8 @@ class Engine:
                 "(回落执行器自建沙箱)")
             return None
         self.executor.set_sandbox(lease.handle)
+        # apply_tool 探测改走沙箱(与真实执行面一致,避免本地 shutil.which 误报 missing)
+        self._tool_registry.set_sandbox_probe(lease.handle.probe_tool)
         return lease
 
     async def _init_run(self, raw_content):

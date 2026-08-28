@@ -41,7 +41,7 @@ RUN bash /opt/install_ctf_tools.sh all; bash /opt/install_ctf_tools.sh --verify
 RUN /root/.ctf-tools/venv/bin/pip install --index-url https://pypi.org/simple cysignals angr \
     && GOPROXY=https://goproxy.cn,direct go install github.com/ffuf/ffuf/v2@latest
 
-# Ghidra 逆向框架:官方 zip(12.x 自带 JRE),Debian 无 brew 走直装。
+# Ghidra 逆向框架:官方 zip(不带 JRE,JDK 见下一层),Debian 无 brew 走直装。
 # VM 直连 GitHub 不通,zip 经本机代理下载后烘焙进镜像:文件在构建上下文 ghidra.zip
 # (build_sandbox_image.py 从 downloads/ 上传到 /root/ctf-build)。
 # install_ctf_tools.sh 的 brew 分支在容器内跳过,这里显式预装 headless 反编译。
@@ -49,6 +49,15 @@ COPY ghidra.zip /opt/ghidra.zip
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends unzip \
     && unzip -q /opt/ghidra.zip -d /opt && rm -f /opt/ghidra.zip \
     && ln -sf /opt/ghidra_12.1.3_PUBLIC/support/analyzeHeadless /usr/local/bin/analyzeHeadless \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ghidra 需要完整 JDK(官方 zip 不带 JRE;启动器报 "unsupported java version"/"Unable to
+# prompt user for JDK path" 即缺它)。钉 JAVA_HOME_OVERRIDE 让 analyzeHeadless 零配置可跑,
+# executor 不必花轮次排查/安装 Java。cmake 供下方 pycdc 构建。
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        cmake openjdk-21-jdk-headless \
+    && sed -i 's|^JAVA_HOME_OVERRIDE=.*|JAVA_HOME_OVERRIDE=/usr/lib/jvm/java-21-openjdk-amd64|' \
+        /opt/ghidra_12.1.3_PUBLIC/support/launch.properties \
     && rm -rf /var/lib/apt/lists/*
 
 # 让后续 docker exec 会话复用 venv 与 go 工具的 PATH
@@ -60,5 +69,17 @@ RUN printf '%s\n' \
     'if [ -d /root/.ctf-tools/venv/bin ]; then export PATH="/root/.ctf-tools/venv/bin:$PATH"; fi' \
     'if [ -d /root/go/bin ]; then export PATH="/root/go/bin:$PATH"; fi' \
     > /etc/profile.d/ctf-tools.sh
+
+# pycdc / RsaCtfTool:git 方法工具,VM 直连 GitHub 不通,源码经本机代理下载打包后烘焙
+# (build_sandbox_image.py 上传 pycdc.tar.gz / RsaCtfTool.tar.gz,与 ghidra.zip 同模式)。
+# RsaCtfTool 走 pip install . 装 console script(仓库无顶层 RsaCtfTool 文件,cp 会失败)。
+COPY pycdc.tar.gz RsaCtfTool.tar.gz /opt/
+RUN cd /tmp && tar xzf /opt/pycdc.tar.gz && cd pycdc \
+        && cmake . >/dev/null && make >/dev/null && cp pycdc /usr/local/bin/pycdc \
+        && cd / && rm -rf /tmp/pycdc /opt/pycdc.tar.gz \
+    && mkdir -p /opt/RsaCtfTool \
+        && tar xzf /opt/RsaCtfTool.tar.gz -C /opt/RsaCtfTool --strip-components=1 \
+        && cd /opt/RsaCtfTool && python3 -m pip install --break-system-packages . \
+        && rm -f /opt/RsaCtfTool.tar.gz
 
 WORKDIR /work

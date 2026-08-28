@@ -5,7 +5,7 @@
 - probe_tool:在沙箱内跑 verify_check(import X → python3 -c;CLI 名 → command -v);
   非目录工具按名字探测 command -v(无后端/名称不安全 → unknown)
 - install_commands:按 Debian 容器做 OS 适配(pip → --break-system-packages;apt → 非交互;
-  gem/go → 先装运行时;download → 先装 curl/unzip 再跑清单命令)
+  gem/go → 先装运行时;download → 先装 curl/unzip 再跑清单命令;git → 先装构建依赖再跑命令)
 - install_tools:探测缺失 → 适配命令 → 沙箱内安装(持久进会话容器)→ 重校验;
   非目录工具动态解析(apt-cache/pip index)生成命令,解析不到/装不上 → failed 收口不阻塞
 - tool_conflicts:纯元数据分析(同 verify_check / brew-only / 已知约束 / 功能冗余)
@@ -94,7 +94,7 @@ class ToolManager:
     # ===== 安装(OS 适配,持久进会话容器) =====
 
     def install_commands(self, tool_ids, os="debian") -> dict[str, str]:
-        """逐工具 OS 适配安装命令(仅可自动安装的 pip/apt/gem/go/download;brew/manual 无命令)。"""
+        """逐工具 OS 适配安装命令(仅可自动安装的 pip/apt/gem/go/download/git;brew/manual 无命令)。"""
         out: dict[str, str] = {}
         for tid in tool_ids:
             entry = self.catalog.get_tool(tid)
@@ -128,6 +128,14 @@ class ToolManager:
             return (
                 f"DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl unzip "
                 f"&& {cmd}"
+            ) if cmd else None
+        if method == "git":
+            # 源码构建(原 manual 类,命令补齐后可自动装):前置 git/cmake 等构建依赖,
+            # 再跑清单里完整的 clone+build+落地 PATH 命令。命令含 apt-get → install_tools
+            # 会先 update 一次(镜像已清 apt lists)。
+            return (
+                f"DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
+                f"git cmake build-essential && {cmd}"
             ) if cmd else None
         return None  # brew/manual/未知 → 不可自动安装
 

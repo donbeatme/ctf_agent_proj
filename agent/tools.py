@@ -140,7 +140,14 @@ class ToolRegistry:
         self._registry: dict[str, object] = {}
         self._docs: dict[str, str] = {}
         self._workspace = None
+        # 可选沙箱探测句柄:set_sandbox_probe 注入后,apply_tool 的探测改走沙箱内
+        # command -v(真实执行面),否则回退本地 shutil.which。签名: (tool_id)->dict(可协程)。
+        self._sandbox_probe = None
         self._register_builtins()
+
+    def set_sandbox_probe(self, fn) -> None:
+        """注入/清除沙箱可用性探测回调(engine 开沙箱会话时注入,release 时传 None)。"""
+        self._sandbox_probe = fn
 
     def _register_builtins(self):
         """注册内置只读 lookup 工具(依赖 _docs / _workspace,闭包捕获 self)。"""
@@ -167,9 +174,7 @@ class ToolRegistry:
             catalog = ws.tool_catalog if ws else None
             if catalog is None:
                 return {"error": "工具目录未初始化(Engine 未注入 tool_catalog)"}
-            from agent.checks import SkillEnvProbe
-            probe = SkillEnvProbe(catalog)
-            added, pending, rejected, probe_map = [], [], [], {}
+            added, pending, rejected = [], [], []
             for tid in tool_ids:
                 if not isinstance(tid, str) or not _TOOL_NAME_RE.match(tid):
                     rejected.append(tid)
@@ -185,13 +190,31 @@ class ToolRegistry:
                 ws.add_tools([{"name": tid, "description": meta["description"],
                                "parameters": {"type": "object", "properties": {}}}])
                 added.append(tid)
-                try:
-                    probe_map[tid] = probe.probe_tool(tid)
-                except Exception:
-                    probe_map[tid] = {"tool_id": tid, "status": "unknown", "check": ""}
-            # 返回追加 probe:每工具可用性探测(只读)。unknown 向后兼容(本次即 rejected)。
-            return {"added": added, "pending": pending, "unknown": rejected,
-                    "rejected": rejected, "probe": probe_map}
+            sandbox_probe = _self._sandbox_probe
+            if sandbox_probe is None:
+                # 无沙箱句柄:本地只读探测(shutil.which/find_spec),历史行为。
+                from agent.checks import SkillEnvProbe
+                probe = SkillEnvProbe(catalog)
+                probe_map = {}
+                for tid in added:
+                    try:
+                        probe_map[tid] = probe.probe_tool(tid)
+                    except Exception:
+                        probe_map[tid] = {"tool_id": tid, "status": "unknown", "check": ""}
+                return {"added": added, "pending": pending, "unknown": rejected,
+                        "rejected": rejected, "probe": probe_map}
+            # 沙箱句柄已注入:探测走沙箱内 command -v(结果与真实执行面一致,避免本地
+            # shutil.which 误报 missing)。返回协程,executor 的 exec_tool 会 await。
+            async def _probe_sandbox():
+                probe_map = {}
+                for tid in added:
+                    try:
+                        probe_map[tid] = await sandbox_probe(tid)
+                    except Exception:
+                        probe_map[tid] = {"tool_id": tid, "status": "unknown", "check": ""}
+                return {"added": added, "pending": pending, "unknown": rejected,
+                        "rejected": rejected, "probe": probe_map}
+            return _probe_sandbox()
 
         def remove_tool(tool_ids):
             ws = _self._workspace

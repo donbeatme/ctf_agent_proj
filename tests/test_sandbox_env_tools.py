@@ -52,7 +52,7 @@ async def test_probe_cli_uses_command_v():
 async def test_probe_unknown_manual_brew():
     tm = ToolManager()
     assert (await tm.probe_tool("no-such-tool"))["status"] == "unknown"
-    assert (await tm.probe_tool("pwndbg"))["status"] == "manual"
+    assert (await tm.probe_tool("dnSpy"))["status"] == "manual"
     assert (await tm.probe_tool("wireshark"))["status"] == "incompatible"
 
 
@@ -95,7 +95,15 @@ def test_install_commands_os_adaptation():
 
 def test_brew_manual_have_no_install_command():
     tm = ToolManager()
-    assert tm.install_commands(["wireshark", "pwndbg"]) == {}
+    assert tm.install_commands(["wireshark", "dnSpy"]) == {}
+
+
+def test_install_commands_git_builds_source():
+    tm = ToolManager()
+    cmds = tm.install_commands(["RsaCtfTool", "pycdc"])
+    assert "apt-get install -y --no-install-recommends git cmake build-essential" in cmds["RsaCtfTool"]
+    assert "git clone" in cmds["RsaCtfTool"]
+    assert "cmake . && make" in cmds["pycdc"]
 
 
 def test_install_commands_download():
@@ -109,10 +117,10 @@ def test_install_commands_download():
 async def test_install_tools_buckets():
     bk = FakeBackend()
     tm = ToolManager(bk)
-    r = await tm.install_tools(["gdb", "ghidra", "wireshark", "pwndbg", "no-such"])
+    r = await tm.install_tools(["gdb", "ghidra", "wireshark", "dnSpy", "no-such"])
     assert r["installed"] == ["gdb", "ghidra"]
     assert r["incompatible"] == ["wireshark"]
-    assert r["skipped_manual"] == ["pwndbg"]
+    assert r["skipped_manual"] == ["dnSpy"]
     assert r["failed"] == ["no-such"]
 
 

@@ -20,7 +20,7 @@ from pathlib import Path
 from agent.schema import ID_PATTERN
 from agent.skills import SKILLS_DIR, SkillLibrary, _parse_frontmatter, _strip_frontmatter
 
-INSTALL_METHODS = ("pip", "apt", "brew", "gem", "go", "manual", "download")
+INSTALL_METHODS = ("pip", "apt", "brew", "gem", "go", "manual", "download", "git")
 
 # install_commands() 提取命令时匹配的安装动词
 _INSTALL_VERB_RE = re.compile(
@@ -147,13 +147,15 @@ TOOL_MANIFEST: list[dict] = [
     _sys("qrencode", "qrencode", "apt", "apt-get install -y qrencode", "qrencode",
          "QR 码生成", ["brew"]),
     # ---- brew-only(install_ctf_tools.sh install_brew 中 apt 没有的) ----
-    # ghidra:官方 zip(12.x 起自带 JRE),Debian 无 brew 改 download 直装;运行时 _adapt 会前置装 curl/unzip
+    # ghidra:官方 zip 不带 JRE(镜像实装 JDK21 + launch.properties JAVA_HOME_OVERRIDE,
+    # 见 scripts/Dockerfile.ctf-sandbox),Debian 无 brew 改 download 直装;_adapt 会前置装 curl/unzip
     _sys("ghidra", "ghidra", "download",
          "curl -fsSL -o /opt/ghidra.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip "
          "&& unzip -q /opt/ghidra.zip -d /opt && rm -f /opt/ghidra.zip "
          "&& ln -sf /opt/ghidra_12.1.3_PUBLIC/support/analyzeHeadless /usr/local/bin/analyzeHeadless",
          "analyzeHeadless",
-         "NSA 逆向框架(headless 反编译;官方 zip 自带 JRE)"),
+         "NSA 逆向框架(headless 反编译)。analyzeHeadless 已装 /usr/local/bin,容器已装 "
+         "JDK 21 且 launch.properties 已钉 JAVA_HOME_OVERRIDE——直接跑 analyzeHeadless,勿装 Java/JDK"),
     _sys("wireshark", "wireshark", "brew", "brew install wireshark", "wireshark",
          "抓包图形分析"),
     _sys("bind", "bind", "brew", "brew install bind", "dig",
@@ -167,14 +169,25 @@ TOOL_MANIFEST: list[dict] = [
     # ---- go(install_ctf_tools.sh install_go) ----
     _sys("ffuf", "ffuf", "go", "go install github.com/ffuf/ffuf/v2@latest", "ffuf",
          "Web 目录/参数 fuzz"),
+    # ---- git(源码构建,可自动化;原 print_manual 类,命令补齐后走 git 适配) ----
+    _sys("pwndbg", "pwndbg", "git",
+         "git clone --depth 1 https://github.com/pwndbg/pwndbg /opt/pwndbg && "
+         "cd /opt/pwndbg && ./setup.sh && "
+         "echo '#!/bin/sh' > /usr/local/bin/pwndbg && "
+         "echo 'exec gdb -q -ex \"source /opt/pwndbg/gdbinit.py\" \"$@\"' >> /usr/local/bin/pwndbg && "
+         "chmod +x /usr/local/bin/pwndbg",
+         "pwndbg", "GDB 插件(漏洞利用辅助)"),
+    _sys("RsaCtfTool", "RsaCtfTool", "git",
+         "git clone --depth 1 https://github.com/RsaCtfTool/RsaCtfTool /opt/RsaCtfTool && "
+         "cd /opt/RsaCtfTool && "
+         "python3 -m pip install --break-system-packages .",
+         "RsaCtfTool", "RSA 攻击自动化"),
+    _sys("pycdc", "pycdc", "git",
+         "git clone --depth 1 https://github.com/zrax/pycdc /opt/pycdc && "
+         "cd /opt/pycdc && cmake . && make && "
+         "cp pycdc /usr/local/bin/pycdc",
+         "pycdc", "Python 字节码反编译(≥3.9)"),
     # ---- manual(install_ctf_tools.sh print_manual,无法可靠自动化) ----
-    _sys("pwndbg", "pwndbg", "manual", "git clone https://github.com/pwndbg/pwndbg",
-         "", "GDB 插件(漏洞利用辅助)"),
-    _sys("RsaCtfTool", "RsaCtfTool", "manual",
-         "git clone https://github.com/RsaCtfTool/RsaCtfTool", "", "RSA 攻击自动化"),
-    _sys("pycdc", "pycdc", "manual",
-         "git clone https://github.com/zrax/pycdc && cd pycdc && cmake . && make",
-         "", "Python 字节码反编译(≥3.9)"),
     _sys("dnSpy", "dnSpy", "manual",
          "https://github.com/dnSpy/dnSpy (Windows/.NET only)", "", ".NET 反编译(Windows)"),
 ]
