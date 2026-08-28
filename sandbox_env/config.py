@@ -24,6 +24,8 @@ class SandboxSettings:
     ssh_host: Optional[str] = None
     ssh_user: str = "root"
     ssh_password: str = ""
+    ssh_key: Optional[str] = None          # 客户端私钥路径(密钥登录优先,密码兜底)
+    ssh_host_key: Optional[str] = None     # 服务器 ed25519 公钥(钉住,局域网发现用)
     ssh_workdir: str = "/root/ctf"
     install_auto: bool = True                  # exec 前自动安装缺失依赖(进会话容器,持久)
     keep_container: bool = True                # 解完是否保留容器(便于复查)
@@ -37,6 +39,8 @@ class SandboxSettings:
             ssh_host=_cfg("CTF_SSH_HOST") or None,
             ssh_user=str(_cfg("CTF_SSH_USER") or "root"),
             ssh_password=str(_cfg("CTF_SSH_PASSWORD") or ""),
+            ssh_key=str(_cfg("CTF_SSH_KEY") or "") or None,
+            ssh_host_key=str(_cfg("CTF_SSH_HOST_KEY") or "") or None,
             ssh_workdir=str(_cfg("CTF_SSH_WORKDIR") or "/root/ctf"),
             install_auto=_bool("CTF_SANDBOX_INSTALL_AUTO", True),
             keep_container=_bool("CTF_SANDBOX_KEEP_CONTAINER", True),

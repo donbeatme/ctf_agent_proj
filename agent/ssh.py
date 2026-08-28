@@ -15,9 +15,10 @@ runner 的 ssh_available() 判定不可用并回落其它目标。
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
-from opslog import ErrorLevel, record_error
+from opslog import ErrorLevel, emit, record_error
 
 _IGNORED = {".git", "__pycache__"}
 
@@ -27,26 +28,67 @@ class SshBackend:
 
     def __init__(self, host: str, user: str, password: str,
                  workdir: str = "/root/ctf", port: int = 22,
-                 connect_timeout: float = 8.0):
+                 connect_timeout: float = 8.0,
+                 ssh_key: str | None = None, host_key: str | None = None):
         self.host = host
         self.user = user
         self.password = password
         self.workdir = workdir
         self.port = port
         self.connect_timeout = connect_timeout
+        self.ssh_key = os.path.expanduser(ssh_key) if ssh_key else None
+        self.host_key = host_key  # 期望服务器 ed25519 公钥;配置才允许局域网发现
         self._client = None  # asyncssh.SSHClientConnection(懒)
+        self._lock = asyncio.Lock()  # 串行化建连,防并发 exec 竞态 + 发现扫描踩踏
 
     # ===== 连接 =====
 
+    def _connect_kwargs(self, host: str) -> dict:
+        kwargs = dict(host=host, port=self.port, username=self.user,
+                      password=self.password, known_hosts=None,
+                      connect_timeout=self.connect_timeout)
+        if self.ssh_key:
+            kwargs["client_keys"] = [self.ssh_key]
+        return kwargs
+
     async def _connect(self):
-        if self._client is None:
+        if self._client is not None:
+            return self._client
+        async with self._lock:
+            if self._client is not None:
+                return self._client
             import asyncssh
 
-            self._client = await asyncssh.connect(
-                self.host, port=self.port, username=self.user,
-                password=self.password, known_hosts=None,
-                connect_timeout=self.connect_timeout)
+            kwargs = self._connect_kwargs(self.host)
+            try:
+                self._client = await asyncssh.connect(**kwargs)
+            except OSError as exc:
+                # 认证失败(主机可达但凭据错)不发现——同 IP 重扫无用
+                if not self.host_key or isinstance(exc, asyncssh.PermissionDenied):
+                    raise
+                found = await self._discover()
+                if found is None:
+                    raise
+                self._client = await asyncssh.connect(**self._connect_kwargs(found))
         return self._client
+
+    async def _discover(self):
+        """按钉住的 host key 局域网找 VM 当前 IP;命中则更新 self.host 并写回配置。"""
+        from sandbox_env.discovery import discover_vm
+
+        found = await discover_vm(self.host_key)
+        if not found:
+            return None
+        old = self.host
+        self.host = found
+        try:  # 写回缓存 best-effort:失败不影响连接
+            from config_sandbox import set as _cfg_set
+
+            _cfg_set("CTF_SSH_HOST", found)
+        except Exception:  # noqa: BLE001
+            pass
+        emit("sandbox", "host_discovered", old_host=old, new_host=found)
+        return found
 
     async def close(self) -> None:
         if self._client is not None:

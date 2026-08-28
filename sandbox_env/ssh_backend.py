@@ -34,6 +34,7 @@ class SshSandboxBackend(SandboxBackend):
             ssh = SshBackend(
                 host=settings.ssh_host, user=settings.ssh_user,
                 password=settings.ssh_password, workdir=settings.ssh_workdir,
+                ssh_key=settings.ssh_key, host_key=settings.ssh_host_key,
             )
         self.ssh = ssh
         self._created: set[str] = set()  # 本进程内已确认存在的容器,免重复 docker ps
