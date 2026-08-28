@@ -334,7 +334,7 @@ def _plan_attempt():
 
 
 async def test_plan_evaluator_revise_without_reasons_carries_raw():
-    """LLM 只回 {\"decision\":\"revise\"}(无 issue/suggestion)→ 结构 1.0 但决策 revise,
+    """LLM 只回 {\"decision\":\"revise\"}(无 issue/suggestion/opinion)→ 结构 1.0 但决策 revise,
     issues 落原始输出,opinion 不再误报"结构完整"。"""
     ev = PlanEvaluator(_StubPlanLlm('{"decision": "revise"}'))
     res = await ev.evaluate(_plan_attempt())
@@ -342,3 +342,34 @@ async def test_plan_evaluator_revise_without_reasons_carries_raw():
     assert res.score == 1.0                       # 结构评审满分(pass 来源)
     assert res.issues and "评审未给出结构化修订项" in res.issues[0]
     assert "完整" not in AgentAuditEvaluator._plan_opinion(res)
+
+
+async def test_plan_evaluator_revise_empty_string_issue_carries_raw():
+    """pwn_t5 路径:LLM 回 {\"decision\":\"revise\",\"issues\":[\"\"]}。
+
+    issues=[""] 是真值列表但全空串,旧 guard 的 `not issues` 为假而跳过,`_unique` 滤空后
+    issues 归零 → opinion 退化成无信息兜底。回归该盲区:any() 判定必须触发。
+    """
+    ev = PlanEvaluator(_StubPlanLlm('{"decision": "revise", "issues": [""], "suggestions": []}'))
+    res = await ev.evaluate(_plan_attempt())
+    assert res.decision == "revise"
+    assert res.issues and "评审未给出结构化修订项" in res.issues[0]
+    assert "完整" not in AgentAuditEvaluator._plan_opinion(res)
+
+
+async def test_plan_evaluator_revise_with_opinion_uses_opinion():
+    """LLM 给了 opinion 视为有理由:guard 不再追加诊断,opinion 直接成为评审意见。"""
+    ev = PlanEvaluator(_StubPlanLlm(
+        '{"decision": "revise", "opinion": "计划缺少回退策略", "issues": [], "suggestions": []}'))
+    res = await ev.evaluate(_plan_attempt())
+    assert res.decision == "revise"
+    assert res.opinion == "计划缺少回退策略"
+    assert "评审未给出" not in " ".join(res.issues)
+    assert AgentAuditEvaluator._plan_opinion(res) == "计划缺少回退策略"
+
+
+def test_plan_opinion_prefers_opinion_over_fallback():
+    """_plan_opinion:opinion 非空且无结构 issues → 用 opinion(非兜底)。"""
+    op = AgentAuditEvaluator._plan_opinion(
+        PlanEvaluation("revise", 1.0, [], [], "x", opinion="结构需补强"))
+    assert op == "结构需补强"

@@ -30,7 +30,8 @@ REFLEXION_SYSTEM = """你是任务反思 Agent。在任务结束（完成或失�
 - 存在未达成的关键步骤 / 已升级 → REPLAN，给出最早的关键失误诊断与补丁方向
 
 【输出】
-- DONE / REPLAN 判定 + 诊断 diagnosis + 经验 lessons + 补丁方向 next_plan
+只返回一行 JSON：{"decision":"pass"|"fail","opinion":"反思意见","diagnosis":"诊断","lessons":[...],"next_plan":[...]}
+- decision 是任务级结果（pass=目标达成/DONE；fail=需重规划/REPLAN）；opinion 是反思意见（理由文本，不得留空）。
 - 不猜 flag；基于证据与过程指标全局评估"""
 
 
@@ -104,9 +105,11 @@ class TaskReflectionEvaluator:
             reflection.source += " (online-fallback:%s)" % type(exc).__name__
             return reflection
         parsed = self._parse_json(raw)
+        # 诊断理由必有:diagnosis 缺失/为空时回退 LLM opinion,再回退确定性兜底。
+        diagnosis = str(parsed.get("diagnosis") or parsed.get("opinion") or "模型未给出有效诊断")
         return Reflection(
             attempt_id=attempt.attempt_id,
-            diagnosis=str(parsed.get("diagnosis", "模型未给出有效诊断")),
+            diagnosis=diagnosis,
             lessons=[str(item) for item in parsed.get("lessons", [])][:8],
             next_plan=[str(item) for item in parsed.get("next_plan", [])][:8],
             source="TaskReflection/Reflexion/%s/LlmApi" % self.strategy,

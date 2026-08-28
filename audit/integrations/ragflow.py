@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from ..schemas import AuditRecord
 from ..settings import Settings
-from .experience import build_experience, experience_markdown
+from .experience import build_experience, experience_markdown, should_store_experience
 from .langsmith_logger import redact
 
 
@@ -88,6 +88,9 @@ class RAGFlowExperienceStore:
         return dict(dataset)
 
     def store_experience(self, record: AuditRecord) -> Dict[str, Any]:
+        if not should_store_experience(record):
+            return {"status": "skipped", "count": 0, "reason": "no-signal",
+                    "dataset_id": None, "document_ids": [], "error": None}
         dataset = self.get_or_create_dataset()
         dataset_id = str(dataset["id"])
         safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", record.attempt.attempt_id).strip("-")

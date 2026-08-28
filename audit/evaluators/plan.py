@@ -28,8 +28,9 @@ PLAN_REVIEW_SYSTEM = """你是计划评审 Agent。在执行前评审规划 Agen
 - 工具/技能绑定：skill_id 是否与步骤内容匹配
 
 【输出】
-只返回一行 JSON：{"decision":"pass"|"revise","score":0..1,"issues":[...],"suggestions":[...]}
+只返回一行 JSON：{"decision":"pass"|"revise","score":0..1,"issues":[...],"suggestions":[...],"opinion":"评审意见"}
 - pass：计划结构完整、可执行；revise：存在需修订的结构问题。
+- opinion 是评审结论的理由文本（revise 时必须给出具体修订方向，不得留空）。
 - 非阻塞性建议放入 suggestions，不阻塞通过。
 - 不解题、不猜 flag；只评审计划结构合理性"""
 
@@ -50,9 +51,6 @@ class PlanEvaluator:
                 {"role": "user", "content": json.dumps({
                 "engine_context": ctx,
                 "objective": attempt.metadata.get("problem_statement", ""),
-                "retrieved_memory": attempt.metadata.get(
-                    "planning_memory_context", ""
-                ),
                 "plan": [asdict(step) for step in attempt.plan],
                 }, ensure_ascii=False)},
             ])
@@ -74,19 +72,24 @@ class PlanEvaluator:
         except (TypeError, ValueError):
             semantic_score = structural.score
         semantic_decision = str(parsed.get("decision", "revise")).lower()
+        semantic_opinion = str(parsed.get("opinion") or "").strip()
         issues = structural.issues + [str(item) for item in parsed.get("issues", [])]
         suggestions = structural.suggestions + [str(item) for item in parsed.get("suggestions", [])]
         # LLM 不能覆盖确定性的 DAG/字段错误。
         decision = "revise" if structural.decision == "revise" or semantic_decision != "pass" else "pass"
-        # 决策与理由一致性:revise 却无任何结构化 issue/suggestion → 保留原始输出诊断,
-        # 避免 _plan_opinion 用"计划结构和验收条件完整"这类误导性兜底文本。
-        if decision == "revise" and not issues and not suggestions:
+        # 决策与理由一致性:revise 却无任何结构化 issue/suggestion 且无 opinion →
+        # 保留原始输出诊断,避免 _plan_opinion 用"计划结构和验收条件完整"这类误导性兜底文本。
+        # 用 any() 判定:issues=[""] 这类"真值列表但全空串"也必须触发(否则 _unique 滤空后
+        # issues 归零,理由管道被清空,replanner 拿到无信息兜底——pwn_t5 即此路径)。
+        # LLM 已给 opinion 视为有理由,guard 不再追加(否则诊断把 opinion 顶掉)。
+        if decision == "revise" and not any(issues) and not any(suggestions) and not semantic_opinion:
             issues.append("评审未给出结构化修订项,原始输出: %s" % (raw or "").strip()[:500])
         return PlanEvaluation(
             decision=decision,
             score=round(min(structural.score, semantic_score), 4),
             issues=self._unique(issues),
             suggestions=self._unique(suggestions),
+            opinion=semantic_opinion,
             evaluator="PlanEvaluator/LlmApi",
         )
 

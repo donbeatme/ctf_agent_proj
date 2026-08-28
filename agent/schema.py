@@ -140,6 +140,7 @@ class PlanReviewAuditDetail:
     score: float = 0.0
     issues: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
+    opinion: str = ""
 
 
 @dataclass

@@ -46,7 +46,9 @@ STEP_PROMPT = """你是步骤验收 Agent。验收执行 Agent 对当前步骤�
 {outputs}
 
 对上述轨迹给出 0..1 的过程质量分与说明。只返回一个 JSON 对象，字段如下：
-{{"score": 0..1 的过程质量分, "reasoning": "打分依据", "verdict": "pass|retry|escalate"}}
+{{"score": 0..1 的过程质量分, "verdict": "pass|retry|escalate", "diagnosis": "incomplete|drift|planner_target|other", "is_completed": true|false, "opinion": "验收意见"}}
+- verdict 是步骤验收结果；opinion 是验收意见（理由文本，不得留空）。
+- is_completed 是"任务整体达成"信号（仅核心目标已达成时 true，单步 pass 默认 false）。
 不要输出 JSON 之外的任何内容。"""
 
 
@@ -243,7 +245,7 @@ class StepAcceptanceEvaluator:
 
     @staticmethod
     def _response_reason(response: Dict[str, Any]) -> str:
-        return str(response.get("comment") or response.get("reasoning") or "")
+        return str(response.get("opinion") or response.get("comment") or response.get("reasoning") or "")
 
     @staticmethod
     def _error_label(exc: Exception) -> str:

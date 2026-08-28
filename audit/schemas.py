@@ -177,6 +177,7 @@ class PlanEvaluation:
     issues: List[str]
     suggestions: List[str]
     evaluator: str
+    opinion: str = ""  # LLM 评审意见文本(理由必有;结构 issues 为空时经此落 opinion)
 
 
 @dataclass

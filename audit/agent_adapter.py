@@ -218,6 +218,7 @@ class AgentAuditEvaluator(Evaluator):
             "score": self.plan_evaluation.score,
             "issues": self.plan_evaluation.issues,
             "suggestions": self.plan_evaluation.suggestions,
+            "opinion": self.plan_evaluation.opinion,
         })
         return EvalResult(
             verdict,
@@ -485,9 +486,14 @@ class AgentAuditEvaluator(Evaluator):
 
     @staticmethod
     def _plan_opinion(evaluation: PlanEvaluation) -> str:
-        details = evaluation.issues or evaluation.suggestions
-        if details:
-            return "；".join(details)
+        # 结构问题优先(确定性、可信):结构强制 revise 时 LLM 的 pass-opinion 不得覆盖。
+        if evaluation.issues:
+            return "；".join(evaluation.issues)
+        # LLM 语义理由(无结构问题时),其次 suggestions,最后确定性兜底——理由恒非空。
+        if evaluation.opinion:
+            return evaluation.opinion
+        if evaluation.suggestions:
+            return "；".join(evaluation.suggestions)
         # 兜底文本要跟随决策:revise 不能说"结构完整"(否则日志自相矛盾)。
         if evaluation.decision == "revise":
             return "判定为 revise,但评审未提供具体修订原因/建议"
