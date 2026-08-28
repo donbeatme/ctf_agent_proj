@@ -80,6 +80,14 @@ async def test_cleanup_removes_container():
     assert any("docker rm -f ctf-k1" in c for c, _ in ssh.execs)
 
 
+async def test_cleanup_removes_session_dir():
+    """删容器后连带删 /root/ctf/{key} 挂载目录,避免每次 run 累积撑爆磁盘。"""
+    ssh = FakeSsh()
+    bk = _backend(ssh)
+    await bk.cleanup("k1")
+    assert any("rm -rf /root/ctf/k1" in c for c, _ in ssh.execs)
+
+
 async def test_cleanup_failure_records_cleanup_event():
     """docker rm 失败:记 container_removed_failed(CLEANUP),不再无条件报 removed。"""
     from opslog import attach, detach

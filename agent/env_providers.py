@@ -210,6 +210,14 @@ class SandboxProvider(Provider):
     async def health(self) -> dict:
         return {"ok": True, "name": self.name, "active": len(self._active)}
 
+    async def close(self) -> None:
+        """关闭底层 ssh 连接池(scheduler.close 级联;沙箱会话无独立资源要释放)。
+
+        本类只编排容器会话,连接生命周期归 SshProvider——收尾时把借来的连接池一并关掉,
+        否则 ExecutionScheduler.close 对 SandboxProvider 是 no-op,池内 idle 连接泄漏。
+        """
+        await self._ssh.close()
+
 
 __all__ = [
     "SshHandle", "SshProvider", "SandboxHandle",

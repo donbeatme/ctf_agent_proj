@@ -112,6 +112,22 @@ class SshSandboxBackend(SandboxBackend):
             return
         emit("sandbox", "container_removed", session_key=key, container=name)
         self._created.discard(name)
+        # 容器 /work 的宿主机侧挂载目录随容器一起删:只 rm 容器会残留
+        # /root/ctf/{key} 目录(每次 run 同步进去的题面/工具堆积),多 run 撑爆磁盘
+        rdir = self._session_dir(key)
+        try:
+            r = await self.ssh.exec(f"rm -rf {shlex.quote(rdir)}", timeout=60)
+            if r.returncode != 0:
+                record_error("sandbox", "session_dir_removed", level=ErrorLevel.CLEANUP,
+                             session_key=key, container=name,
+                             reason=f"rm -rf {rdir} 失败 rc={r.returncode}: "
+                                    f"{r.stderr.decode('utf-8', 'replace')[:200]}")
+                return
+        except Exception as exc:  # noqa: BLE001
+            record_error("sandbox", "session_dir_removed", exc=exc, level=ErrorLevel.CLEANUP,
+                         session_key=key, container=name)
+            return
+        emit("sandbox", "session_dir_removed", session_key=key, container=name)
 
     async def close(self) -> None:
         if hasattr(self.ssh, "close"):
