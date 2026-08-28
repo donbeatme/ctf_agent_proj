@@ -50,7 +50,7 @@ from agent.schema import (
     TaskInput,
     Trigger,
 )
-from agent.executor import ExecResult
+from agent.executor import ExecResult, ExecState, RealExecutor
 from agent.evaluator import Diagnosis, EvalResult, Verdict
 from agent.checks import SkillEnvProbe
 from agent import tools
@@ -183,6 +183,7 @@ class Engine:
         self._stalls = 0
         self._deadlock_attempts = 0
         self._retry_mode: str | None = None  # 下一步 EXECUTING 的 ctx 档位(raw/compressed),STEP_EVAL 分流后设置
+        self._last_ee: dict | None = None  # 上一步 ee 判定(verdict/diagnosis),STEP_EVAL retry 后注入 ex 系统提示词
         # 中断原语运行时状态(每 run 在 _run_loop 重建;cancel_current 线程安全请求)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._cancel_evt: asyncio.Event | None = None
@@ -381,8 +382,16 @@ class Engine:
         cwd = getattr(self.executor, "allowed_cwd", None)
         if not cwd:
             return None
-        req = self._scheduler.requirement_for(actor_id="ex1", cwd=cwd)
-        lease = await self._scheduler.acquire(req)
+        try:
+            req = self._scheduler.requirement_for(actor_id="ex1", cwd=cwd)
+            lease = await self._scheduler.acquire(req)
+        except Exception as exc:
+            # run 级会话租约失败(沙箱 VM 不可达等)不崩 run:回落执行器自建沙箱,
+            # 其内部连接失败由 _safe_call 转 ExecResult 失败观察。
+            self._log.engine_action(
+                f"run 级会话租约获取失败: {type(exc).__name__}: {exc} "
+                "(回落执行器自建沙箱)")
+            return None
         self.executor.set_sandbox(lease.handle)
         return lease
 
@@ -414,6 +423,7 @@ class Engine:
         self._stalls = 0
         self._deadlock_attempts = 0
         self._retry_mode = None
+        self._last_ee = None
         self._wave = []
         self._wave_results = []
         self.task_completed = False
@@ -1159,17 +1169,42 @@ class Engine:
             await a.precompress(Role.PLANNER)
         retry_mode = self._retry_mode or "raw"
         self._retry_mode = None
+        last_ee = self._last_ee
+        self._last_ee = None
+        # 执行状态注入:首次 / 按上轮 ee 判定分流的重试状态 + verdict/diagnosis
+        # (镜像 planner 的 StateContext,executor 侧渲染成系统提示词段落)。attempts 已自增。
+        if last_ee and last_ee.get("diagnosis") == Diagnosis.DRIFT.value:
+            status = "retry_drift"
+        elif last_ee and last_ee.get("diagnosis") == Diagnosis.INCOMPLETE.value:
+            status = "retry_incomplete"
+        elif last_ee:
+            status = "retry_other"
+        else:
+            status = "first"
+        exec_system = self.executor.system_for(ExecState(
+            status=status, attempts=step.attempts, max_attempts=step.max_attempts,
+            verdict=(last_ee or {}).get("verdict"),
+            diagnosis=(last_ee or {}).get("diagnosis")))
         start_levels = {"history": "index"}     # executor 从索引档看全局台账(共享进度,控预算)
         if retry_mode == "compressed":
             start_levels["trace"] = "summary"
-        assemble_kw = {"step_id": step.id, "system": self.executor.system,
+        assemble_kw = {"step_id": step.id, "system": exec_system,
                        "start_levels": start_levels}
         if self._max_concurrency > 1:
             assemble_kw["actor"] = step.id      # 并行:每 actor 独立折叠缓存/组件实例
         ctx = await self._assemble_ctx(Role.EXECUTOR, **assemble_kw)
         runner, lease = None, None
         if self._max_concurrency > 1:
-            lease = await self._acquire_step_lease(step)
+            try:
+                lease = await self._acquire_step_lease(step)
+            except Exception as exc:
+                # 租约获取失败(如沙箱 VM SSH 超时)转失败观察,让 ee 裁决重试/重设计,
+                # 不把整波/整 run 拖崩。对应 _acquire_step_lease 注释的"以失败观察收场"。
+                self._log.engine_action(
+                    f"step [{step.id}] 租约获取失败: {type(exc).__name__}: {exc} "
+                    "(该步以失败观察收场,不拖垮整波)")
+                return ExecResult(
+                    observation=f"无法获取执行环境租约: {type(exc).__name__}: {exc}")
             if lease is None:
                 return ExecResult(
                     observation="无法获取执行环境租约(无 Provider 或无法确定工作目录)")
@@ -1183,6 +1218,8 @@ class Engine:
             exec_kwargs = {"tool_exec": self._tool_registry.call_tool}
             if runner is not None:
                 exec_kwargs["runner"] = runner
+            if isinstance(self.executor, RealExecutor):
+                exec_kwargs["system"] = exec_system
             exec_task = asyncio.create_task(
                 self._safe_call(
                     lambda: self._llm_wrap(Role.EXECUTOR,
@@ -1330,6 +1367,7 @@ class Engine:
             self._log.hint_tick_extra("retry")
             # 漂移重试继承压缩 ctx(旧轨迹摘要,避免被错误路径继续带偏);其余保留原始轨迹
             self._retry_mode = "compressed" if diagnosis == Diagnosis.DRIFT else "raw"
+            self._last_ee = {"verdict": res.verdict.value, "diagnosis": diagnosis.value}
             return "retry", res
         if res.verdict == Verdict.ESCALATE:
             self.bp.set_status(step.id, StepStatus.ESCALATED)

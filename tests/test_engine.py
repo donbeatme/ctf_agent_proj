@@ -29,6 +29,7 @@ from sandbox_env import SandboxSettings
 from tests.mock_data import MOCK_TASK
 from tests.test_env_providers import FakeSsh
 from agent.planner import Planner
+from agent.providers import Capability, Provider
 from agent.schema import (
     EvalEvent,
     EvalSource,
@@ -357,6 +358,55 @@ def test_wave_step_eval_escalate_replans_with_eval_result(monkeypatch):
     assert len(planner.calls) == 3              # 初始 + escalate replan + reflect
     assert len(pool._idle) == 2
     assert len(provider._active) == 0
+
+
+def test_wave_lease_failure_degrades_not_crash():
+    """并行 wave 租约获取失败(沙箱 SSH 连接超时)→ 该步转失败观察交 ee 裁决,
+    run 不再整体抛 TimeoutError:升级→重排→死锁收口 FAILED(正常引擎路径)。"""
+
+    class _FailingSandbox(Provider):
+        name = "failing-sandbox"
+        capability = Capability(keys=frozenset({"isolated_exec", "linux", "docker"}))
+
+        async def acquire(self, req):
+            raise asyncio.TimeoutError("ssh connect timeout")
+
+        async def release(self, lease):
+            pass
+
+        async def close(self):
+            pass
+
+    sched = ExecutionScheduler(providers=[_FailingSandbox()])
+    executed = []
+
+    async def run_fn(step, ctx, tool_exec=None):
+        executed.append(step.id)
+        return ExecResult(observation=f"{step.id}: 完成")
+
+    class _Exec(MockExecutor):
+        allowed_cwd = "/challenge/x"
+
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"访问目标","criterion":"拿到入口","depends_on":[]}]',
+            '{"reason":"revise"}',
+            '{"reason":"deadlock1"}',
+            '{"reason":"deadlock2"}',
+            '{"reason":"deadlock3"}',
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.ESCALATE, "s1: 租约不可用", observation="timeout")],
+        et=[],
+        executor=_Exec(observation="", fn=run_fn),
+        scheduler=sched,
+        max_concurrency=2,
+        max_deadlock_attempts=3, max_stalls=100, max_replans=100,
+    )
+    engine.run(MOCK_TASK)   # 修复点:不再因沙箱 SSH 超时整体崩掉
+    assert executed == []                        # 租约失败 → 执行器从未被调用
+    assert engine.scheduler.state == EngineState.FAILED
+    assert "调度死锁" in engine.fail_reason
 
 
 def test_executor_ctx_includes_history_index_and_plan_note():
@@ -2077,6 +2127,59 @@ def test_retry_incomplete_keeps_raw_ctx():
     assert "本轮工具轨迹" in ctxs[1]
     # incomplete 重试保留原始轨迹:trace 不压缩(history 固定 index 档是共享进度预算,与 retry_mode 无关)
     assert "本轮工具轨迹(索引)" not in ctxs[1]
+
+
+def test_real_executor_status_system_injected_on_retry():
+    """RealExecutor 重试:系统提示词按状态注入(首次→first,重试→retry_incomplete+ee 判定)。"""
+
+    class _FakeRunner:
+        def run(self, *a, **k):
+            return _outcome()
+
+        def run_python(self, *a, **k):
+            return _outcome()
+
+    def _outcome():
+        from agent.runner import RunOutcome
+        return RunOutcome(ok=True, returncode=0, stdout="ok", stderr="",
+                          cmd=[], target="ssh")
+
+    captured = []
+
+    def llm(*, system, prompt, tools, tool_exec, **kw):
+        captured.append(system)
+        return ToolResult(
+            content="完成",
+            trace=[{"name": "answer", "arguments": '{"text": "结论"}',
+                    "result": {"answer": "结论"}}],
+            rounds=1, total_usage={"prompt_tokens": 1, "completion_tokens": 1,
+                                   "total_tokens": 2})
+
+    executor = RealExecutor(llm_fn=llm, runner=_FakeRunner(),
+                            workspace=MockWorkspace())
+    engine, _ = make_engine(
+        _plan_responses(
+            '[{"id":"s1","instruction":"访问目标","criterion":"拿到入口","depends_on":[]}]',
+            "{}",
+        ),
+        ep=[EvalResult(Verdict.PASS, "计划可执行")],
+        ee=[EvalResult(Verdict.RETRY, "s1: 8 轮未达成", diagnosis=Diagnosis.INCOMPLETE),
+            EvalResult(Verdict.PASS, "s1: 完成")],
+        et=[EvalResult(Verdict.DONE, "反思: 无问题")],
+        executor=executor,
+    )
+    engine.run(MOCK_TASK)
+    assert engine.scheduler.state == EngineState.DONE
+    assert len(captured) == 2
+    # 首次:first 状态
+    assert "首次执行" in captured[0]
+    assert "当前尝试: 1/" in captured[0]
+    assert "上一步 ee 判定" not in captured[0]
+    # 重试:retry_incomplete + ee verdict/diagnosis
+    assert "必须先产出结论" in captured[1]
+    assert "禁止重复已执行过的全量命令" in captured[1]
+    assert "当前尝试: 2/" in captured[1]
+    assert "上一步 ee 判定: retry / incomplete" in captured[1]
 
 
 def test_retry_planner_target_routes_to_single_node_replan():

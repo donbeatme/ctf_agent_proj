@@ -27,12 +27,72 @@ class ExecResult:
     total_usage: dict | None = None  # {prompt_tokens, completion_tokens, total_tokens}
 
 
+@dataclass
+class ExecState:
+    """执行状态上下文:engine 组装"本轮为何重跑/首次"的结构化事实,executor 渲染进系统提示词。
+
+    status: first(首次) / retry_incomplete / retry_drift / retry_other(上轮 ee 判定对应)。
+    verdict/diagnosis 仅 retry 有,取自 ee 的 EvalResult。
+    """
+    status: str
+    attempts: int
+    max_attempts: int
+    verdict: str | None = None
+    diagnosis: str | None = None
+
+
+# 状态注入提示词:镜像 planner.TRIGGER_NOTES,但给的是硬指令(要执行遵守),非只陈述。
+EXEC_STATE_NOTES = {
+    "first": (
+        "本步骤首次执行。务必在工具预算内产出结论性交付物(flag/答案/可检验清单),"
+        "优先做针对性验证,不要宽泛枚举式侦察(全量 objdump/grep/strings 烧预算)。"
+    ),
+    "retry_incomplete": (
+        "上一步执行被评估判定为进度不足(incomplete),未达成验收标准。本次必须:"
+        "① 必须先产出结论(flag/答案/清单),② 只做增量验证,禁止重复已执行过的全量命令,"
+        "③ 必须遵守下方【本轮评估意见】列出的未达成理由,逐条回应。"
+    ),
+    "retry_drift": (
+        "上一步执行方向偏了(drift),解题路径偏离目标。本次必须回到 criterion 重新解读"
+        "该步骤到底要什么,不要延续错误路径;下方【本轮评估意见】会指出偏差点,逐条纠正。"
+    ),
+    "retry_other": (
+        "上一步执行未通过评估。先说明上轮为何失败、本次将如何不同,再行动;"
+        "遵守下方【本轮评估意见】。"
+    ),
+}
+
+
+def render_exec_state(sc) -> str:
+    """把执行状态渲染成系统提示词段落(状态解释 + 尝试进度 + ee 判定)。"""
+    parts = ["# 执行状态"]
+    note = EXEC_STATE_NOTES.get(sc.status)
+    if note:
+        parts.append(note)
+    parts.append(f"# 当前尝试: {sc.attempts}/{sc.max_attempts}")
+    if sc.verdict and sc.diagnosis:
+        parts.append(f"# 上一步 ee 判定: {sc.verdict} / {sc.diagnosis}")
+    if sc.attempts >= sc.max_attempts:
+        parts.append("# 最后一次尝试: 本次失败该步骤将升级,不再重试,必须一次达成。")
+    return "\n\n".join(parts)
+
+
 class Executor:
     # 系统提示词(经 engine 传入 SystemPromptComponent 渲染;mock 为空)
     system: str = ""
 
     async def run(self, step, ctx: str, tool_exec=None, runner=None) -> ExecResult:
         raise NotImplementedError
+
+    def system_for(self, state_context=None) -> str:
+        """状态化系统提示词:base(self.system)+ 引擎注入的执行状态上下文(镜像 planner)。
+
+        base 为空(如 Mock)或没有状态上下文 → 原样返回,行为零变化。
+        """
+        base = self.system
+        if not base or not state_context:
+            return base
+        return base + "\n\n" + render_exec_state(state_context)
 
     def match_experience(self) -> list[dict]:
         """当前挑战精确匹配到的已验证解题经验(engine _init_run 装填 ws.experience);
@@ -501,9 +561,11 @@ class RealExecutor(Executor):
 
     # ===== 执行 =====
 
-    async def run(self, step, ctx: str, tool_exec=None, runner=None) -> ExecResult:
+    async def run(self, step, ctx: str, tool_exec=None, runner=None,
+                  system=None) -> ExecResult:
         """执行一个步骤。runner 可选:并行 wave 每步注入独立 CommandRunner(各持各的
-        容器租约);缺省用 self.runner(串行会话 runner,引擎已注入 handle)。"""
+        容器租约);缺省用 self.runner(串行会话 runner,引擎已注入 handle)。
+        system 可选:引擎按执行状态注入组合后的系统提示词;缺省用 EXEC_SYSTEM。"""
         category = self._category(step)
 
         async def exec_tool(name: str, args: dict):
@@ -522,7 +584,7 @@ class RealExecutor(Executor):
 
         prompt = self._build_prompt(step, ctx)
         try:
-            tr = await self._llm(system=EXEC_SYSTEM, prompt=prompt,
+            tr = await self._llm(system=system or EXEC_SYSTEM, prompt=prompt,
                                  tools=EXEC_TOOL_SPECS, tool_exec=exec_tool)
         except ToolLoopError as exc:
             # 工具循环超上限:保留已达成的部分轨迹(喂 run.log/events.jsonl/flag 提取)
