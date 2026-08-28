@@ -390,6 +390,8 @@ def run_local_challenge(args):
     from agent.workspace import Workspace
     from task_understanding.real_understander import RealTaskUnderstander
 
+    from agent.ctf_skill_tools import CtfSkillToolCatalog
+
     raw = {"challenge_dir": args.challenge_dir}
     run_id = args.run_id or f"local-{time.strftime('%Y%m%d-%H%M%S')}"
     emit("engine", "run_started", run_id=run_id, task=str(args.challenge_dir)[:120])
@@ -445,6 +447,7 @@ def run_local_challenge(args):
             workspace=ws,
             understander=understander,
             compress=make_compress(),
+            tool_catalog=CtfSkillToolCatalog(),
             **parallel_kw,
         )
         holder["engine"] = engine
@@ -475,6 +478,7 @@ def run_local_challenge(args):
         workspace=ws,
         understander=understander,
         compress=make_compress(),
+        tool_catalog=CtfSkillToolCatalog(),
         **parallel_kw,
     )
     sink = _ops_sink(ws, engine, run_id)

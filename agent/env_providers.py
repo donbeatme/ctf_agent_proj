@@ -134,11 +134,16 @@ class SandboxHandle(Handle):
         self._mgr = mgr
         self._key = key
 
-    async def exec(self, cmd, *, cwd=None, tool_id=None, timeout=None):
-        return await self._mgr.exec(cmd, cwd=cwd, tool_id=tool_id, timeout=timeout)
+    async def exec(self, cmd, *, cwd=None, category=None, tool_id=None,
+                   target=None, timeout=None):
+        return await self._mgr.exec(cmd, cwd=cwd, category=category,
+                                    tool_id=tool_id, target=target, timeout=timeout)
 
-    async def run_python(self, code, *, cwd=None, tool_id=None, timeout=None):
-        return await self._mgr.run_python(code, cwd=cwd, tool_id=tool_id, timeout=timeout)
+    async def run_python(self, code, *, cwd=None, category=None, tool_id=None,
+                         target=None, timeout=None):
+        return await self._mgr.run_python(code, cwd=cwd, category=category,
+                                          tool_id=tool_id, target=target,
+                                          timeout=timeout)
 
     async def probe_tool(self, tool_id: str) -> dict:
         return await self._mgr.probe_tool(tool_id, session_key=self._key)

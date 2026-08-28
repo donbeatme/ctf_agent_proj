@@ -14,6 +14,7 @@ from agent.env_providers import (
 from agent.providers import Requirement
 from agent.runner import ProcOutcome
 from sandbox_env import SandboxSettings
+from sandbox_env.base import ExecOutcome, SandboxManager
 
 
 class FakeSsh:
@@ -223,3 +224,36 @@ def test_sandbox_provider_requires_ssh():
     with pytest.raises(ValueError):
         SandboxProvider(SshProvider(factory=lambda: FakeSsh()),
                         settings=SandboxSettings())      # ssh_host=None
+
+
+class _SpyMgr(SandboxManager):
+    """不透传构造:仅记录 exec/run_python 收到的 kw(验证 handle 透传)。"""
+
+    def __init__(self):
+        self.exec_kw = None
+        self.run_python_kw = None
+
+    async def exec(self, cmd, **kw):
+        self.exec_kw = kw
+        return ExecOutcome(0, b"", b"")
+
+    async def run_python(self, code, **kw):
+        self.run_python_kw = kw
+        return ExecOutcome(0, b"", b"")
+
+
+async def test_sandbox_handle_forwards_runner_kwargs():
+    """SandboxHandle.exec/run_python 透传 runner 的全部 kw(category/target/timeout…)。
+
+    回归:此前只透传 cwd/tool_id/timeout,runner 传 category 直接 TypeError,
+    真实执行器在 actor mode 下所有命令崩。
+    """
+    mgr = _SpyMgr()
+    h = SandboxHandle(mgr, "k1")
+    await h.exec("cmd", cwd="/c", category="crypto", tool_id="python",
+                 target="ssh", timeout=7)
+    assert mgr.exec_kw == {"cwd": "/c", "category": "crypto", "tool_id": "python",
+                           "target": "ssh", "timeout": 7}
+    await h.run_python("code", cwd="/c", category="crypto", timeout=3)
+    assert mgr.run_python_kw == {"cwd": "/c", "category": "crypto",
+                                 "target": None, "tool_id": None, "timeout": 3}
