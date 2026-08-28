@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections import deque
 
 from agent.providers import Capability, Handle, Lease, Provider, Requirement
@@ -214,6 +215,27 @@ class SandboxProvider(Provider):
 
     async def health(self) -> dict:
         return {"ok": True, "name": self.name, "active": len(self._active)}
+
+    async def probe_image(self, script: str, timeout: float = 180.0) -> str:
+        """在沙箱镜像的 scratch 容器内执行探测脚本(docker run --rm,只读,不落会话)。
+
+        借一条 ssh 连接,把脚本 base64 内联进 docker run 命令(避免引号/换行转义坑),
+        返回容器 stdout。供 run 起始环境快照探测真实镜像工具就绪度——本地 host 探测
+        (importlib/which)会误报缺失。探测失败返回空串(调用方回退 host 探测)。
+        """
+        req = Requirement(capabilities=frozenset({"remote_exec"}), actor_id="probe")
+        ssh_lease = await self._ssh.acquire(req)
+        try:
+            backend = ssh_lease.handle.backend
+            b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+            inner = "import base64,sys;exec(base64.b64decode(sys.argv[1]).decode())"
+            cmd = f"docker run --rm {self._settings.image} python3 -c \"{inner}\" {b64}"
+            out = await backend.exec(cmd, timeout=timeout)
+            if out.returncode != 0:
+                return ""
+            return out.stdout.decode("utf-8", "replace")
+        finally:
+            await ssh_lease.release()
 
     async def close(self) -> None:
         """关闭底层 ssh 连接池(scheduler.close 级联;沙箱会话无独立资源要释放)。

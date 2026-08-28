@@ -9,6 +9,8 @@
 - logger 写 check[run_start] / check[step] 与 run-end 汇总
 """
 
+import pytest
+
 from agent.checks import SkillEnvProbe
 from agent.ctf_skill_tools import TOOL_MANIFEST, CtfSkillToolCatalog
 from agent.engine import Engine
@@ -147,6 +149,52 @@ def test_probe_manifest_sandbox_uses_configured_rep():
     assert rep["sandbox"]["category"] == "ctf-web"
     assert rep["sandbox"]["needed"] is True
     assert rep["sandbox"]["available"] is True
+
+
+# ===== 镜像内探测(manifest_probe_script / manifest_from_remote) =====
+
+
+def test_manifest_probe_script_covers_full_catalog():
+    """脚本里每工具都有校验规则(与 probe_manifest 同源),空校验 → manual 分支。"""
+    stub = StubCatalog([
+        {"tool_id": "a", "verify_check": "import json"},
+        {"tool_id": "b", "verify_check": ""},
+    ])
+    script = SkillEnvProbe(stub).manifest_probe_script()
+    assert "'a': 'import json'" in script
+    assert "'b': ''" in script
+    assert "import importlib.util" in script and "shutil.which" in script
+
+
+def test_manifest_from_remote_parses_image_output():
+    stub = StubCatalog([
+        {"tool_id": "a", "verify_check": "import json"},
+        {"tool_id": "b", "verify_check": "import no_such_mod_xyz"},
+        {"tool_id": "c", "verify_check": ""},
+    ])
+    probe = SkillEnvProbe(stub, sandbox_probe=lambda cat: False)
+    rep = probe.manifest_from_remote('{"a": "available", "b": "missing", "c": "manual"}')
+    assert rep["total"] == 3
+    assert rep["available"] == 1 and rep["missing"] == 1 and rep["manual"] == 1
+    assert rep["unknown"] == 0
+    assert rep["missing_list"] == ["b(import no_such_mod_xyz)"]
+    assert rep["probe"] == "sandbox-image"
+    assert rep["sandbox"]["available"] is True   # 镜像已真实运行(区别于 host 探测)
+
+
+def test_manifest_from_remote_skips_noise_lines():
+    """容器 stdout 可能带告警噪声(_curses terminfo 等)→ 取最后一行 JSON。"""
+    stub = StubCatalog([{"tool_id": "a", "verify_check": "import json"}])
+    rep = SkillEnvProbe(stub).manifest_from_remote(
+        "Warning: setupterm: could not find terminfo\n"
+        '{"a": "available"}\n')
+    assert rep["available"] == 1 and rep["missing"] == 0
+
+
+def test_manifest_from_remote_rejects_bad_output():
+    stub = StubCatalog([{"tool_id": "a", "verify_check": "import json"}])
+    with pytest.raises(ValueError):
+        SkillEnvProbe(stub).manifest_from_remote("docker: not a json at all")
 
 
 # ===== apply_tool 返回带 probe =====
@@ -422,6 +470,86 @@ def test_engine_run_start_no_challenge_type_no_category_probe():
 
     assert len(collector.start_reports) == 1
     assert "category" not in collector.start_reports[0]
+
+
+class _FakeImageScheduler:
+    """最小调度器:image_probe 返回固定镜像输出;沙箱 acquire/release 空实现(仅走通路径)。"""
+
+    def __init__(self, image_out):
+        self._image_out = image_out
+
+    async def image_probe(self, script):
+        return self._image_out
+
+    def requirement_for(self, *, actor_id=None, cwd=None, step=None):
+        from agent.providers import Requirement
+
+        return Requirement(capabilities=frozenset({"isolated_exec"}), actor_id=actor_id,
+                           cwd=cwd or "/challenge/x")
+
+    async def acquire(self, req):
+        from agent.providers import Handle, Lease
+
+        class _H(Handle):
+            name = "fake"
+
+        return Lease(provider=self, requirement=req, holder=req.actor_id or "?",
+                     handle=_H())
+
+    async def release(self, lease):
+        pass
+
+
+def _run_start_report(checker, scheduler=None, max_concurrency=1):
+    collector = _ReportCollector()
+    evaluator = MockEvaluator({
+        "evaluator_plan": EvalResult(Verdict.PASS, "计划可执行"),
+        "evaluator_step": EvalResult(Verdict.PASS, "s1: 完成"),
+        "evaluator_task": EvalResult(Verdict.DONE, "反思: 无问题"),
+    })
+
+    class _Exec(MockExecutor):
+        allowed_cwd = "/challenge/x"   # actor 路径开租约需要
+
+    engine = Engine(_StepPlanner(), _Exec(observation="执行完成"), evaluator,
+                    workspace=MockWorkspace(), checker=checker, scheduler=scheduler,
+                    max_concurrency=max_concurrency)
+    engine.signals.subscribe(collector)
+    engine.run(dict(MOCK_TASK))
+    assert len(collector.start_reports) == 1
+    return collector.start_reports[0]
+
+
+def test_engine_run_start_probes_sandbox_image_when_scheduler():
+    """有调度器时 run_start 探测真实镜像:probe=sandbox-image、按镜像输出计数、sandbox=有。"""
+    catalog = StubCatalog([
+        {"tool_id": "a", "verify_check": "import json"},
+        {"tool_id": "b", "verify_check": "import no_such_mod_xyz"},
+    ])
+    checker = SkillEnvProbe(catalog, sandbox_probe=lambda cat: False)
+    sched = _FakeImageScheduler('{"a": "available", "b": "missing"}')
+    rep = _run_start_report(checker, scheduler=sched, max_concurrency=2)
+    assert rep["probe"] == "sandbox-image"
+    assert rep["available"] == 1 and rep["missing"] == 1
+    assert rep["missing_list"] == ["b(import no_such_mod_xyz)"]
+    assert rep["sandbox"]["available"] is True     # 镜像已真实运行
+
+
+def test_engine_run_start_falls_back_to_host_probe_on_failure():
+    """镜像探测空输出/异常 → 回退本地 host 探测并标 probe=host(不中断 run)。"""
+    catalog = StubCatalog([{"tool_id": "a", "verify_check": "import json"},
+                           {"tool_id": "b", "verify_check": ""}])
+    checker = SkillEnvProbe(catalog, sandbox_probe=lambda cat: False)
+    sched = _FakeImageScheduler("")                # 空输出 → 回退
+    rep = _run_start_report(checker, scheduler=sched, max_concurrency=2)
+    assert rep["probe"] == "host"
+    assert rep["available"] == 1 and rep["manual"] == 1
+
+
+def test_engine_run_start_host_probe_labeled_without_scheduler():
+    """无调度器(串行旧路径)→ host 探测并标 probe=host。"""
+    rep = _run_start_report(StubChecker())
+    assert rep["probe"] == "host"
 
 
 def test_logger_run_start_writes_challenge_type_category(tmp_path):

@@ -57,5 +57,16 @@ class ExecutionScheduler:
             if close is not None:
                 await close()
 
+    async def image_probe(self, script: str) -> str | None:
+        """在沙箱镜像的 scratch 容器内执行探测脚本(委托第一个支持 probe_image 的 provider)。
+
+        无 provider 支持(串行旧路径 / 纯 mock)返回 None → 调用方回退 host 探测。
+        """
+        for p in self._providers:
+            probe = getattr(p, "probe_image", None)
+            if probe is not None:
+                return await probe(script)
+        return None
+
 
 __all__ = ["ExecutionScheduler"]

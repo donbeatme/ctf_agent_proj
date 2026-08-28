@@ -122,3 +122,66 @@ class SkillEnvProbe:
             "missing_list": missing_list,
             "sandbox": self.probe_sandbox(rep_cat),
         }
+
+    def manifest_probe_script(self) -> str:
+        """生成在沙箱镜像内执行的全量工具探测脚本(与 probe_manifest 同规则,输出 JSON)。"""
+        checks = {e["tool_id"]: e.get("verify_check", "") for e in self.catalog.manifest}
+        return (
+            "import importlib.util, shutil, json\n"
+            f"checks = {checks!r}\n"
+            "res = {}\n"
+            "for tid, check in checks.items():\n"
+            "    if not check:\n"
+            "        res[tid] = 'manual'; continue\n"
+            "    try:\n"
+            "        if check.startswith('import '):\n"
+            "            mod = check[len('import '):].strip().split('.')[0]\n"
+            "            ok = importlib.util.find_spec(mod) is not None\n"
+            "        else:\n"
+            "            ok = shutil.which(check) is not None\n"
+            "    except Exception:\n"
+            "        ok = False\n"
+            "    res[tid] = 'available' if ok else 'missing'\n"
+            "print(json.dumps(res, ensure_ascii=False))\n"
+        )
+
+    def manifest_from_remote(self, raw_out: str) -> dict:
+        """解析镜像内探测脚本 stdout(取最后一行 JSON,抗告警噪声) → probe_manifest 同 shape。
+
+        镜像已真实运行 → sandbox available=True(与 host 探测区分);来源标记 sandbox-image。
+        """
+        import json
+
+        data = None
+        for line in reversed(raw_out.strip().splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+        if not isinstance(data, dict):
+            raise ValueError("镜像探测输出不含有效 JSON")
+        counts = {"total": 0, "available": 0, "missing": 0, "manual": 0, "unknown": 0}
+        missing_list: list[str] = []
+        for e in self.catalog.manifest:
+            counts["total"] += 1
+            status = data.get(e["tool_id"], "unknown")
+            if status == "available":
+                counts["available"] += 1
+            elif status == "missing":
+                counts["missing"] += 1
+                missing_list.append(f"{e['tool_id']}({e.get('verify_check', '')})")
+            elif status == "manual":
+                counts["manual"] += 1
+            else:
+                counts["unknown"] += 1
+        rep_cat = next(iter(sorted(self._sandbox_categories)), "ctf-pwn")
+        return {
+            **counts,
+            "missing_list": missing_list,
+            "sandbox": {"category": rep_cat, "needed": True, "available": True},
+            "probe": "sandbox-image",
+        }

@@ -296,7 +296,7 @@ class Engine:
                               max_replans=self.max_replans, max_stalls=self.max_stalls,
                               max_deadlock_attempts=self.max_deadlock_attempts)
             if self._checker is not None:
-                rep = self._checker.probe_manifest()
+                rep = await self._probe_manifest_snapshot()
                 ctype = (self.raw_content or {}).get("challenge_type")
                 if ctype:
                     rep["category"] = self._checker.probe_category(ctype)
@@ -305,6 +305,27 @@ class Engine:
             return self.bp
         finally:
             set_run_context(run_id=None)
+
+    async def _probe_manifest_snapshot(self) -> dict:
+        """run 起始工具快照:有沙箱调度器时在真实镜像内探测;不可用回退本地 host 探测。
+
+        镜像探测异常(ssh 不可达 / 容器失败 / 输出不可解析)一律回退 host 并标来源,
+        不因探测失败中断 run(环境快照是审计辅助,不是前置门禁)。
+        """
+        ip = getattr(self._scheduler, "image_probe", None) if self._scheduler is not None else None
+        if ip is not None:
+            script = getattr(self._checker, "manifest_probe_script", None)
+            parse = getattr(self._checker, "manifest_from_remote", None)
+            if script is not None and parse is not None:
+                try:
+                    out = await ip(script())
+                    if out:
+                        return parse(out)
+                except Exception:
+                    pass
+        rep = self._checker.probe_manifest()
+        rep["probe"] = "host"
+        return rep
 
     async def _run_loop(self):
         """主循环(初始 run 与 resume 共用):逐拍 _dispatch 直至终态,

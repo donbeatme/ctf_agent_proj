@@ -13,6 +13,7 @@ from agent.env_providers import (
 )
 from agent.providers import Requirement
 from agent.runner import ProcOutcome
+from agent.scheduler import ExecutionScheduler
 from sandbox_env import SandboxSettings
 from sandbox_env.base import ExecOutcome, SandboxManager
 
@@ -240,6 +241,43 @@ class _SpyMgr(SandboxManager):
     async def run_python(self, code, **kw):
         self.run_python_kw = kw
         return ExecOutcome(0, b"", b"")
+
+
+class _ProbeFake(FakeSsh):
+    """docker run --rm(scratch 探测)返回固定 JSON;其余走 FakeSsh。"""
+
+    def __init__(self):
+        super().__init__()
+        self.probe_cmds = []
+
+    async def exec(self, cmd_str, timeout=None):
+        self.execs.append((cmd_str, timeout))
+        if cmd_str.startswith("docker run --rm"):
+            self.probe_cmds.append(cmd_str)
+            return ProcOutcome(0, b'{"a": "available", "b": "missing"}', b"")
+        return await super().exec(cmd_str, timeout)
+
+
+async def test_sandbox_probe_image_runs_scratch_container():
+    conn = _ProbeFake()
+    pool = SshProvider(factory=lambda: conn, max_connections=1)
+    sp = SandboxProvider(pool, settings=SandboxSettings(ssh_host="vm"))
+    out = await sp.probe_image('print("probe")')
+    assert "available" in out and "missing" in out      # 容器探测输出回传
+    assert conn.probe_cmds and "docker run --rm" in conn.probe_cmds[0]
+    assert "base64" in conn.probe_cmds[0]               # 脚本 base64 内联(避转义)
+    assert len(pool._idle) == 1                         # 连接已还池
+
+
+async def test_scheduler_image_probe_delegates_to_provider():
+    conn = _ProbeFake()
+    pool = SshProvider(factory=lambda: conn, max_connections=1)
+    sp = SandboxProvider(pool, settings=SandboxSettings(ssh_host="vm"))
+    sched = ExecutionScheduler(providers=[sp])
+    out = await sched.image_probe("print(1)")
+    assert "available" in out
+    # 无支持 probe_image 的 provider → None(调用方回退 host 探测)
+    assert await ExecutionScheduler(providers=[]).image_probe("print(1)") is None
 
 
 async def test_sandbox_handle_forwards_runner_kwargs():

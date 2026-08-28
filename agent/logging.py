@@ -553,8 +553,9 @@ class EngineLogger:
         unknown = report.get("unknown", 0)
         sb = report.get("sandbox") or {}
         runtime = "docker/podman(有)" if sb.get("available") else "docker/podman(无)"
+        src = {"sandbox-image": " [镜像探测]", "host": " [host 探测]"}.get(report.get("probe"), "")
         self._engine(f"check[run_start] 环境快照 工具可用 {avail}/{total} 缺失 {missing} "
-                     f"manual {manual} unknown {unknown}  沙箱运行时: {runtime}")
+                     f"manual {manual} unknown {unknown}  沙箱运行时: {runtime}{src}")
         missing_list = report.get("missing_list") or []
         if missing_list:
             shown = missing_list[:15]
