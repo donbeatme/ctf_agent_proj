@@ -67,7 +67,8 @@ class SshProvider(Provider):
 
             def _factory():
                 return SshBackend(
-                    host=s.ssh_host, user=s.ssh_user, password=s.ssh_password,
+                    host=s.ssh_host, port=s.ssh_port,
+                    user=s.ssh_user, password=s.ssh_password,
                     workdir=s.ssh_workdir, connect_timeout=connect_timeout,
                     ssh_key=s.ssh_key, host_key=s.ssh_host_key)
 

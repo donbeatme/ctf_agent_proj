@@ -4,6 +4,88 @@
 
 ---
 
+## 本地真实 Agent 快速开始
+
+本分支支持从 Web 指令台拉取平台题目，并使用真实模型完成规划、执行和步骤验收。执行命令不会落到开发机宿主环境，而是经 SSH 进入 Match 专用 Lima VM，再在每个任务独立的 Docker 容器中运行。
+
+### 1. 安装依赖
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+
+# macOS 本地隔离 VM
+brew install lima
+```
+
+### 2. 创建私有配置
+
+```bash
+cp model_config.json.example model_config.json
+cp config_adaptor.json.example config_adaptor.json
+cp config_sandbox.json.example config_sandbox.json
+```
+
+- `model_config.json`：模型 Base URL、模型名称和 API Key；也可在 Web 的“模型链接”中填写。
+- `config_adaptor.json`：CTF2 登录态、API Key 和练习场 ID。
+- `config_sandbox.json`：SSH 地址、端口、用户、密钥以及沙箱镜像。
+
+这些文件已被 `.gitignore` 排除，不应提交到 Git。
+
+### 3. 准备隔离 VM
+
+```bash
+# 创建或启动 Match 专用 VM；Web 真实派发时也会自动执行 start
+scripts/match_vm.sh start
+
+# 查看 VM 和 Docker 状态
+scripts/match_vm.sh status
+scripts/match_vm.sh docker images
+
+# 首次使用或 Dockerfile 更新后构建沙箱镜像
+.venv/bin/python scripts/build_sandbox_image.py
+```
+
+VM 默认使用项目上一级目录的 `.lima/ctf-sandbox` 保存状态，并以 `--mount-none` 创建，不挂载宿主机代码目录。Web 后端还会拒绝执行仓库以外的 `challenge_dir`。
+
+### 4. 启动 Web 指令台
+
+```bash
+.venv/bin/python main.py serve --host 127.0.0.1 --port 8765
+```
+
+打开 `http://127.0.0.1:8765` 后：
+
+1. 在“01 战情总览”的“模型链接”中保存并检测模型。
+2. 在“02 攻防任务接入”的平台区域同步索引，输入题目 ID，点击“拉取并识别”。
+3. 保持“真实执行（自动启动 VM + SSH 沙箱）”，直接点击“派发 Agent”。
+4. 在新增的任务标签中查看运行状态、DAG、VM/SSH、工具调用、命令输出和日志。
+
+### 5. 判断是否真正解题成功
+
+完整成功需要同时满足：
+
+- 运行快照显示 `execution_mode=real`。
+- 事件流包含 `sandbox.container_created`、`sandbox.exec`、`use_tool` 和 `tool_result`。
+- 任务状态为 `DONE`，关键 DAG 步骤为 `PASSED`。
+- `submission` 事件显示 `correct=true`；仅有 `DONE` 但没有正确提交不能视为解题成功。
+- 运行结束出现 `sandbox.container_removed`，表示任务容器已经清理。
+
+可通过以下接口复核，其中 `<run_id>` 替换成任务 ID：
+
+```text
+GET /api/runs/<run_id>
+GET /api/runs/<run_id>/events?after=0
+GET /api/runs/<run_id>/product
+GET /api/runs/<run_id>/report
+```
+
+### 本地数据边界
+
+以下内容仅保存在本机，不进入 Git 分支：`.env`、`model_config.json`、`config_adaptor.json`、`config_sandbox.json`、`.venv/`、`data/`、`downloads/`、`runs/` 以及项目外的 `.lima/` VM 数据。
+
+---
+
 ## 架构总览
 
 ```
@@ -264,9 +346,11 @@ export CTF_ATTACHMENT_CACHE_BYTES="2147483648"   # 附件缓存上限,超限 LRU
 # 冒烟测试（真实 Planner + mock 执行/评估）
 python main.py run-task
 
-# 指令台前端（攻防作战台：登录、战情大屏、任务接入、Agent 工作区、成果审核、复盘、能力库、MCP、用户管理）
+# 指令台前端（真实模式会自动启动 Match 专用 Lima VM，并通过 SSH/Docker 执行 Agent 工具）
 .venv/bin/python web_server.py --port 8765
 # 浏览器打开 http://127.0.0.1:8765
+# 真实派发前需在“模型连接”中配置 API Key；题目必须先拉取到本仓库内的 challenge_dir
+# 演示模式只使用 MockExecutor，不会启动 VM 或执行命令
 # 当前前端状态、模块说明、API 速查见 web/README.md
 # 能力地图 GET /api/capabilities；平台桥接 GET /api/platform/status；沙箱运行时 GET /api/sandbox/runtime
 

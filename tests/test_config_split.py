@@ -91,16 +91,18 @@ def test_store_settings_sources_from_config_adaptor(monkeypatch, tmp_path):
 def test_sandbox_settings_sources_from_config_sandbox(monkeypatch, tmp_path):
     p = _write(tmp_path, "sandbox.json", {
         "CTF_SSH_HOST": "10.0.0.9",
+        "CTF_SSH_PORT": "22022",
         "CTF_SSH_USER": "alpine",
         "CTF_SSH_PASSWORD": "pw",
         "CTF_SANDBOX_BACKEND": "ssh",
     })
     monkeypatch.setattr(config_sandbox, "_CONFIG_FILE", p)
-    for k in ("CTF_SSH_HOST", "CTF_SSH_USER", "CTF_SSH_PASSWORD",
+    for k in ("CTF_SSH_HOST", "CTF_SSH_PORT", "CTF_SSH_USER", "CTF_SSH_PASSWORD",
               "CTF_SANDBOX_BACKEND"):
         monkeypatch.delenv(k, raising=False)
     s = SandboxSettings.from_env()
     assert s.ssh_host == "10.0.0.9"
+    assert s.ssh_port == 22022
     assert s.ssh_user == "alpine"
     assert s.ssh_password == "pw"
     assert s.ssh_configured is True

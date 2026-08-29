@@ -1687,6 +1687,17 @@ button.danger {
   background: #fff;
 }
 
+.ops-card-wide {
+  grid-column: 1 / -1;
+}
+
+.execution-stream {
+  max-height: 520px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .create-task-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin: 6px 0 14px;

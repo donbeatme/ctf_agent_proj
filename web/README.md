@@ -10,7 +10,7 @@
 | 后端网关 | `web_server.py` |
 | 默认地址 | `http://127.0.0.1:8765` |
 | 当前推荐启动 | `.venv/bin/python web_server.py --port 8765` |
-| 静态资源版本 | `20260820-ops-copy` |
+| 默认执行模式 | `real`：自动启动 Match 专用 Lima VM，经 SSH 在任务独立 Docker 容器执行 |
 | 页面语境 | 攻防任务、攻防研判、成果审核、证据交付 |
 
 ---
@@ -25,7 +25,7 @@
 http://127.0.0.1:8765
 ```
 
-如果使用 `python main.py serve --port 8765`，必须确保当前 Python 环境已安装 `requirements.txt` 里的依赖。当前本地验证使用的是项目 `.venv`。
+如果使用 `python main.py serve --port 8765`，必须确保当前 Python 环境已安装 `requirements.txt` 里的依赖。当前本地验证使用的是项目 `.venv`。真实派发还要求模型连接已配置，并且任务已经通过平台拉取成本仓库内的 `challenge_dir`。
 
 ---
 
@@ -77,6 +77,12 @@ http://127.0.0.1:8765
 - 修复 `SmokeEvaluator` 导入：
   - 当前 `SmokeEvaluator` 来自 `agent.evaluator`
   - `web_server.py` 不再从 `main` 导入它
+- Web 派发已接真实执行链：
+  - 默认 `execution_mode=real`，使用 `RealExecutor + CommandRunner + ExecutionScheduler`
+  - 本地 SSH 配置会调用 `scripts/match_vm.sh start`，随后真实探测 SSH、Docker 与 `ctf-sandbox:latest`
+  - 每个任务在独立容器内执行，结束后容器销毁；命令输出、工具结果、事件和日志保留在 Match 工作区
+  - 运行面板展示 VM、沙箱、工具调用、命令输出、事件和日志；仍可手动切换 Mock 演示模式
+  - 题目下载和真实执行目录均强制位于 Match 仓库内，避免同步或修改外部仓库
 
 ---
 
@@ -104,13 +110,14 @@ http://127.0.0.1:8765
 
 派发 Agent 后，会像浏览器子页一样打开一个与“投递攻防任务”并列的任务标签。该面板展示：
 
-- run_id、状态、当前步骤、tokens
+- run_id、状态、执行模式、VM/SSH、当前步骤、tokens
 - 状态机
 - 计划 DAG
 - SignalBus
 - events.jsonl
 - run.log
-- 可解释过程、工具状态和文件工作区示意
+- VM、容器、工具调用和命令输出
+- 可解释过程、工具状态和文件工作区
 
 ### 成果审核
 
@@ -146,7 +153,7 @@ http://127.0.0.1:8765
 | POST | `/api/challenge/parse` | 多源输入归一化和场景识别 |
 | POST | `/api/challenge/understand` | 真实任务目录理解 |
 | POST | `/api/challenge/upload` | 附件落盘 |
-| GET/POST | `/api/runs` | 历史列表 / 启动 run |
+| GET/POST | `/api/runs` | 历史列表 / 启动 run；POST 支持 `execution_mode=real|demo`、`actors=1..8` |
 | GET | `/api/runs/:id` | run 快照 |
 | GET | `/api/runs/:id/log` | 文本日志 |
 | GET | `/api/runs/:id/events` | 结构化事件 |
@@ -174,7 +181,9 @@ http://127.0.0.1:8765
 ## 已知边界
 
 - 平台任务同步、拉取、提交依赖 `config_adaptor.json` 或环境变量中的平台登录态 / token。
-- 沙箱运行时探测依赖 `config_sandbox.json` 或环境变量中的 SSH/Pi 配置。
+- 沙箱运行时探测依赖 `config_sandbox.json` 或环境变量中的 SSH 配置；本地 Lima 默认由 `scripts/match_vm.sh` 管理。
+- 真实模式需要模型 API Key，并且只接受 Match 仓库内的 `challenge_dir`；外部目录会在启动前拒绝。
+- Match 专用 Lima 状态位于项目上一级目录的 `.lima/`，并使用 `--mount-none`，不会挂载宿主机上的其他开发仓库。
 - 页面文案已攻防化，但内部协议仍沿用原项目字段名，例如 `challenge_id`、`challenge_type`、`flag`。这些字段是后端契约，不是展示文案。
 - 若本地缺依赖，优先使用 `.venv/bin/python` 启动；当前本地已经补装 `PyYAML`。
 
@@ -188,5 +197,7 @@ http://127.0.0.1:8765
 | 启动按钮灰色 | 先点击“识别攻防任务”或通过平台/本地任务理解生成识别结果 |
 | 平台显示未配置 | 配置 `CTF2_SESSION_TOKEN` / `CTF2_COOKIE` / `CTF2_API_KEY` 或 `config_adaptor.json` |
 | 沙箱显示未配置 | 配置 `CTF_SSH_HOST` 等沙箱参数或 `config_sandbox.json` |
+| 真实派发提示模型未配置 | 到“模型连接”填写 API Key、Base URL 和模型名称后保存 |
+| 真实派发提示缺少 challenge_dir | 先在平台任务库拉取题目，再从已物化任务派发 |
 | 成果提交失败 | 先确认平台状态已配置；默认本地核验不会真实提交 |
-| 页面仍显示旧文案 | 强刷新浏览器；当前资源版本为 `20260820-ops-copy` |
+| 页面仍显示旧文案 | 重启本地服务后强刷新浏览器 |

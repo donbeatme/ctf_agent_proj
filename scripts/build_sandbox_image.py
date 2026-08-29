@@ -1,7 +1,7 @@
 """在远程沙箱 VM 上构建/重建 ctf-sandbox:latest。
 
 流程:SSH(CTF_SSH_* 凭据) → 确保 docker daemon → 上传最小构建上下文
-(/root/ctf-build: Dockerfile + install_ctf_tools.sh) → docker build(流式输出)
+({CTF_SSH_WORKDIR}-build: Dockerfile + install_ctf_tools.sh) → docker build(流式输出)
 → 构建后 --verify 复查 + 几个工具点检。
 
 用法:python scripts/build_sandbox_image.py [--skip-build]
@@ -18,8 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config_sandbox import get as _cfg
 
 HOST = _cfg("CTF_SSH_HOST") or sys.exit("CTF_SSH_HOST 未配置")
+PORT = int(_cfg("CTF_SSH_PORT") or 22)
 USER = _cfg("CTF_SSH_USER") or "root"
 PASS = _cfg("CTF_SSH_PASSWORD") or ""
+KEY = _cfg("CTF_SSH_KEY") or ""
+WORKDIR = str(_cfg("CTF_SSH_WORKDIR") or "/root/ctf").rstrip("/")
 MIRROR = _cfg("CTF_APT_MIRROR") or "mirrors.aliyun.com"
 SKIP_BUILD = "--skip-build" in sys.argv
 
@@ -32,7 +35,7 @@ SCRIPT = os.path.join(ROOT, "skills", "ctf-skills", "scripts", "install_ctf_tool
 GHIDRA_ZIP = os.path.join(ROOT, "downloads", "ghidra_12.1.3_PUBLIC_20260817.zip")
 PYCDC_TGZ = os.path.join(ROOT, "downloads", "pycdc.tar.gz")
 RSACTFTOOL_TGZ = os.path.join(ROOT, "downloads", "RsaCtfTool.tar.gz")
-REMOTE = "/root/ctf-build"
+REMOTE = f"{WORKDIR}-build"
 
 
 def _lf(path: str) -> bytes:
@@ -42,23 +45,42 @@ def _lf(path: str) -> bytes:
 def _exec(client, cmd: str, timeout: float | None = None, echo=True):
     if echo:
         print(f"\n$ {cmd}", flush=True)
-    stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-    out = stdout.read().decode("utf-8", "replace")
-    err = stderr.read().decode("utf-8", "replace")
-    if out:
-        print(out, flush=True)
-    if err:
-        print(err, flush=True)
-    return out, err, stdout.channel.recv_exit_status()
+    _stdin, stdout, _stderr = client.exec_command(cmd, timeout=timeout)
+    channel = stdout.channel
+    out_parts: list[str] = []
+    err_parts: list[str] = []
+    while True:
+        if channel.recv_ready():
+            chunk = channel.recv(32768).decode("utf-8", "replace")
+            out_parts.append(chunk)
+            print(chunk, end="", flush=True)
+        if channel.recv_stderr_ready():
+            chunk = channel.recv_stderr(32768).decode("utf-8", "replace")
+            err_parts.append(chunk)
+            print(chunk, end="", file=sys.stderr, flush=True)
+        if (channel.exit_status_ready() and not channel.recv_ready()
+                and not channel.recv_stderr_ready()):
+            break
+        time.sleep(0.05)
+    return "".join(out_parts), "".join(err_parts), channel.recv_exit_status()
 
 
 def main() -> None:
     import paramiko
 
-    print(f"[connect] {USER}@{HOST}")
+    print(f"[connect] {USER}@{HOST}:{PORT}")
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(HOST, port=22, username=USER, password=PASS, timeout=20)
+    connect_kwargs = {
+        "hostname": HOST,
+        "port": PORT,
+        "username": USER,
+        "password": PASS or None,
+        "timeout": 20,
+    }
+    if KEY:
+        connect_kwargs["key_filename"] = os.path.expanduser(KEY)
+    client.connect(**connect_kwargs)
     print("[connect] ok")
 
     _exec(client, "docker info >/dev/null 2>&1 || (rc-service docker start >/dev/null 2>&1; sleep 3)")
@@ -111,7 +133,11 @@ def main() -> None:
         _out, _err, build_rc = _exec(client, build_cmd, timeout=None)
         print(f"[build] 结束,用时 {int((time.time()-t0)/60)} 分钟,rc={build_rc}", flush=True)
 
-    # 构建后回收 build cache(成功/失败都做;失败时磁盘可能已满,先腾出空间再复查)
+    if build_rc != 0:
+        client.close()
+        sys.exit(f"[failed] docker build rc={build_rc}(保留构建缓存以便修复后重试)")
+
+    # 构建成功后回收 build cache;最终镜像不会被删除。
     if not SKIP_BUILD:
         print("\n[prune] 回收 build cache...")
         _exec(client, "docker builder prune -f -a 2>&1 | tail -3")
@@ -124,8 +150,6 @@ def main() -> None:
     _exec(client, "docker run --rm ctf-sandbox:latest bash -lc 'for c in tshark capinfos exiftool binwalk foremost steghide 7z zsteg r2 objdump vol file gdb analyzeHeadless; do printf \"%-14s %s\\n\" \"$c\" \"$(command -v $c || echo MISSING)\"; done'")
 
     client.close()
-    if build_rc != 0:
-        sys.exit(f"[failed] docker build rc={build_rc}(镜像未更新,请见上方输出)")
     print("\n[done] 镜像已就绪")
 
 

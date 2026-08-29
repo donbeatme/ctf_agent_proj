@@ -32,7 +32,7 @@ class SshSandboxBackend(SandboxBackend):
             from agent.ssh import SshBackend  # lazy:asyncssh 仅真实运行时才引
 
             ssh = SshBackend(
-                host=settings.ssh_host, user=settings.ssh_user,
+                host=settings.ssh_host, port=settings.ssh_port, user=settings.ssh_user,
                 password=settings.ssh_password, workdir=settings.ssh_workdir,
                 ssh_key=settings.ssh_key, host_key=settings.ssh_host_key,
             )

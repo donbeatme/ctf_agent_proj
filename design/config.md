@@ -67,6 +67,7 @@ model_config.get(name)     =  env  →  model_config.json                       
 | key | 敏感 | 默认 | 说明 |
 |---|---|---|---|
 | `CTF_SSH_HOST` | 否 | — | SSH 目标;配置后 runner 懒建 SandboxManager |
+| `CTF_SSH_PORT` | 否 | `22` | SSH 端口（Lima 等本机转发 VM 可使用固定高位端口） |
 | `CTF_SSH_USER` | 否 | `root` | SSH 用户 |
 | `CTF_SSH_PASSWORD` | **是** | — | SSH 密码 |
 | `CTF_SSH_WORKDIR` | 否 | `/root/ctf` | 远程工作目录根(会话子目录 `{workdir}/{session_key}`) |
@@ -109,4 +110,3 @@ env 变量始终优先,模板照抄不影响 `CTF2_CONFIG_JSON` 外部兜底。
 - 敏感凭证 **不进 DB、不进错误信息、不写日志**(`challenge_flags`/`events.jsonl`/run.log 均不含)。
 - CDN 下载请求(`ctf2-files.dasctf.com`)**不带任何凭证头**(token/PAT 绝不发给第三方域名)。
 - 三 JSON 均 gitignore;`CTF2_CONFIG_JSON` 外部文件仅作兼容兜底(新布局优先写 `config_adaptor.json`)。
-

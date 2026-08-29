@@ -96,6 +96,7 @@ class SandboxManager:
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `CTF_SSH_HOST` | — | SSH 目标(读 `config_sandbox`;配置后 runner 懒建 SandboxManager) |
+| `CTF_SSH_PORT` | `22` | SSH 端口（支持 Lima 等本机转发 VM） |
 | `CTF_SSH_USER` | `root` | SSH 用户 |
 | `CTF_SSH_PASSWORD` | — | SSH 密码 |
 | `CTF_SSH_WORKDIR` | `/root/ctf` | 远程工作目录根(会话子目录 `{workdir}/{session_key}`) |

@@ -57,7 +57,7 @@ const AGENT_ROLE_ITEMS = [
   { id: "intake", type: "输入", title: "任务情报感知", badge: "wired", value: "Text / URL / JSON / Files", desc: "统一接入任务情报、附件、远程地址和平台 JSON。", detail: "输入层负责把用户投递的多源信息规范成行动任务，保留附件、目标 URL、成果口令格式和平台元数据。" },
   { id: "understander", type: "理解", title: "RealTaskUnderstander", badge: "wired", value: "真实任务解析", desc: "读取本地任务目录、metadata、附件并生成目标列表。", detail: "输出场景类型、置信度、目标列表、artifacts、target_info，为能力检索、工具筛选和模型提示词提供结构化上下文。" },
   { id: "planner", type: "规划", title: "Planner", badge: "wired", value: "真实 LLM", desc: "召回能力库，生成可解释 DAG。", detail: "Planner 将行动目标拆成步骤，标注依赖、验收标准、能力引用和重试策略。" },
-  { id: "executor", type: "执行", title: "Executor", badge: "wired", value: "Web 演示 / CLI 真实", desc: "Web 当前展示 MockExecutor；命令行可通过 RealExecutor 连接 SSH 沙箱。", detail: "真实执行链路为 python main.py run-local-challenge --executor real，前置条件是可 SSH 的统一沙箱环境；Web 后端当前仍为 MockExecutor 演示链路。" },
+  { id: "executor", type: "执行", title: "Executor", badge: "wired", value: "Web 真实沙箱", desc: "Web 默认通过 RealExecutor 连接 SSH 沙箱并运行命令。", detail: "点击派发后，后端先确保 Match 专用 Lima VM 已启动，再为任务创建独立 Docker 容器；工具调用、命令输出和容器生命周期会持续写入任务事件流。" },
   { id: "evaluator", type: "验收", title: "Evaluator + Platform Submit", badge: "wired", value: "本地核验/平台提交", desc: "验证证据、候选成果口令、失败反思。", detail: "Evaluator 负责 step_eval、review、reflect、eval_goals；成果审核入口已接平台适配器的本地核验与提交能力。" },
 ];
 
@@ -83,7 +83,7 @@ const USAGE_ITEMS = [
 ];
 
 const MCP_ITEMS = [
-  { id: "terminal.exec", type: "核心", title: "terminal.exec", badge: "synced", value: "ready", desc: "命令执行通道。", detail: "真实执行时供 Agent 在 SSH 沙箱工作区内运行命令并回收 stdout/stderr；Web 演示链路当前不直接触发真实命令。" },
+  { id: "terminal.exec", type: "核心", title: "terminal.exec", badge: "synced", value: "ready", desc: "命令执行通道。", detail: "真实执行时供 Agent 在 SSH 沙箱工作区内运行命令并回收 stdout/stderr，Web 实时面板同步展示执行事件。" },
   { id: "file.workspace", type: "核心", title: "file.workspace", badge: "synced", value: "ready", desc: "attachments / artifacts / report。", detail: "文件工作区负责任务附件、生成脚本、证据产物和 REPORT.md。" },
   { id: "ctf.platform", type: "平台", title: "platform.bridge", badge: "synced", value: "ingest/submit", desc: "平台任务拉取、开靶、提交成果口令。", detail: "对应平台适配器：sync、ingest、start_target、stop_target、submit 与本地缓存索引。" },
   { id: "sandbox.manager", type: "沙箱", title: "sandbox.manager", badge: "synced", value: "runtime", desc: "SSH 沙箱运行时与工具冲突检测。", detail: "对应 sandbox_env.SandboxManager / ToolManager：检查 SSH 配置、统一镜像、工作目录、工具依赖与冲突。" },
@@ -1297,6 +1297,7 @@ function focusRun(runId) {
   state.eventAfter = 0;
   $("signal-log").textContent = "";
   $("event-timeline").innerHTML = "";
+  $("tool-stream").textContent = "";
   if (state.pollTimer) clearInterval(state.pollTimer);
   pollRun();
   state.pollTimer = setInterval(pollRun, 900);
@@ -1308,6 +1309,13 @@ async function pollRun() {
     const snap = await api("/api/runs/" + encodeURIComponent(state.runId));
     $("run-id").textContent = snap.run_id;
     $("run-status").textContent = snap.status + (snap.alive ? " · live" : "");
+    $("run-mode").textContent = snap.execution_mode === "real"
+      ? `真实 · ${snap.actors || 1} Agent`
+      : "演示 · Mock";
+    $("run-phase").textContent = snap.phase || "-";
+    $("run-runtime").textContent = snap.runtime
+      ? `${snap.runtime.host}:${snap.runtime.port} · ${snap.runtime.image}`
+      : (snap.execution_mode === "real" ? "等待 VM" : "不使用 VM");
     $("run-step").textContent = snap.current_step || "-";
     $("run-tokens").textContent = snap.run_tokens || 0;
     $("run-message").textContent = snap.task && snap.task.title
@@ -1332,9 +1340,15 @@ async function pollRun() {
       const li = document.createElement("li");
       li.textContent = `${e.ts || ""} ${e.agent || ""} ${e.kind}${e.step_id ? " " + e.step_id : ""}${e.verdict ? " → " + e.verdict : ""}`;
       $("event-timeline").appendChild(li);
+      const detail = e.detail && Object.keys(e.detail).length
+        ? `\n${JSON.stringify(e.detail, null, 2)}`
+        : "";
+      const executionLine = `[${e.ts || ""}] ${e.kind}${e.step_id ? ` · ${e.step_id}` : ""}${detail}\n\n`;
+      $("tool-stream").textContent = ($("tool-stream").textContent + executionLine).slice(-200000);
     });
+    $("tool-stream").scrollTop = $("tool-stream").scrollHeight;
 
-    const log = await api(`/api/runs/${encodeURIComponent(state.runId)}/log?tail=180`);
+    const log = await api(`/api/runs/${encodeURIComponent(state.runId)}/log?tail=1000`);
     $("run-log").textContent = log.log || "";
     $("run-log").scrollTop = $("run-log").scrollHeight;
 
@@ -1635,15 +1649,19 @@ async function startTask() {
     $("start-hint").textContent = "请先解析攻防场景";
     return;
   }
-  $("start-hint").textContent = "正在 Engine.run…";
+  const executionMode = $("task-execution-mode").value;
+  const actors = Math.max(1, Math.min(8, Number.parseInt($("task-actors").value, 10) || 1));
+  $("start-hint").textContent = executionMode === "real"
+    ? "正在检查模型配置并启动 Match 专用 VM…"
+    : "正在启动演示执行…";
   $("btn-start").disabled = true;
   try {
     const r = await api("/api/runs", {
       method: "POST",
-      body: JSON.stringify({ task: state.parsedTask }),
+      body: JSON.stringify({ task: state.parsedTask, execution_mode: executionMode, actors }),
     });
     $("start-hint").textContent =
-      `已启动 ${r.run_id} · 场景 ${r.challenge_type_label || r.challenge_type || "-"}`;
+      `已启动 ${r.run_id} · ${r.execution_mode === "real" ? "真实沙箱" : "演示"} · 场景 ${r.challenge_type_label || r.challenge_type || "-"}`;
     if ($("audit-run-id")) $("audit-run-id").value = r.run_id;
     if ($("flag-run-id")) $("flag-run-id").value = r.run_id;
     if ($("flag-challenge-id") && state.parsedTask) {

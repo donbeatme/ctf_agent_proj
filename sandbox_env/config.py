@@ -22,6 +22,7 @@ class SandboxSettings:
     container_model: str = "per_challenge"     # 一题一个持久容器
     image: str = "ctf-sandbox:latest"
     ssh_host: Optional[str] = None
+    ssh_port: int = 22
     ssh_user: str = "root"
     ssh_password: str = ""
     ssh_key: Optional[str] = None          # 客户端私钥路径(密钥登录优先,密码兜底)
@@ -37,6 +38,7 @@ class SandboxSettings:
             container_model=str(_cfg("CTF_SANDBOX_CONTAINER_MODEL") or "per_challenge"),
             image=str(_cfg("CTF_SANDBOX_IMAGE") or "ctf-sandbox:latest"),
             ssh_host=_cfg("CTF_SSH_HOST") or None,
+            ssh_port=int(_cfg("CTF_SSH_PORT") or 22),
             ssh_user=str(_cfg("CTF_SSH_USER") or "root"),
             ssh_password=str(_cfg("CTF_SSH_PASSWORD") or ""),
             ssh_key=str(_cfg("CTF_SSH_KEY") or "") or None,

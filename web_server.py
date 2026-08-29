@@ -1,7 +1,7 @@
-"""CTF Agent 前端 HTTP 服务:只包装现有 Engine / Workspace / Skills / 配置,不另造状态机。
+"""CTF Agent 前端 HTTP 服务:包装现有 Engine / Workspace / Skills / 配置。
 
 对接点:
-- 启动: Engine(Planner + CtfSkillsDocStore, MockExecutor, SmokeEvaluator, tool_catalog)
+- 启动:演示模式用 MockExecutor;真实模式自动启动本地 VM 并接 RealExecutor + SSH 沙箱
 - 信号: Engine(subscribers=[LiveBridge]) → SignalBus
 - 停跑: engine.request_stop()
 - 续跑: Engine.resume(..., subscribers=[...])
@@ -12,8 +12,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import shlex
 import shutil
+import subprocess
 import threading
 import time
 import traceback
@@ -26,6 +29,7 @@ ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 RUNS_DIR = ROOT / "runs"
 UPLOAD_DIR = ROOT / "downloads" / "uploads"
+VM_SCRIPT = ROOT / "scripts" / "match_vm.sh"
 
 _live: dict[str, dict] = {}
 _live_lock = threading.Lock()
@@ -125,7 +129,18 @@ def _platform_fetch(body: dict) -> dict:
         elif Path(text).exists():
             source = json.loads(Path(text).read_text(encoding="utf-8"))
     dest = body.get("dest_dir") or body.get("dest")
+    if dest:
+        resolved_dest = Path(str(dest)).resolve()
+        try:
+            resolved_dest.relative_to(ROOT)
+        except ValueError as exc:
+            raise ValueError("题目下载目录必须位于 Match 项目内") from exc
+        dest = str(resolved_dest)
     challenge_dir = adapter.ingest(source, dest_dir=dest)
+    try:
+        Path(challenge_dir).resolve().relative_to(ROOT)
+    except ValueError as exc:
+        raise RuntimeError("平台题目目录不在 Match 项目内，已拒绝继续处理") from exc
     understood = _understand_payload({"challenge_dir": str(challenge_dir)})
     return {
         "ok": True,
@@ -134,6 +149,80 @@ def _platform_fetch(body: dict) -> dict:
         "understood": understood,
         "status": _platform_status(),
     }
+
+
+def _probe_ssh_runtime(settings) -> dict:
+    """Verify the configured SSH endpoint, Docker daemon, and sandbox image."""
+    from agent.ssh import SshBackend
+
+    async def probe():
+        ssh = SshBackend(
+            host=settings.ssh_host,
+            port=settings.ssh_port,
+            user=settings.ssh_user,
+            password=settings.ssh_password,
+            workdir=settings.ssh_workdir,
+            ssh_key=settings.ssh_key,
+            host_key=settings.ssh_host_key,
+        )
+        try:
+            image = shlex.quote(settings.image)
+            result = await ssh.exec(
+                f"docker info >/dev/null 2>&1 && "
+                f"docker image inspect {image} >/dev/null 2>&1",
+                timeout=30,
+            )
+        finally:
+            await ssh.close()
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", "replace").strip()[:300]
+            raise RuntimeError(
+                f"SSH/Docker 探测失败 rc={result.returncode}"
+                + (f": {detail}" if detail else "")
+            )
+        return {
+            "ready": True,
+            "host": settings.ssh_host,
+            "port": settings.ssh_port,
+            "user": settings.ssh_user,
+            "image": settings.image,
+        }
+
+    return asyncio.run(probe())
+
+
+def _ensure_vm_runtime(run_id: str, settings=None) -> dict:
+    """Start the isolated local Lima VM when applicable, then probe SSH/Docker."""
+    from opslog import emit
+    from sandbox_env.config import SandboxSettings
+
+    settings = settings or SandboxSettings.from_env()
+    if not settings.ssh_configured:
+        raise RuntimeError("真实执行需要先配置 CTF_SSH_HOST")
+
+    local_vm = settings.ssh_host in {"127.0.0.1", "localhost", "::1"}
+    if local_vm:
+        if not VM_SCRIPT.is_file():
+            raise RuntimeError(f"VM 启动脚本不存在: {VM_SCRIPT}")
+        emit("vm", "start_requested", run_id=run_id, script=str(VM_SCRIPT))
+        result = subprocess.run(
+            [str(VM_SCRIPT), "start"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=30 * 60,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()[-500:]
+            raise RuntimeError(f"Lima VM 启动失败 rc={result.returncode}: {detail}")
+        emit("vm", "started", run_id=run_id, host=settings.ssh_host,
+             port=settings.ssh_port)
+
+    runtime = _probe_ssh_runtime(settings)
+    runtime["auto_started"] = local_vm
+    emit("vm", "ready", run_id=run_id, **runtime)
+    return runtime
 
 
 def _sandbox_runtime(probe: bool = False) -> dict:
@@ -145,6 +234,7 @@ def _sandbox_runtime(probe: bool = False) -> dict:
         "configured": settings.ssh_configured,
         "backend": "ssh" if settings.ssh_configured else "local/unconfigured",
         "host": settings.ssh_host,
+        "port": settings.ssh_port,
         "user": settings.ssh_user,
         "image": settings.image,
         "workdir": settings.ssh_workdir,
@@ -155,10 +245,7 @@ def _sandbox_runtime(probe: bool = False) -> dict:
     }
     if probe:
         try:
-            from sandbox_env.manager import SandboxManager
-            manager = SandboxManager(settings)
-            out["ready"] = manager.backend.is_ready()
-            out["session_key"] = manager.session_key()
+            out.update(_probe_ssh_runtime(settings))
         except Exception as exc:
             out["ready"] = False
             out["error"] = f"{type(exc).__name__}: {exc}"
@@ -256,6 +343,10 @@ def _snapshot_from_disk(run_id: str) -> dict | None:
         "docs": list((st.get("docs") or {}).keys()),
         "step_count": len(steps),
         "replans": (live or {}).get("replans"),
+        "execution_mode": (live or {}).get("execution_mode") or meta.get("execution_mode") or "demo",
+        "actors": (live or {}).get("actors") or meta.get("actors") or 1,
+        "phase": (live or {}).get("phase") or ("finished" if status in ("DONE", "FAILED") else "idle"),
+        "runtime": (live or {}).get("runtime"),
     }
 
 
@@ -277,6 +368,9 @@ def _list_runs() -> list[dict]:
                 "created_at": snap["created_at"],
                 "step_count": snap["step_count"],
                 "run_tokens": snap["run_tokens"],
+                "execution_mode": snap["execution_mode"],
+                "actors": snap["actors"],
+                "phase": snap["phase"],
             })
     return items
 
@@ -310,24 +404,143 @@ def _read_log(run_id: str, tail: int = 200) -> str:
     return "\n".join(lines[-tail:])
 
 
-def _make_agents(ws):
+def _validate_real_task(task: dict, settings=None) -> Path:
+    from agent.llm_api import resolve_key
+    from sandbox_env.config import SandboxSettings
+
+    try:
+        resolve_key()
+    except Exception as exc:
+        raise ValueError(
+            "真实执行需要先在模型页面配置 API Key、Base URL 和模型名称"
+        ) from exc
+
+    settings = settings or SandboxSettings.from_env()
+    if not settings.ssh_configured:
+        raise ValueError("真实执行需要先配置 SSH 沙箱")
+
+    workdir = task.get("challenge_dir") or task.get("workdir") or task.get("cwd")
+    if not workdir:
+        raise ValueError("真实执行需要先通过平台拉取题目，得到本地 challenge_dir")
+    path = Path(str(workdir)).resolve()
+    if not path.is_dir():
+        raise ValueError(f"题目目录不存在: {path}")
+    try:
+        path.relative_to(ROOT)
+    except ValueError as exc:
+        raise ValueError("真实执行目录必须位于 Match 项目内，禁止同步外部仓库") from exc
+    return path
+
+
+def _build_real_scheduler(actors: int, settings=None):
+    from agent.env_providers import SandboxProvider, SshProvider
+    from agent.scheduler import ExecutionScheduler
+    from sandbox_env.config import SandboxSettings
+
+    actors = int(actors or 1)
+    if actors < 1 or actors > 8:
+        raise ValueError("并行 Agent 数必须在 1 到 8 之间")
+    settings = settings or SandboxSettings.from_env()
+    ssh = SshProvider(settings=settings, max_connections=actors)
+    return ExecutionScheduler(providers=[SandboxProvider(ssh, settings=settings)])
+
+
+def _close_scheduler(scheduler) -> None:
+    if scheduler is None:
+        return
+    try:
+        asyncio.run(scheduler.close())
+    except Exception:
+        pass
+
+
+def _ops_sink(ws, engine, run_id):
+    """Project this run's VM, SSH, sandbox, and adapter events into its ledger."""
+    def sink(kind: str, detail: dict) -> None:
+        event_run_id = detail.get("run_id")
+        if event_run_id and event_run_id != run_id:
+            return
+        domain = detail.get("domain")
+        if domain == "ws":
+            return
+        rec = dict(detail)
+        rec.setdefault("run_id", run_id)
+        if not (domain == "engine" and kind not in ("engine.run_started", "engine.run_ended")):
+            try:
+                ws.ingest_external(kind, rec)
+            except Exception:
+                pass
+        active_engine = engine() if callable(engine) else engine
+        if domain not in ("engine", "ws") and active_engine is not None:
+            try:
+                fields = "  ".join(
+                    f"{key}={value}" for key, value in rec.items()
+                    if key not in (
+                        "ts", "domain", "event", "run_id", "seq",
+                        "node_id", "round", "_uuid",
+                    )
+                )
+                active_engine._log.engine_action(
+                    f"ops[{kind}] run_id={run_id}  {fields}"
+                )
+            except Exception:
+                pass
+
+    return sink
+
+
+def _make_agents(ws, execution_mode="demo", actors=1, settings=None):
     from agent.challenge_intake import ChallengeUnderstander
     from agent.ctf_skill_tools import CtfSkillToolCatalog
-    from agent.evaluator import SmokeEvaluator
-    from agent.executor import MockExecutor
+    from agent.evaluator import SmokeEvaluator, build_evaluator
+    from agent.executor import MockExecutor, RealExecutor
     from agent.planner import Planner
+    from agent.runner import CommandRunner
     from agent.skills import CtfSkillsDocStore
 
     planner = Planner(workspace=ws, docs=CtfSkillsDocStore())
-    executor = MockExecutor(observation="(mock) 执行完成")
-    evaluator = SmokeEvaluator(ws)
-    understander = ChallengeUnderstander()
-    return planner, executor, evaluator, CtfSkillToolCatalog(), understander
+    catalog = CtfSkillToolCatalog()
+    if execution_mode == "demo":
+        return {
+            "planner": planner,
+            "executor": MockExecutor(observation="(mock) 执行完成"),
+            "evaluator": SmokeEvaluator(ws),
+            "catalog": catalog,
+            "understander": ChallengeUnderstander(),
+            "scheduler": None,
+            "compress": None,
+        }
+    if execution_mode != "real":
+        raise ValueError(f"未知执行模式: {execution_mode}")
+
+    from agent.llm_api import make_compress
+    from task_understanding.real_understander import RealTaskUnderstander
+
+    return {
+        "planner": planner,
+        "executor": RealExecutor(
+            runner=CommandRunner(), workspace=ws, adapter=_platform_adapter()
+        ),
+        "evaluator": build_evaluator(ws),
+        "catalog": catalog,
+        "understander": RealTaskUnderstander(),
+        "scheduler": _build_real_scheduler(actors, settings=settings),
+        "compress": make_compress(),
+    }
 
 
-def _start_thread(run_id: str, fn):
+def _start_thread(run_id: str, fn, workspace=None, metadata=None):
     bridge = LiveBridge()
-    slot = {"alive": True, "engine": None, "bridge": bridge, "error": None, "replans": 0}
+    slot = {
+        "alive": True,
+        "engine": None,
+        "bridge": bridge,
+        "error": None,
+        "replans": 0,
+        "phase": "queued",
+        "runtime": None,
+        **(metadata or {}),
+    }
     with _live_lock:
         _live[run_id] = slot
 
@@ -336,6 +549,19 @@ def _start_thread(run_id: str, fn):
             fn(slot, bridge)
         except Exception as exc:
             slot["error"] = f"{type(exc).__name__}: {exc}"
+            slot["phase"] = "failed"
+            if workspace is not None:
+                try:
+                    from agent.schema import Role
+
+                    workspace.meta["run_status"] = "FAILED"
+                    workspace.meta["fail_reason"] = slot["error"]
+                    workspace.add_event(
+                        Role.SYSTEM, "runtime_failed", error=slot["error"]
+                    )
+                    workspace.sync()
+                except Exception:
+                    pass
             traceback.print_exc()
         finally:
             slot["alive"] = False
@@ -347,46 +573,120 @@ def _start_thread(run_id: str, fn):
     return slot
 
 
-def start_run(task: dict, run_id: str | None = None) -> str:
+def start_run(task: dict, run_id: str | None = None, *, execution_mode="real",
+              actors=1) -> str:
     from agent.engine import Engine
     from agent.workspace import Workspace
+    from opslog import attach, detach
 
+    execution_mode = str(execution_mode or "real").strip().lower()
+    actors = int(actors or 1)
+    if execution_mode == "real":
+        _validate_real_task(task)
+    elif execution_mode != "demo":
+        raise ValueError("execution_mode 必须是 real 或 demo")
     run_id = run_id or f"run-{time.strftime('%Y%m%d-%H%M%S')}"
-    ws = Workspace.create(run_id, task)
+    ws = Workspace.create(
+        run_id,
+        task,
+        meta={"execution_mode": execution_mode, "actors": actors},
+    )
 
     def fn(slot, bridge):
-        planner, executor, evaluator, catalog, understander = _make_agents(ws)
+        stack = _make_agents(ws, execution_mode=execution_mode, actors=actors)
         engine = Engine(
-            planner, executor, evaluator,
-            workspace=ws, tool_catalog=catalog, understander=understander,
+            stack["planner"], stack["executor"], stack["evaluator"],
+            workspace=ws,
+            tool_catalog=stack["catalog"],
+            understander=stack["understander"],
             subscribers=[bridge],
+            scheduler=stack["scheduler"],
+            max_concurrency=actors,
+            compress=stack["compress"],
         )
         slot["engine"] = engine
-        engine.run(task)
-        slot["replans"] = engine.replans
+        sink = _ops_sink(ws, engine, run_id)
+        attach(sink)
+        try:
+            if execution_mode == "real":
+                slot["phase"] = "starting_vm"
+                slot["runtime"] = _ensure_vm_runtime(run_id)
+                slot["phase"] = "running"
+            else:
+                slot["phase"] = "demo"
+            engine.run(task)
+            slot["replans"] = engine.replans
+            slot["phase"] = "finished"
+        finally:
+            _close_scheduler(stack["scheduler"])
+            detach(sink)
 
-    _start_thread(run_id, fn)
+    _start_thread(
+        run_id,
+        fn,
+        workspace=ws,
+        metadata={"execution_mode": execution_mode, "actors": actors},
+    )
     return run_id
 
 
 def resume_run(run_id: str) -> str:
     from agent.engine import Engine
     from agent.workspace import Workspace
+    from opslog import attach, detach
 
     ws = Workspace.load(run_id)
     status = (ws.meta or {}).get("run_status")
     if status in ("DONE", "FAILED"):
         raise RuntimeError(f"终态 {status} 不能续跑")
 
-    def fn(slot, bridge):
-        planner, executor, evaluator, _catalog, _u = _make_agents(ws)
-        engine = Engine.resume(
-            run_id, planner, executor, evaluator, subscribers=[bridge],
-        )
-        slot["engine"] = engine
-        slot["replans"] = getattr(engine, "replans", 0)
+    execution_mode = str((ws.meta or {}).get("execution_mode") or "demo")
+    actors = int((ws.meta or {}).get("actors") or 1)
+    task = (ws.meta or {}).get("task") or {}
+    if execution_mode == "real":
+        _validate_real_task(task)
 
-    _start_thread(run_id, fn)
+    def fn(slot, bridge):
+        stack = _make_agents(ws, execution_mode=execution_mode, actors=actors)
+        engine_ref = {}
+        sink = _ops_sink(ws, lambda: engine_ref.get("engine"), run_id)
+        attach(sink)
+        try:
+            if execution_mode == "real":
+                slot["phase"] = "starting_vm"
+                slot["runtime"] = _ensure_vm_runtime(run_id)
+                slot["phase"] = "running"
+            else:
+                slot["phase"] = "demo"
+
+            def on_ready(engine):
+                engine_ref["engine"] = engine
+                slot["engine"] = engine
+
+            engine = Engine.resume(
+                run_id,
+                stack["planner"],
+                stack["executor"],
+                stack["evaluator"],
+                subscribers=[bridge],
+                scheduler=stack["scheduler"],
+                tool_catalog=stack["catalog"],
+                compress=stack["compress"],
+                max_concurrency=actors,
+                on_ready=on_ready,
+            )
+            slot["replans"] = getattr(engine, "replans", 0)
+            slot["phase"] = "finished"
+        finally:
+            _close_scheduler(stack["scheduler"])
+            detach(sink)
+
+    _start_thread(
+        run_id,
+        fn,
+        workspace=ws,
+        metadata={"execution_mode": execution_mode, "actors": actors},
+    )
     return run_id
 
 
@@ -444,9 +744,9 @@ def _capabilities() -> dict:
                 "id": "executor",
                 "name": "执行 Agent",
                 "contract": "Executor.run(step, ctx, tool_exec=None)→ExecResult",
-                "status": "wired_declare",
+                "status": "wired",
                 "impl": "MockExecutor / RealExecutor + CommandRunner",
-                "note": "真实执行器已在仓库实现;Web 端默认保守使用 Mock,后续可按任务显式切换到沙箱执行",
+                "note": "Web 默认真实执行:自动启动本地 VM，经 SSH 在任务独立 Docker 容器中运行；可显式切换演示模式",
             },
             {
                 "id": "evaluator_plan",
@@ -593,7 +893,7 @@ def _build_report(run_id: str) -> dict | None:
         tool = d.get("tool") if isinstance(d, dict) else ""
         lines.append(f"- {e.get('ts')} `{e.get('kind')}` {tool}")
     if not tools:
-        lines.append("- （无；当前多为 MockExecutor）")
+        lines.append("- （无工具调用记录）")
     lines += ["", "## 交付产物 product", f"```json", json.dumps(product, ensure_ascii=False, indent=2), "```"]
     return {
         "run_id": run_id,
@@ -922,9 +1222,21 @@ class Handler(SimpleHTTPRequestHandler):
                     raw,
                     category_override=body.get("category_override") or body.get("challenge_type"),
                 )["task"]
-            run_id = start_run(task, body.get("run_id"))
+            execution_mode = str(body.get("execution_mode") or "real").strip().lower()
+            try:
+                actors = int(body.get("actors") or 1)
+                run_id = start_run(
+                    task,
+                    body.get("run_id"),
+                    execution_mode=execution_mode,
+                    actors=actors,
+                )
+            except Exception as exc:
+                return self._json({"error": f"{type(exc).__name__}: {exc}"}, 400)
             return self._json({
                 "run_id": run_id,
+                "execution_mode": execution_mode,
+                "actors": actors,
                 "challenge_type": task.get("challenge_type"),
                 "challenge_type_label": task.get("challenge_type_label"),
                 "type_confidence": task.get("type_confidence"),

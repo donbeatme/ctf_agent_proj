@@ -460,7 +460,8 @@ class Engine:
                root=None, max_cycles=None, max_replans=None,
                max_stalls=None, max_deadlock_attempts=None,
                compress=None, context_budget=None, subscribers=None,
-               max_concurrency=1) -> "Engine":
+               max_concurrency=1, scheduler=None, tool_catalog=None,
+               on_ready=None) -> "Engine":
         """从 Workspace.load 恢复引擎并继续 _dispatch 循环。
 
         恢复内容:
@@ -480,7 +481,8 @@ class Engine:
                      max_stalls=max_stalls,
                      max_deadlock_attempts=max_deadlock_attempts,
                      compress=compress, context_budget=context_budget,
-                     subscribers=subscribers, max_concurrency=max_concurrency)
+                     subscribers=subscribers, max_concurrency=max_concurrency,
+                     scheduler=scheduler, tool_catalog=tool_catalog)
         engine.raw_content = ws.meta.get("task", {})
         engine.task_input = TaskInput(
             raw_content=engine.raw_content,
@@ -522,6 +524,8 @@ class Engine:
         engine._tool_registry.set_workspace(ws)
 
         engine._cycle = 0
+        if on_ready is not None:
+            on_ready(engine)
         # 续跑:从当前状态继续(共享 _run_loop;resume 不设 run 作用域上下文)
         engine.signals.emit(Signal.RUN_STARTED,
                             task=engine.raw_content,

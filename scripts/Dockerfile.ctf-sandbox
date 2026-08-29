@@ -19,7 +19,7 @@ RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         sudo git curl wget ca-certificates \
         build-essential python3 python3-dev python3-pip python3-venv \
-        libgmp-dev libffi-dev libssl-dev pkg-config libfplll-dev \
+        libgmp-dev libmpc-dev libffi-dev libssl-dev pkg-config libfplll-dev \
         ruby ruby-dev libseccomp-dev golang \
     && rm -rf /var/lib/apt/lists/*
 
@@ -56,7 +56,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # executor 不必花轮次排查/安装 Java。cmake 供下方 pycdc 构建。
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         cmake openjdk-21-jdk-headless \
-    && sed -i 's|^JAVA_HOME_OVERRIDE=.*|JAVA_HOME_OVERRIDE=/usr/lib/jvm/java-21-openjdk-amd64|' \
+    && JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")" \
+    && sed -i "s|^JAVA_HOME_OVERRIDE=.*|JAVA_HOME_OVERRIDE=${JAVA_HOME}|" \
         /opt/ghidra_12.1.3_PUBLIC/support/launch.properties \
     && rm -rf /var/lib/apt/lists/*
 

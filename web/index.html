@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>攻防 Agent 指令台</title>
-    <link rel="stylesheet" href="/styles.css?v=20260823-core-flow">
+    <link rel="stylesheet" href="/styles.css?v=20260829-real-vm">
   </head>
   <body>
     <section class="auth-gate" id="auth-gate">
@@ -170,9 +170,9 @@
                     <div><span>PAUSED</span><strong>0</strong><small>人工暂停</small></div>
                   </div>
                   <div class="sandbox-list">
-                    <div><strong>ssh-sandbox-001</strong><span class="state-pill neutral">待配置</span><small>统一沙箱镜像 · executor 按任务申请工具</small></div>
+                    <div><strong>ssh-sandbox-001</strong><span class="state-pill pass">已配置</span><small>统一沙箱镜像 · executor 按任务申请工具</small></div>
                     <div><strong>tool-catalog</strong><span class="state-pill neutral">固定目录</span><small>Web / 密码 / 二进制 / 逆向 / 取证工具按需调用</small></div>
-                    <div><strong>cli-real-run</strong><span class="state-pill neutral">命令行</span><small>main.py run-local-challenge --executor real</small></div>
+                    <div><strong>web-real-run</strong><span class="state-pill pass">Web</span><small>自动启动 VM · RealExecutor + SSH 容器</small></div>
                   </div>
                 </div>
               </section>
@@ -359,7 +359,7 @@
                   <div class="agent-node node-executor">
                     <span>X</span>
                     <strong>Executor</strong>
-                    <small>Web 演示为 MockExecutor · 命令行可接真实沙箱</small>
+                    <small>Web 自动启动 VM · SSH 任务沙箱真实执行</small>
                   </div>
                   <div class="agent-node node-evaluator">
                     <span>E</span>
@@ -378,7 +378,7 @@
                 <div class="agent-radar-grid">
                   <div class="radar-card"><span style="--v: 88%"></span><strong>场景类型理解</strong><small>关键词、附件、目标 URL 综合判别</small></div>
                   <div class="radar-card"><span style="--v: 76%"></span><strong>规划能力</strong><small>LLM 规划 + get_doc 战术召回</small></div>
-                  <div class="radar-card warn"><span style="--v: 42%"></span><strong>执行接线</strong><small>Web 当前为 MockExecutor；真实执行走命令行 --executor real</small></div>
+                  <div class="radar-card"><span style="--v: 92%"></span><strong>执行接线</strong><small>Web 已接 RealExecutor、SSH 与任务独立容器</small></div>
                   <div class="radar-card"><span style="--v: 68%"></span><strong>交付链路</strong><small>events、DAG、product、report 汇总</small></div>
                 </div>
               </section>
@@ -537,7 +537,7 @@
                       <input id="platform-dest" type="text" placeholder="默认写入 PLATFORM_STORE_DIR/tasks/..." autocomplete="off">
                     </label>
                     <label>本地任务目录 / metadata.yml
-                      <input id="local-challenge-dir" type="text" placeholder="/Users/.../data/tasks/easy_rsa 或 metadata.yml" autocomplete="off">
+                      <input id="local-challenge-dir" type="text" placeholder="项目内 data/challenges/easy_rsa 或 metadata.yml" autocomplete="off">
                     </label>
                   </div>
                   <div class="row">
@@ -601,24 +601,17 @@
                 </label>
                 <div class="create-task-grid">
                   <label>沙箱执行方式
-                    <select>
-                      <option>Web 演示执行（MockExecutor）</option>
-                      <option>命令行真实执行（需 SSH 沙箱）</option>
-                      <option>统一沙箱镜像 + 固定工具目录</option>
+                    <select id="task-execution-mode">
+                      <option value="real" selected>真实执行（自动启动 VM + SSH 沙箱）</option>
+                      <option value="demo">演示执行（MockExecutor，不运行命令）</option>
                     </select>
                   </label>
-                  <label>模型策略
-                    <select>
-                      <option>默认模型</option>
-                      <option>多模型协同</option>
-                      <option>低成本优先</option>
-                    </select>
+                  <label>并行 Agent 数
+                    <input id="task-actors" type="number" min="1" max="8" value="1" inputmode="numeric">
                   </label>
                   <label>沙箱销毁策略
-                    <select>
-                      <option>完成后保留证据并销毁</option>
-                      <option>手动确认后销毁</option>
-                      <option>保留用于复盘</option>
+                    <select disabled>
+                      <option>事件与日志保留在 Match，任务容器自动销毁</option>
                     </select>
                   </label>
                 </div>
@@ -660,6 +653,9 @@
                 <div class="status-grid">
                   <div><span>run_id</span><strong id="run-id">-</strong></div>
                   <div><span>状态</span><strong id="run-status">-</strong></div>
+                  <div><span>执行模式</span><strong id="run-mode">-</strong></div>
+                  <div><span>运行阶段</span><strong id="run-phase">-</strong></div>
+                  <div><span>VM / SSH</span><strong id="run-runtime">-</strong></div>
                   <div><span>当前步骤</span><strong id="run-step">-</strong></div>
                   <div><span>tokens</span><strong id="run-tokens">0</strong></div>
                 </div>
@@ -686,6 +682,10 @@
                     <h3>run.log</h3>
                     <pre id="run-log" class="doc muted">暂无日志。</pre>
                   </div>
+                  <div class="ops-card ops-card-wide">
+                    <h3>VM、沙箱、工具与命令输出</h3>
+                    <pre id="tool-stream" class="doc muted execution-stream">等待执行事件…</pre>
+                  </div>
                 </div>
               </section>
               <section class="panel workspace-panel challenge-page hidden" data-task-page="workspace">
@@ -698,14 +698,14 @@
                       <li><span>理解任务情报</span><strong>抽取目标、成果口令格式、远程地址与附件线索</strong></li>
                       <li><span>选择战术</span><strong>按场景类型召回 Web 安全、二进制攻防、密码安全、逆向分析、取证分析技能</strong></li>
                       <li><span>生成计划</span><strong>输出 DAG，标注依赖、验收标准与重试次数</strong></li>
-                      <li><span>工具执行</span><strong>Web 展示演示执行；真实执行需命令行连接 SSH 沙箱，产物写入 artifacts</strong></li>
+                      <li><span>工具执行</span><strong>Web 自动启动隔离 VM，经 SSH 在任务容器内执行，命令输出与工具结果写入 Match 事件流</strong></li>
                     </ol>
                   </div>
                   <div class="tool-status-board">
                     <h3>工具状态</h3>
                     <div><strong>terminal</strong><span class="state-pill neutral">idle</span><small>等待命令</small></div>
                     <div><strong>python</strong><span class="state-pill neutral">idle</span><small>脚本执行与数据处理</small></div>
-                    <div><strong>files</strong><span class="state-pill neutral">mounted</span><small>attachments / artifacts / REPORT.md</small></div>
+                    <div><strong>files</strong><span class="state-pill neutral">synced</span><small>题目目录上传至 /work；过程证据写入 events / log</small></div>
                     <div><strong>mcp</strong><span class="state-pill neutral">ready</span><small>可接入外部攻防研判工具</small></div>
                   </div>
                   <div class="workspace-tabs">
@@ -946,6 +946,6 @@
         </div>
       </div>
     </main>
-    <script src="/app.js?v=20260823-core-flow"></script>
+    <script src="/app.js?v=20260829-real-vm"></script>
   </body>
 </html>

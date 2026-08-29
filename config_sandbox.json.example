@@ -1,7 +1,10 @@
 {
   "CTF_SSH_HOST": "",
+  "CTF_SSH_PORT": "22",
   "CTF_SSH_USER": "root",
   "CTF_SSH_PASSWORD": "",
+  "CTF_SSH_KEY": "",
+  "CTF_SSH_HOST_KEY": "",
   "CTF_SSH_WORKDIR": "/root/ctf",
   "CTF_SANDBOX_BACKEND": "ssh",
   "CTF_SANDBOX_IMAGE": "ctf-sandbox:latest",

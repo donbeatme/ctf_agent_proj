@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 from .errors import SandboxError, SandboxUnavailableError
@@ -37,8 +38,15 @@ def cmd_sandbox_probe(args) -> None:
         print(f"sandbox-probe 失败: {e}", file=sys.stderr)
         sys.exit(1)
     ready = m.backend.is_ready()
+
+    async def probe():
+        try:
+            return await m.ensure(m.session_key())
+        finally:
+            await m.close()
+
     try:
-        name = m.ensure(m.session_key())
+        name = asyncio.run(probe())
     except SandboxError as e:
         print(f"sandbox-probe: backend ready={ready} 会话容器就绪失败: {e}", file=sys.stderr)
         sys.exit(1)
@@ -75,7 +83,16 @@ def cmd_sandbox_deps(args) -> None:
     if not tool_ids:
         print("sandbox-deps: 无待处理工具", file=sys.stderr)
         sys.exit(1)
-    report = m.install_tools(tool_ids, session_key=m.session_key(), force=args.force)
+
+    async def install():
+        try:
+            return await m.install_tools(
+                tool_ids, session_key=m.session_key(), force=args.force
+            )
+        finally:
+            await m.close()
+
+    report = asyncio.run(install())
     print(
         f"installed={report['installed']} failed={report['failed']} "
         f"skipped_manual={report['skipped_manual']} incompatible={report['incompatible']}"
