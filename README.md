@@ -82,7 +82,7 @@ GET /api/runs/<run_id>/report
 
 ### 本地数据边界
 
-以下内容仅保存在本机，不进入 Git 分支：`.env`、`model_config.json`、`config_adaptor.json`、`config_sandbox.json`、`.venv/`、`data/`、`downloads/`、`runs/` 以及项目外的 `.lima/` VM 数据。
+本分支不会新增或修改上游已跟踪的 `.env`。本机新建的 `model_config.json`、`config_adaptor.json`、`config_sandbox.json`、`.venv/`、`data/`、`downloads/`、`runs/` 以及项目外的 `.lima/` VM 数据均不会进入提交。
 
 ---
 
