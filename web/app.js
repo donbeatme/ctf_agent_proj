@@ -24,14 +24,24 @@ const state = {
   reviewStatus: "",
   historyStatus: "",
   usageView: "",
+  usageChartView: "stage",
   mcpType: "",
   historyRuns: [],
   reviewItems: [],
   usageItems: [],
   dashboardWindow: "week",
   dashboardTimer: null,
+  dashboardLoading: false,
+  dashboardTelemetry: null,
+  telemetryPromise: null,
   taskPage: "intake",
   taskTabs: [],
+  runSnapshot: null,
+  runEvents: [],
+  runLog: "",
+  mcpItems: [],
+  blackboardItems: [],
+  agentRoleItems: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -61,12 +71,15 @@ const AGENT_ROLE_ITEMS = [
   { id: "evaluator", type: "验收", title: "Evaluator + Platform Submit", badge: "wired", value: "本地核验/平台提交", desc: "验证证据、候选成果口令、失败反思。", detail: "Evaluator 负责 step_eval、review、reflect、eval_goals；成果审核入口已接平台适配器的本地核验与提交能力。" },
 ];
 
-const BLACKBOARD_ITEMS = [
-  { id: "clue", type: "线索", title: "任务情报与附件线索", value: "0", desc: "关键字、服务指纹、文件类型、成果口令格式。", detail: "适合沉淀端口、版本、附件 hash、任务暗示、异常报错、源码路径等可复用线索。" },
-  { id: "failure", type: "失败路径", title: "失败尝试归档", value: "0", desc: "避免重复爆破和错误方向。", detail: "记录失败命令、失败原因、环境限制、误判场景类型和被证伪的假设。" },
-  { id: "tactic", type: "可复用打法", title: "战术沉淀", value: "0", desc: "可写回经验库/RAG。", detail: "沉淀成可搜索的打法卡，包括适用条件、工具链、关键命令和验收标准。" },
-  { id: "hint", type: "人工提示", title: "人工接管提示", value: "0", desc: "暂停时追加给 Agent。", detail: "队员可以把现场经验、比赛提示、外部观察写入黑板，供 Planner 重规划时引用。" },
-];
+const BLACKBOARD_FALLBACK = [{
+  id: "experience-unavailable",
+  type: "后端状态",
+  title: "经验沉淀未接入",
+  badge: "reserved",
+  value: "reserved",
+  desc: "当前后端返回预留契约，没有可展示的经验条目。",
+  detail: "数据来源: GET /api/experience。只有接口返回 items 后，本页才会展示真实线索、失败路径和可复用打法。",
+}];
 
 const REVIEW_ITEMS = [
   { id: "pending", type: "待审核", title: "暂无待审核成果", badge: "reserved", value: "0", desc: "候选出现后显示来源步骤、证据片段和置信度。", detail: "审核卡片应包含成果候选、run_id、step_id、工具命令、证据摘要、模型解释和 approve/reject/replan 动作。" },
@@ -82,17 +95,15 @@ const USAGE_ITEMS = [
   { id: "challenge", type: "场景", title: "场景成本", value: "0", desc: "Web 安全、二进制攻防、密码安全等场景成本对比。", detail: "场景维度适合赞助展示：展示不同攻防场景的自动化覆盖、平均 token 和研判时长。" },
 ];
 
-const MCP_ITEMS = [
-  { id: "terminal.exec", type: "核心", title: "terminal.exec", badge: "synced", value: "ready", desc: "命令执行通道。", detail: "真实执行时供 Agent 在 SSH 沙箱工作区内运行命令并回收 stdout/stderr，Web 实时面板同步展示执行事件。" },
-  { id: "file.workspace", type: "核心", title: "file.workspace", badge: "synced", value: "ready", desc: "attachments / artifacts / report。", detail: "文件工作区负责任务附件、生成脚本、证据产物和 REPORT.md。" },
-  { id: "ctf.platform", type: "平台", title: "platform.bridge", badge: "synced", value: "ingest/submit", desc: "平台任务拉取、开靶、提交成果口令。", detail: "对应平台适配器：sync、ingest、start_target、stop_target、submit 与本地缓存索引。" },
-  { id: "sandbox.manager", type: "沙箱", title: "sandbox.manager", badge: "synced", value: "runtime", desc: "SSH 沙箱运行时与工具冲突检测。", detail: "对应 sandbox_env.SandboxManager / ToolManager：检查 SSH 配置、统一镜像、工作目录、工具依赖与冲突。" },
-  { id: "understander.real", type: "理解", title: "understander.real", badge: "synced", value: "task_dir", desc: "真实任务目录理解。", detail: "对应真实任务理解器：读取 metadata.yml、distfiles、target、access、artifacts，生成结构化任务输入。" },
-  { id: "browser.web", type: "Web", title: "browser.web", badge: "neutral", value: "optional", desc: "Web 场景交互与截图。", detail: "用于登录、点击、截图、表单测试、XSS/SSRF 交互确认等 Web 攻防场景。" },
-  { id: "crypto.sage", type: "密码安全", title: "crypto.sage", badge: "neutral", value: "toolset", desc: "密码安全工具目录能力。", detail: "对应 SageMath、Z3、LLL、PyCryptodome 等数论和约束求解能力，由 executor 按任务申请工具。" },
-  { id: "pwn.gdb", type: "二进制攻防", title: "binary.debug", badge: "neutral", value: "toolset", desc: "二进制调试工具链。", detail: "对应 GDB、pwndbg、pwntools、ROPgadget、QEMU 和 seccomp-tools，由 executor 按任务申请工具。" },
-  { id: "reverse.ghidra", type: "逆向分析", title: "reverse.ghidra", badge: "reserved", value: "planned", desc: "反编译/静态分析。", detail: "后续接入 Ghidra headless、radare2、Frida、angr、apktool 等逆向工具。" },
-];
+const MCP_FALLBACK = [{
+  id: "mcp-registry-unavailable",
+  type: "后端状态",
+  title: "MCP 注册表未接入",
+  badge: "reserved",
+  value: "not exposed",
+  desc: "现有后端只提供内部能力声明与工具目录，没有 MCP Server 注册表接口。",
+  detail: "数据来源: GET /api/capabilities。这里不会把内部 Python 组件伪装成已同步的 MCP Server。",
+}];
 
 const SAMPLE_TASKS = {
   web: {
@@ -151,13 +162,12 @@ function setStep(id) {
   if (id === "run") loadPlatformStatus();
   if (id === "skills") loadSkills();
   if (id === "agents") {
-    renderAgentRoles();
     loadCapabilities();
   }
-  if (id === "experience") renderBlackboard();
+  if (id === "experience") loadBlackboardStatus();
   if (id === "history") loadHistory();
   if (id === "usage") loadUsageSummary();
-  if (id === "mcp") renderMcpCards();
+  if (id === "mcp") loadMcpStatus();
   if (id === "run") refreshActive();
   if (id === "audit") loadReviewQueue();
   if (id === "audit" && state.runId && $("audit-run-id") && !$("audit-run-id").value) {
@@ -297,36 +307,148 @@ function skillChain(category, kind) {
   return `${kind || "Skill"} -> Tool -> Evidence`;
 }
 
-function seededSeries(n, base, spread, phase = 0) {
-  return Array.from({ length: n }, (_, i) => {
-    const wave = Math.sin((i + phase) * 0.86) * spread;
-    const pulse = ((i * 17 + phase * 11) % 9) - 4;
-    return Math.max(0, Math.round(base + wave + pulse));
-  });
+const DASHBOARD_COLORS = ["#25f2b4", "#ffbe55", "#9b8cff", "#37d6ff", "#ff5c7a", "#7da1a8", "#6d5bd0"];
+
+function timestamp(value) {
+  const n = Date.parse(value || "");
+  return Number.isFinite(n) ? n : 0;
 }
 
-function dashboardMockData(windowKey) {
-  const size = windowKey === "day" ? 12 : windowKey === "month" ? 30 : 7;
-  const tick = Math.floor(Date.now() / 4500) % 17;
-  const labels = Array.from({ length: size }, (_, i) => windowKey === "day" ? `${i * 2}:00` : `D${i + 1}`);
-  const solved = seededSeries(size, windowKey === "month" ? 6 : 4, 3, size + tick);
-  const attempts = solved.map((v, i) => v + 2 + ((i * 3) % 5));
-  const tokens = seededSeries(size, windowKey === "month" ? 38 : 24, 12, 3 + tick).map((v) => v * 1000);
-  const sandboxes = seededSeries(size, windowKey === "day" ? 3 : 5, 2, 8 + tick);
+function dashboardBuckets(windowKey) {
+  const count = windowKey === "day" ? 12 : windowKey === "month" ? 30 : 7;
+  const stepMs = windowKey === "day" ? 2 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+  const end = Date.now();
+  const start = end - count * stepMs;
+  const labels = Array.from({ length: count }, (_, i) => {
+    const d = new Date(start + (i + 1) * stepMs);
+    return windowKey === "day"
+      ? d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })
+      : `${d.getMonth() + 1}/${d.getDate()}`;
+  });
+  return { count, stepMs, start, end, labels };
+}
+
+async function fetchAllRunEvents(runId, maxEvents = 6000) {
+  const events = [];
+  let after = 0;
+  while (events.length < maxEvents) {
+    const payload = await api(`/api/runs/${encodeURIComponent(runId)}/events?after=${after}`);
+    const batch = payload.events || [];
+    if (!batch.length) break;
+    events.push(...batch);
+    const next = Number((batch[batch.length - 1] || {})._i || after);
+    if (next <= after) break;
+    after = next;
+    if (batch.length < 300) break;
+  }
+  return events.slice(0, maxEvents);
+}
+
+async function fetchTelemetry(limit = 60) {
+  if (state.telemetryPromise) return state.telemetryPromise;
+  state.telemetryPromise = (async () => {
+    const data = await api("/api/runs");
+    const runs = (data.runs || []).slice(0, limit);
+    const eventRows = await Promise.all(runs.map(async (run) => {
+      const events = await fetchAllRunEvents(run.run_id).catch(() => []);
+      return [run.run_id, events];
+    }));
+    const runtime = await api("/api/sandbox/runtime").catch((e) => ({ ready: false, error: e.message }));
+    return { runs, eventMap: new Map(eventRows), runtime };
+  })();
+  try {
+    return await state.telemetryPromise;
+  } finally {
+    state.telemetryPromise = null;
+  }
+}
+
+function roleTokenTotals(events) {
+  const totals = { planner: 0, executor: 0, evaluator: 0, other: 0 };
+  events.filter((e) => e.kind === "llm_usage").forEach((e) => {
+    const detail = e.detail || {};
+    const role = String(detail.role || e.agent || "other").toLowerCase();
+    const key = role === "planner" ? "planner"
+      : role === "executor" ? "executor"
+        : role.includes("evaluator") ? "evaluator" : "other";
+    totals[key] += Number(detail.total_tokens || 0);
+  });
+  return totals;
+}
+
+function buildDashboardData(telemetry, windowKey) {
+  const buckets = dashboardBuckets(windowKey);
+  const attempts = Array(buckets.count).fill(0);
+  const solved = Array(buckets.count).fill(0);
+  const tokens = Array(buckets.count).fill(0);
+  const sandboxes = Array(buckets.count).fill(0);
+  const submissions = Array(buckets.count).fill(0);
+  const correctSubmissions = Array(buckets.count).fill(0);
+  const categoryCounts = new Map();
+  let funnelCandidate = 0;
+  let funnelEvidence = 0;
+  let funnelApproved = 0;
+  let funnelReplan = 0;
+  const windowEvents = [];
+  const windowRuns = telemetry.runs.filter((run) => {
+    const at = timestamp(run.created_at);
+    return at >= buckets.start && at <= buckets.end;
+  });
+
+  windowRuns.forEach((run) => {
+    const at = timestamp(run.created_at) || buckets.end - 1;
+    const index = Math.max(0, Math.min(buckets.count - 1, Math.floor((at - buckets.start) / buckets.stepMs)));
+    const events = telemetry.eventMap.get(run.run_id) || [];
+    const submitEvents = events.filter((e) => e.kind === "submission");
+    const correct = submitEvents.filter((e) => (e.detail || {}).correct === true);
+    attempts[index] += 1;
+    if (correct.length) solved[index] += 1;
+    tokens[index] += Number(run.run_tokens || 0);
+    sandboxes[index] += events.filter((e) => e.kind === "sandbox.container_created").length;
+    submissions[index] += submitEvents.length;
+    correctSubmissions[index] += correct.length;
+    const category = runCategory(run);
+    categoryCounts.set(category, (categoryCounts.get(category) || 0) + 1);
+    funnelCandidate += submitEvents.length;
+    funnelApproved += correct.length;
+    funnelReplan += events.filter((e) => e.kind === "replan").length;
+    if (submitEvents.length && events.some((e) => e.kind === "tool_result") && events.some((e) => e.kind === "step_record")) {
+      funnelEvidence += submitEvents.length;
+    }
+    windowEvents.push(...events);
+  });
+
+  const categories = Array.from(categoryCounts.entries()).map(([label, value], i) => [label, value, DASHBOARD_COLORS[i % DASHBOARD_COLORS.length]]);
+  if (!categories.length) categories.push(["暂无任务", 0, DASHBOARD_COLORS[0]]);
+  const running = telemetry.runs.filter((r) => r.alive).length;
+  const queued = telemetry.runs.filter((r) => r.phase === "queued" || r.status === "QUEUED").length;
+  const doneCount = windowRuns.filter((r) => r.status === "DONE").length;
+  const otherCount = telemetry.runs.filter((r) => !r.alive && r.status !== "DONE" && r.phase !== "queued").length;
+  const review = windowRuns.filter((run) => run.status === "DONE" && !(telemetry.eventMap.get(run.run_id) || []).some((e) => e.kind === "submission" && (e.detail || {}).correct === true)).length;
+  const submitTotal = sum(submissions);
+  const approvedTotal = sum(correctSubmissions);
   return {
-    labels,
+    labels: buckets.labels,
     solved,
     attempts,
-    accuracy: attempts.map((v, i) => Math.round((solved[i] / Math.max(1, v)) * 100)),
+    accuracy: submissions.map((n, i) => n ? Math.round((correctSubmissions[i] / n) * 100) : 0),
     tokens,
     sandboxes,
-    categories: [
-      ["Web", 34, "#25f2b4"],
-      ["二进制", 18, "#ffbe55"],
-      ["密码", 22, "#9b8cff"],
-      ["逆向", 14, "#37d6ff"],
-      ["取证", 12, "#ff5c7a"],
-    ],
+    categories,
+    windowRuns,
+    windowEvents,
+    running,
+    queued,
+    doneCount,
+    otherCount,
+    review,
+    funnelCandidate,
+    funnelEvidence,
+    funnelApproved,
+    funnelReplan,
+    submitTotal,
+    approvedTotal,
+    roleTokens: roleTokenTotals(windowEvents),
   };
 }
 
@@ -399,6 +521,20 @@ function drawDonutChart(id, items) {
   const cy = h * 0.52;
   const r = Math.min(w, h) * 0.3;
   const total = items.reduce((s, it) => s + it[1], 0);
+  if (!total) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.lineWidth = 28;
+    ctx.strokeStyle = "rgba(220, 235, 232, 0.3)";
+    ctx.stroke();
+    ctx.fillStyle = "rgba(237, 246, 244, 0.72)";
+    ctx.font = "12px system-ui, sans-serif";
+    ctx.fillText("暂无任务", w * 0.68, 48);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 24px system-ui, sans-serif";
+    ctx.fillText("0", cx - 8, cy + 8);
+    return;
+  }
   let start = -Math.PI / 2;
   items.forEach(([label, value, color], i) => {
     const angle = (value / total) * Math.PI * 2;
@@ -410,11 +546,11 @@ function drawDonutChart(id, items) {
     start += angle;
     ctx.fillStyle = "rgba(237, 246, 244, 0.86)";
     ctx.font = "12px system-ui, sans-serif";
-    ctx.fillText(`${label} ${value}%`, w * 0.72, 44 + i * 24);
+    ctx.fillText(`${label} ${Math.round((value / total) * 100)}%`, w * 0.68, 44 + i * 24);
   });
   ctx.fillStyle = "#ffffff";
   ctx.font = "700 24px system-ui, sans-serif";
-  ctx.fillText(`${total}%`, cx - 28, cy + 8);
+  ctx.fillText(String(total), cx - 14, cy + 8);
 }
 
 function drawBarChart(id, labels, bars, line) {
@@ -483,73 +619,238 @@ function dashboardTipFor(target) {
   const peakSandbox = maxPair(snap.labels, snap.sandboxes);
   const topCategory = snap.categories.reduce((a, b) => (b[1] > a[1] ? b : a), snap.categories[0]);
   const lowCategory = snap.categories.reduce((a, b) => (b[1] < a[1] ? b : a), snap.categories[0]);
+  const categoryTotal = snap.categories.reduce((total, item) => total + Number(item[1] || 0), 0);
   const tips = {
-    running: `运行槽 ${snap.running}/5，${snap.running >= 4 ? "容量接近上限" : "仍有调度余量"}。若队列继续增长，优先处理长时间运行任务或待审核成果。`,
-    queued: `当前排队 ${snap.queued} 个，${snap.queued >= 5 ? "调度压力偏高" : "队列压力可控"}。建议关注 SSH 沙箱、模型配额和人工审核是否阻塞。`,
-    done: `${label} 已完成 ${snap.solvedTotal} 次攻防研判，峰值出现在 ${peakSolved.label}（${peakSolved.value} 次）。这些任务会进入复盘和证据归档。`,
-    review: `待审成果 ${snap.review} 个，候选到审核通过转化率 ${pct(snap.funnelApproved, snap.funnelCandidate)}。优先补齐命令输出、截图或日志片段。`,
-    accuracy: `${label} 正确率 ${snap.accuracyRate}，完成 ${snap.solvedTotal} / 尝试 ${snap.attemptsTotal}。低于 70% 时建议先复核候选成果证据链。`,
-    throughput: `${label} 累计尝试 ${snap.attemptsTotal} 次、完成 ${snap.solvedTotal} 次，通过率 ${snap.accuracyRate}；尝试峰值 ${peakAttempt.label} 为 ${peakAttempt.value} 次。`,
-    category: `${label} 场景占比最高为 ${topCategory[0]} ${topCategory[1]}%，最低为 ${lowCategory[0]} ${lowCategory[1]}%。可据此安排薄弱场景补测。`,
+    running: `当前有 ${snap.running} 个 alive 任务，数据直接来自 GET /api/runs。`,
+    queued: `当前有 ${snap.queued} 个 phase=queued 或 status=QUEUED 的任务。`,
+    done: `${label} 状态为 DONE 的任务共 ${snap.doneCount} 个；其中 ${snap.solvedTotal} 个有 correct=true 平台提交。`,
+    review: `待审任务 ${snap.review} 个：任务已 DONE，但事件账本里还没有 correct=true 提交。`,
+    accuracy: `${label} 平台提交通过率 ${snap.accuracyRate}，通过 ${snap.approvedTotal} / 提交 ${snap.submitTotal}。`,
+    throughput: `${label} 共创建 ${snap.attemptsTotal} 个任务、平台确认成功 ${snap.solvedTotal} 个；任务峰值 ${peakAttempt.label} 为 ${peakAttempt.value} 个。`,
+    category: `${label} 场景占比最高为 ${topCategory[0]} ${pct(topCategory[1], categoryTotal)}，最低为 ${lowCategory[0]} ${pct(lowCategory[1], categoryTotal)}。可据此安排薄弱场景补测。`,
     "accuracy-chart": `提交峰值 ${peakAttempt.label} 为 ${peakAttempt.value} 次，平均正确率 ${avg(snap.accuracy)}%。提交量升高但正确率下降时，应收紧成果审核。`,
-    usage: `${label} 模型用量约 ${Math.round(snap.tokenTotal / 1000)}k tokens，平均沙箱占用 ${avg(snap.sandboxes)} 个，峰值 ${peakSandbox.label} 为 ${peakSandbox.value} 个。`,
-    funnel: `候选 ${snap.funnelCandidate} -> 证据完整 ${snap.funnelEvidence} -> 审核通过 ${snap.funnelApproved}，完整率 ${pct(snap.funnelEvidence, snap.funnelCandidate)}。`,
-    "funnel-candidate": `候选成果 ${snap.funnelCandidate} 个，来自 Agent 输出、工具结果和目标响应。数量过高时要过滤重复候选。`,
+    usage: `${label} 模型用量 ${snap.tokenTotal} tokens，创建沙箱容器 ${sum(snap.sandboxes)} 次；峰值 ${peakSandbox.label} 为 ${peakSandbox.value} 次。`,
+    funnel: `提交 ${snap.funnelCandidate} -> 证据完整 ${snap.funnelEvidence} -> 平台通过 ${snap.funnelApproved}，全部来自 events.jsonl。`,
+    "funnel-candidate": `submission 事件共 ${snap.funnelCandidate} 条。`,
     "funnel-evidence": `证据完整 ${snap.funnelEvidence} 个，候选到证据完整率 ${pct(snap.funnelEvidence, snap.funnelCandidate)}。建议补齐步骤、命令和关键输出。`,
-    "funnel-approved": `审核通过 ${snap.funnelApproved} 个，证据到通过率 ${pct(snap.funnelApproved, snap.funnelEvidence)}。通过后进入提交和复盘归档。`,
-    "funnel-replan": `触发重规划 ${snap.funnelReplan} 次，约占未完成尝试 ${pct(snap.funnelReplan, Math.max(1, snap.attemptsTotal - snap.solvedTotal))}。重点检查分类误判和工具链失败。`,
+    "funnel-approved": `correct=true 的 submission 事件共 ${snap.funnelApproved} 条。`,
+    "funnel-replan": `replan 事件共 ${snap.funnelReplan} 条。`,
   };
   return tips[key] || target.dataset.tip || "";
 }
 
-function renderDashboard() {
-  const data = dashboardMockData(state.dashboardWindow);
+function setUsageBars(roleTokens, prefix) {
+  const values = [roleTokens.planner, roleTokens.executor, roleTokens.evaluator, roleTokens.other];
+  const max = Math.max(...values, 1);
+  const keys = prefix === "quick" ? ["planner", "executor", "evaluator"] : ["planner", "executor", "evaluator", "other"];
+  keys.forEach((key) => {
+    const value = Number(roleTokens[key] || 0);
+    const strong = $(`${prefix}-${key}-tokens`);
+    const bar = $(`${prefix}-${key}-bar`);
+    if (strong) strong.textContent = value.toLocaleString("zh-CN");
+    if (bar) bar.style.setProperty("--w", `${Math.round((value / max) * 100)}%`);
+  });
+}
+
+function formatCompactTokens(value) {
+  const n = Number(value || 0);
+  if (n >= 1000000) return `${(n / 1000000).toFixed(n >= 10000000 ? 0 : 1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
+  return String(n);
+}
+
+function usageDailySeries(runs, days = 7) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const start = new Date(today);
+  start.setDate(today.getDate() - (days - 1));
+  const rows = Array.from({ length: days }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    return {
+      key: `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`,
+      label: `${date.getMonth() + 1}/${date.getDate()}`,
+      value: 0,
+      runs: 0,
+    };
+  });
+  const byDay = new Map(rows.map((row) => [row.key, row]));
+  (runs || []).forEach((run) => {
+    const at = timestamp(run.created_at);
+    if (!at) return;
+    const date = new Date(at);
+    const key = `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+    const row = byDay.get(key);
+    if (!row) return;
+    row.value += Number(run.run_tokens || 0);
+    row.runs += 1;
+  });
+  return rows;
+}
+
+function renderUsageDaily(runs) {
+  const rows = usageDailySeries(runs);
+  const max = Math.max(...rows.map((row) => row.value), 1);
+  const total = rows.reduce((sum, row) => sum + row.value, 0);
+  $("usage-daily-total").textContent = total.toLocaleString("zh-CN");
+  $("usage-daily-chart").innerHTML = rows.map((row) => {
+    const height = row.value ? Math.max(8, Math.round((row.value / max) * 100)) : 0;
+    const title = `${row.label}: ${row.value.toLocaleString("zh-CN")} tokens / ${row.runs} 个任务`;
+    return `<div class="usage-daily-column" title="${escapeHtml(title)}">
+      <strong>${escapeHtml(formatCompactTokens(row.value))}</strong>
+      <div class="usage-daily-track"><i style="--h: ${height}%"></i></div>
+      <span>${escapeHtml(row.label)}</span>
+    </div>`;
+  }).join("");
+}
+
+function renderUsageCategories(byCategory) {
+  const rows = Array.from(byCategory.entries())
+    .map(([label, item], index) => ({
+      label: categoryLabel(label),
+      value: Number(item.tokens || 0),
+      runs: Number(item.count || 0),
+      color: DASHBOARD_COLORS[index % DASHBOARD_COLORS.length],
+    }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 7);
+  const total = rows.reduce((sum, row) => sum + row.value, 0);
+  $("usage-category-total").textContent = formatCompactTokens(total);
+  let cursor = 0;
+  const stops = rows.filter((row) => row.value > 0).map((row) => {
+    const start = cursor;
+    cursor += (row.value / Math.max(1, total)) * 100;
+    return `${row.color} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`;
+  });
+  $("usage-category-donut").style.background = stops.length
+    ? `conic-gradient(${stops.join(", ")})`
+    : "#e8eeee";
+  $("usage-category-legend").innerHTML = rows.length ? rows.map((row) => `
+    <div>
+      <span><i style="--c: ${row.color}"></i>${escapeHtml(row.label)}</span>
+      <strong>${row.value.toLocaleString("zh-CN")} <small>${row.runs} tasks</small></strong>
+    </div>`).join("") : "<p class='meta'>暂无任务类型用量数据</p>";
+}
+
+function setUsageChartView(view) {
+  const next = ["stage", "daily", "category"].includes(view) ? view : "stage";
+  state.usageChartView = next;
+  const copy = {
+    stage: ["阶段分布", "按 Agent 阶段汇总 events.jsonl 中的真实模型 Tokens。"],
+    daily: ["每日分布", "按任务创建日期汇总最近 7 日的真实模型 Tokens。"],
+    category: ["任务类型分布", "按题目场景类型对真实模型 Tokens 进行占比统计。"],
+  };
+  $("usage-chart-title").textContent = copy[next][0];
+  $("usage-chart-desc").textContent = copy[next][1];
+  document.querySelectorAll(".usage-chart-tab").forEach((button) => {
+    const active = button.dataset.usageChart === next;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  ["stage", "daily", "category"].forEach((name) => {
+    $(`usage-${name}-view`).classList.toggle("hidden", name !== next);
+  });
+}
+
+function formatRunDuration(milliseconds) {
+  let seconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000));
+  const days = Math.floor(seconds / 86400);
+  seconds %= 86400;
+  const hours = Math.floor(seconds / 3600);
+  seconds %= 3600;
+  const minutes = Math.floor(seconds / 60);
+  seconds %= 60;
+  if (days) return `${days}天 ${String(hours).padStart(2, "0")}时 ${String(minutes).padStart(2, "0")}分`;
+  if (hours) return `${hours}时 ${String(minutes).padStart(2, "0")}分 ${String(seconds).padStart(2, "0")}秒`;
+  return `${minutes}分 ${String(seconds).padStart(2, "0")}秒`;
+}
+
+function updateRunDuration(snap, events = []) {
+  const target = $("run-duration");
+  if (!target || !snap) return;
+  const eventTimes = events.map((event) => timestamp(event.ts)).filter(Boolean);
+  const start = timestamp(snap.created_at) || (eventTimes.length ? Math.min(...eventTimes) : 0);
+  if (!start) {
+    target.textContent = "-";
+    return;
+  }
+  const terminal = !snap.alive && ["DONE", "FAILED"].includes(String(snap.status || ""));
+  const end = terminal && eventTimes.length ? Math.max(...eventTimes) : Date.now();
+  target.textContent = formatRunDuration(Math.max(0, end - start));
+}
+
+function renderRuntimeOverview(data, runtime) {
+  $("overview-active").textContent = String(data.running);
+  $("overview-running").textContent = String(data.running);
+  $("overview-queued").textContent = String(data.queued);
+  $("overview-done").textContent = String(data.doneCount);
+  $("overview-other").textContent = String(data.otherCount);
+  const total = Math.max(1, data.running + data.queued + data.doneCount + data.otherCount);
+  $("overview-progress").style.setProperty("--p", `${Math.round((data.running / total) * 100)}%`);
+  const ready = runtime && runtime.ready === true;
+  const host = runtime && runtime.host ? `${runtime.host}:${runtime.port || 22}` : "未配置 SSH";
+  const image = runtime && runtime.image ? runtime.image : "未提供镜像";
+  const error = runtime && runtime.error ? runtime.error : "";
+  $("overview-runtime").innerHTML = [
+    `<div><strong>${escapeHtml(host)}</strong><span class="state-pill ${ready ? "pass" : "neutral"}">${ready ? "ready" : "not ready"}</span><small>${escapeHtml(error || "SSH / Docker 运行时探测结果")}</small></div>`,
+    `<div><strong>${escapeHtml(image)}</strong><span class="state-pill neutral">image</span><small>${escapeHtml((runtime && runtime.container_model) || "任务独立容器")}</small></div>`,
+    `<div><strong>${data.running} 个活动容器任务</strong><span class="state-pill neutral">runs</span><small>容器创建事件 ${sum(data.sandboxes)} 条</small></div>`,
+  ].join("");
+}
+
+function renderDashboard(data, runtime = {}) {
   const windowLabel = dashboardWindowLabel();
   $("chart-throughput-label").textContent = windowLabel;
   const solvedTotal = sum(data.solved);
   const attemptsTotal = sum(data.attempts);
-  const running = Math.min(5, 2 + (solvedTotal % 4));
-  const queued = 2 + (attemptsTotal % 5);
-  const review = 1 + (attemptsTotal % 4);
-  const accuracyRate = pct(solvedTotal, attemptsTotal);
-  const funnelCandidate = Math.round(attemptsTotal * 0.45);
-  const funnelEvidence = Math.round(solvedTotal * 0.62);
-  const funnelApproved = Math.round(solvedTotal * 0.52);
-  const funnelReplan = Math.max(1, Math.round((attemptsTotal - solvedTotal) * 0.22));
-  $("dash-running").textContent = `${running} / 5`;
-  $("dash-queued").textContent = String(queued);
-  $("dash-done").textContent = String(solvedTotal);
-  $("dash-review").textContent = String(review);
+  const accuracyRate = data.submitTotal ? pct(data.approvedTotal, data.submitTotal) : "-";
+  $("dash-running").textContent = String(data.running);
+  $("dash-queued").textContent = String(data.queued);
+  $("dash-done").textContent = String(data.doneCount);
+  $("dash-review").textContent = String(data.review);
   $("dash-accuracy").textContent = accuracyRate;
-  $("funnel-candidate").textContent = String(funnelCandidate);
-  $("funnel-evidence").textContent = String(funnelEvidence);
-  $("funnel-approved").textContent = String(funnelApproved);
-  $("funnel-replan").textContent = String(funnelReplan);
+  const funnelValues = [data.funnelCandidate, data.funnelEvidence, data.funnelApproved, data.funnelReplan];
+  const funnelMax = Math.max(...funnelValues, 1);
+  ["candidate", "evidence", "approved", "replan"].forEach((key, i) => {
+    const el = $(`funnel-${key}`);
+    el.textContent = String(funnelValues[i]);
+    el.parentElement.style.setProperty("--w", `${Math.round((funnelValues[i] / funnelMax) * 100)}%`);
+  });
   state.dashboardSnapshot = {
     ...data,
     windowLabel,
     solvedTotal,
     attemptsTotal,
     tokenTotal: sum(data.tokens),
-    running,
-    queued,
-    review,
     accuracyRate,
-    funnelCandidate,
-    funnelEvidence,
-    funnelApproved,
-    funnelReplan,
   };
   drawLineChart("chart-throughput", data.labels, data.solved, data.attempts);
   drawDonutChart("chart-category", data.categories);
   drawBarChart("chart-accuracy", data.labels, data.attempts, data.accuracy);
   drawUsageArea("chart-usage", data.labels, data.tokens, data.sandboxes);
+  renderRuntimeOverview(state.dashboardSnapshot, runtime);
+  setUsageBars(data.roleTokens, "quick");
+}
+
+async function loadDashboard(reuse = false) {
+  if (state.dashboardLoading) return;
+  state.dashboardLoading = true;
+  try {
+    const telemetry = reuse && state.dashboardTelemetry ? state.dashboardTelemetry : await fetchTelemetry();
+    state.dashboardTelemetry = telemetry;
+    renderDashboard(buildDashboardData(telemetry, state.dashboardWindow), telemetry.runtime);
+  } catch (e) {
+    ["dash-running", "dash-queued", "dash-done", "dash-review", "dash-accuracy"].forEach((id) => { $(id).textContent = "!"; });
+    $("overview-runtime").innerHTML = `<div><strong>运行数据读取失败</strong><span class="state-pill neutral">error</span><small>${escapeHtml(e.message)}</small></div>`;
+  } finally {
+    state.dashboardLoading = false;
+  }
 }
 
 function startDashboard() {
-  renderDashboard();
+  loadDashboard();
   if (state.dashboardTimer) clearInterval(state.dashboardTimer);
-  state.dashboardTimer = setInterval(renderDashboard, 4500);
+  state.dashboardTimer = setInterval(loadDashboard, 5000);
 }
 
 function bindDashboardTooltip() {
@@ -633,11 +934,11 @@ function renderModuleCards({ items, filter = "", filterKey = "type", tabsId, act
 }
 
 function moduleItemsByList(listId) {
-  if (listId === "agent-role-cards") return AGENT_ROLE_ITEMS;
-  if (listId === "blackboard-cards") return BLACKBOARD_ITEMS;
+  if (listId === "agent-role-cards") return state.agentRoleItems.length ? state.agentRoleItems : AGENT_ROLE_ITEMS;
+  if (listId === "blackboard-cards") return state.blackboardItems.length ? state.blackboardItems : BLACKBOARD_FALLBACK;
   if (listId === "review-cards") return state.reviewItems.length ? state.reviewItems : REVIEW_ITEMS;
   if (listId === "usage-cards") return state.usageItems.length ? state.usageItems : USAGE_ITEMS;
-  if (listId === "mcp-cards") return MCP_ITEMS;
+  if (listId === "mcp-cards") return state.mcpItems.length ? state.mcpItems : MCP_FALLBACK;
   return [];
 }
 
@@ -658,7 +959,7 @@ function openModuleDetail(listId, id) {
 
 function renderAgentRoles() {
   renderModuleCards({
-    items: AGENT_ROLE_ITEMS,
+    items: state.agentRoleItems.length ? state.agentRoleItems : AGENT_ROLE_ITEMS,
     filter: state.agentRole,
     tabsId: "agent-role-tabs",
     activeId: "agent-role-active",
@@ -668,7 +969,7 @@ function renderAgentRoles() {
 
 function renderBlackboard() {
   renderModuleCards({
-    items: BLACKBOARD_ITEMS,
+    items: state.blackboardItems.length ? state.blackboardItems : BLACKBOARD_FALLBACK,
     filter: state.blackboardType,
     tabsId: "blackboard-tabs",
     activeId: "blackboard-active",
@@ -698,7 +999,7 @@ function renderUsageCards() {
 
 function renderMcpCards() {
   renderModuleCards({
-    items: MCP_ITEMS,
+    items: state.mcpItems.length ? state.mcpItems : MCP_FALLBACK,
     filter: state.mcpType,
     tabsId: "mcp-tabs",
     activeId: "mcp-active",
@@ -706,8 +1007,65 @@ function renderMcpCards() {
   });
 }
 
+async function loadBlackboardStatus() {
+  try {
+    const data = await api("/api/experience");
+    const items = Array.isArray(data.items) ? data.items : [];
+    state.blackboardItems = items.length ? items.map((item, index) => ({
+      id: String(item.id || item.key || `experience-${index + 1}`),
+      type: String(item.type || item.topic || "经验"),
+      title: String(item.title || item.summary || item.topic || `经验 ${index + 1}`),
+      badge: "wired",
+      value: String(item.outcome || item.status || "recorded"),
+      desc: String(item.summary || item.description || "后端经验条目"),
+      detail: JSON.stringify(item, null, 2),
+    })) : [{
+      ...BLACKBOARD_FALLBACK[0],
+      detail: `endpoint: ${data.endpoint || "/api/experience"}\nwired: ${String(data.wired === true)}\nreserved: ${String(data.reserved === true)}\ncontract: ${data.contract || "未提供"}`,
+    }];
+  } catch (e) {
+    state.blackboardItems = [{
+      ...BLACKBOARD_FALLBACK[0],
+      id: "experience-load-error",
+      title: "经验状态读取失败",
+      value: "error",
+      desc: e.message,
+    }];
+  }
+  renderBlackboard();
+}
+
+async function loadMcpStatus() {
+  try {
+    const data = await api("/api/capabilities");
+    const layers = data.layers || [];
+    const relevant = layers.filter((layer) => ["tools", "platform", "env_check"].includes(layer.id));
+    state.mcpItems = [
+      MCP_FALLBACK[0],
+      ...relevant.map((layer) => ({
+        id: `capability-${layer.id}`,
+        type: "内部能力",
+        title: layer.name,
+        badge: layer.status || "neutral",
+        value: CAP_LABEL[layer.status] || layer.status || "unknown",
+        desc: layer.note || layer.contract || "后端能力声明",
+        detail: `这是一项内部后端能力，不代表 MCP Server 已注册。\ncontract: ${layer.contract || "-"}\nimpl: ${layer.impl || "-"}`,
+      })),
+    ];
+  } catch (e) {
+    state.mcpItems = [{
+      ...MCP_FALLBACK[0],
+      id: "mcp-status-error",
+      title: "能力状态读取失败",
+      value: "error",
+      desc: e.message,
+    }];
+  }
+  renderMcpCards();
+}
+
 function runTitle(run) {
-  return (run.task && run.task.title) || run.run_id;
+  return (run.task && (run.task.title || run.task.name)) || run.run_id;
 }
 
 function runCategory(run) {
@@ -715,16 +1073,32 @@ function runCategory(run) {
   return type || "未识别场景";
 }
 
+function submissionForEvents(events = []) {
+  const submissions = events.filter((event) => event.kind === "submission");
+  return submissions.find((event) => event.detail && event.detail.correct === true)
+    || [...submissions].reverse().find((event) => event.detail && event.detail.correct === false)
+    || submissions[submissions.length - 1]
+    || null;
+}
+
 async function loadReviewQueue() {
   try {
     const data = await api("/api/runs");
     const runs = (data.runs || []).slice(0, 12);
-    const products = await Promise.all(runs.map((run) =>
-      api(`/api/runs/${encodeURIComponent(run.run_id)}/product`).catch(() => null)
-    ));
+    const [products, eventResults] = await Promise.all([
+      Promise.all(runs.map((run) =>
+        api(`/api/runs/${encodeURIComponent(run.run_id)}/product`).catch(() => null)
+      )),
+      Promise.all(runs.map((run) =>
+        fetchAllRunEvents(run.run_id).catch(() => [])
+      )),
+    ]);
     state.reviewItems = runs.map((run, i) => {
       const product = products[i] && products[i].product ? products[i].product : {};
       const productCount = Object.keys(product).length;
+      const submissionEvent = submissionForEvents(eventResults[i] || []);
+      const submission = (submissionEvent && submissionEvent.detail) || null;
+      const platformPassed = Boolean(submission && submission.correct === true);
       let type = "待审核";
       let badge = "reserved";
       let title = `待复核：${runTitle(run)}`;
@@ -736,15 +1110,18 @@ async function loadReviewQueue() {
         title = `进行中：${runTitle(run)}`;
         desc = "任务仍在运行或未进入终态，可在 Agent 工作区继续观察工具调用与事件流。";
         value = run.status || "RUNNING";
-      } else if (run.status === "DONE" && productCount) {
+      } else if (run.status === "DONE" && platformPassed) {
         type = "已通过";
         badge = "wired";
-        title = `已归档：${runTitle(run)}`;
-        desc = "该任务已有通过步骤产物，可生成复盘报告并进行成果提交通道核验。";
+        title = `平台已通过：${runTitle(run)}`;
+        desc = "事件账本存在 submission.correct = true；这是平台通过的唯一前端判定条件。";
+        value = "correct: true";
       } else if (run.status === "DONE") {
         type = "待审核";
         badge = "reserved";
-        desc = "任务已完成但未抽取到明确产物，建议打开报告核对步骤验收和最终证据。";
+        desc = submission
+          ? `任务已完成，但最近一次 submission.correct 为 ${String(submission.correct)}，不能标记平台通过。`
+          : "任务已完成但没有 submission 事件，步骤产物不等于平台通过。";
       } else if (run.status === "FAILED") {
         type = "已驳回";
         badge = "neutral";
@@ -765,6 +1142,7 @@ async function loadReviewQueue() {
           `tokens: ${run.run_tokens || 0}`,
           `步骤数: ${run.step_count || 0}`,
           `产物数: ${productCount}`,
+          `submission: ${submission ? JSON.stringify({ ok: submission.ok, correct: submission.correct, message: submission.message }) : "无"}`,
           `创建时间: ${run.created_at || "-"}`,
           run.fail_reason ? `失败原因: ${run.fail_reason}` : "",
         ].filter(Boolean).join("\n"),
@@ -787,8 +1165,10 @@ async function loadReviewQueue() {
 
 async function loadUsageSummary() {
   try {
-    const data = await api("/api/runs");
-    const runs = data.runs || [];
+    const telemetry = await fetchTelemetry();
+    const runs = telemetry.runs || [];
+    const events = Array.from(telemetry.eventMap.values()).flat();
+    const roleTokens = roleTokenTotals(events);
     const totalTokens = runs.reduce((n, r) => n + Number(r.run_tokens || 0), 0);
     const done = runs.filter((r) => r.status === "DONE").length;
     const failed = runs.filter((r) => r.status === "FAILED").length;
@@ -802,6 +1182,11 @@ async function loadUsageSummary() {
       byCategory.set(key, item);
     });
     const topCategory = Array.from(byCategory.entries()).sort((a, b) => b[1].tokens - a[1].tokens)[0];
+    const llmEventCount = events.filter((event) => event.kind === "llm_usage").length;
+    setUsageBars(roleTokens, "usage");
+    renderUsageDaily(runs);
+    renderUsageCategories(byCategory);
+    setUsageChartView(state.usageChartView);
     state.usageItems = [
       {
         id: "overview",
@@ -815,11 +1200,16 @@ async function loadUsageSummary() {
       {
         id: "stage",
         type: "阶段",
-        title: "阶段用量近似",
+        title: "Agent 阶段 Token",
         badge: "wired",
-        value: `${runs.reduce((n, r) => n + Number(r.step_count || 0), 0)} steps`,
-        desc: "当前后端只暴露 run 级 token，本页按任务步骤数展示执行压力。精确阶段 token 需后端补充。",
-        detail: runs.slice(0, 8).map((r) => `${r.run_id}: ${r.step_count || 0} steps / ${r.run_tokens || 0} tokens`).join("\n") || "暂无运行记录",
+        value: `${llmEventCount} usage events`,
+        desc: "按 events.jsonl 的 llm_usage.detail.role 汇总 Planner、Executor、Evaluator 和其它角色。",
+        detail: [
+          `planner: ${roleTokens.planner}`,
+          `executor: ${roleTokens.executor}`,
+          `evaluator: ${roleTokens.evaluator}`,
+          `other: ${roleTokens.other}`,
+        ].join("\n"),
       },
       {
         id: "model",
@@ -827,8 +1217,8 @@ async function loadUsageSummary() {
         title: "模型策略成本",
         badge: "wired",
         value: runs.length ? "已接运行账本" : "无记录",
-        desc: "从运行账本聚合 tokens；模型名称仍来自模型配置页。多个模型拆分需后端提供 role_model 明细。",
-        detail: `任务数: ${runs.length}\n总 tokens: ${totalTokens}\n完成率: ${pct(done, runs.length)}`,
+        desc: "运行账本提供角色 Token，但 llm_usage 未提供模型名称，因此不能伪造多模型成本拆分。",
+        detail: `任务数: ${runs.length}\n总 tokens: ${totalTokens}\nllm_usage 事件: ${llmEventCount}\n完成率: ${pct(done, runs.length)}`,
       },
       {
         id: "challenge",
@@ -1112,7 +1502,8 @@ async function loadCapabilities() {
   $("cap-status").textContent = "加载中…";
   try {
     const r = await api("/api/capabilities");
-    $("cap-list").innerHTML = (r.layers || []).map((L) =>
+    const layers = r.layers || [];
+    $("cap-list").innerHTML = layers.map((L) =>
       `<li class="cap-item status-${L.status}">
         <div class="cap-head">
           <strong>${L.name}</strong>
@@ -1123,8 +1514,50 @@ async function loadCapabilities() {
         ${L.note ? `<div class="meta">${L.note}</div>` : ""}
       </li>`
     ).join("");
-    $("cap-status").textContent = `${(r.layers || []).length} 个能力层`;
+    const byId = new Map(layers.map((layer) => [layer.id, layer]));
+    const radar = {
+      understand: byId.get("understand"),
+      planner: byId.get("planner"),
+      executor: byId.get("executor"),
+      evaluator: byId.get("evaluator_step"),
+    };
+    const score = { wired: 100, wired_declare: 75, stub: 35, reserved: 0, frontend_reserved: 0 };
+    Object.entries(radar).forEach(([key, layer]) => {
+      const bar = $(`radar-${key}`);
+      const label = $(`radar-${key}-status`);
+      if (bar) bar.style.setProperty("--v", `${score[layer && layer.status] || 0}%`);
+      if (label) label.textContent = layer
+        ? `${CAP_LABEL[layer.status] || layer.status} · ${layer.impl || "无实现"}`
+        : "后端未声明";
+    });
+    const roleLayer = {
+      intake: byId.get("platform"),
+      understander: byId.get("understand"),
+      planner: byId.get("planner"),
+      executor: byId.get("executor"),
+      evaluator: byId.get("evaluator_step"),
+    };
+    state.agentRoleItems = AGENT_ROLE_ITEMS.map((item) => {
+      const layer = roleLayer[item.id];
+      return layer ? {
+        ...item,
+        badge: layer.status,
+        value: CAP_LABEL[layer.status] || layer.status,
+        desc: layer.note || item.desc,
+        detail: `${item.detail}\n\n后端声明\ncontract: ${layer.contract || "-"}\nimpl: ${layer.impl || "-"}\nstatus: ${layer.status || "-"}`,
+      } : { ...item, badge: "reserved", value: "未声明" };
+    });
+    renderAgentRoles();
+    $("cap-status").textContent = `${layers.length} 个能力层，状态来自 GET /api/capabilities`;
   } catch (e) {
+    state.agentRoleItems = AGENT_ROLE_ITEMS.map((item) => ({
+      ...item,
+      badge: "reserved",
+      value: "能力状态不可用",
+      desc: "无法读取 /api/capabilities，未展示本地预设状态。",
+      detail: e.message,
+    }));
+    renderAgentRoles();
     $("cap-status").textContent = e.message;
   }
 }
@@ -1295,9 +1728,15 @@ function focusRun(runId) {
   state.runId = runId;
   state.signalAfter = 0;
   state.eventAfter = 0;
+  state.runSnapshot = null;
+  state.runEvents = [];
+  state.runLog = "";
   $("signal-log").textContent = "";
   $("event-timeline").innerHTML = "";
   $("tool-stream").textContent = "";
+  $("run-log").textContent = "正在读取运行日志…";
+  $("run-duration").textContent = "-";
+  renderWorkspace(null, []);
   if (state.pollTimer) clearInterval(state.pollTimer);
   pollRun();
   state.pollTimer = setInterval(pollRun, 900);
@@ -1307,6 +1746,7 @@ async function pollRun() {
   if (!state.runId) return;
   try {
     const snap = await api("/api/runs/" + encodeURIComponent(state.runId));
+    state.runSnapshot = snap;
     $("run-id").textContent = snap.run_id;
     $("run-status").textContent = snap.status + (snap.alive ? " · live" : "");
     $("run-mode").textContent = snap.execution_mode === "real"
@@ -1325,6 +1765,14 @@ async function pollRun() {
     $("run-controls").classList.toggle("hidden", !snap.alive);
     renderPills(snap.status);
     renderDag($("dag-list"), snap.blueprint, snap.steps);
+    const task = snap.task || {};
+    const taskTitle = task.title || task.name || snap.run_id;
+    const taskType = task.challenge_type || "ctf-misc";
+    $("workspace-title").textContent = taskTitle;
+    $("workspace-subtitle").textContent = `${categoryLabel(taskType)} · run_id ${snap.run_id} · 数据来自 state.json 与 events.jsonl`;
+    $("workspace-type-badge").textContent = categoryLabel(taskType);
+    const taskTab = $(`task-tab-${snap.run_id}`);
+    if (taskTab) taskTab.querySelector("span").textContent = taskTitle;
 
     const sig = await api(`/api/runs/${encodeURIComponent(state.runId)}/signals?after=${state.signalAfter}`);
     (sig.signals || []).forEach((s) => {
@@ -1337,6 +1785,7 @@ async function pollRun() {
     const ev = await api(`/api/runs/${encodeURIComponent(state.runId)}/events?after=${state.eventAfter}`);
     (ev.events || []).forEach((e) => {
       state.eventAfter = e._i || state.eventAfter;
+      if (!state.runEvents.some((known) => known._i === e._i)) state.runEvents.push(e);
       const li = document.createElement("li");
       li.textContent = `${e.ts || ""} ${e.agent || ""} ${e.kind}${e.step_id ? " " + e.step_id : ""}${e.verdict ? " → " + e.verdict : ""}`;
       $("event-timeline").appendChild(li);
@@ -1349,8 +1798,11 @@ async function pollRun() {
     $("tool-stream").scrollTop = $("tool-stream").scrollHeight;
 
     const log = await api(`/api/runs/${encodeURIComponent(state.runId)}/log?tail=1000`);
-    $("run-log").textContent = log.log || "";
+    state.runLog = log.log || "";
+    $("run-log").textContent = state.runLog;
     $("run-log").scrollTop = $("run-log").scrollHeight;
+    updateRunDuration(snap, state.runEvents);
+    renderWorkspace(snap, state.runEvents);
 
     if (!snap.alive && (snap.status === "DONE" || snap.status === "FAILED")) {
       refreshActive();
@@ -1363,6 +1815,9 @@ async function pollRun() {
 async function refreshActive() {
   const data = await api("/api/runs");
   const runs = data.runs || [];
+  if ($("task-console-total")) $("task-console-total").textContent = String(runs.length);
+  if ($("task-console-running")) $("task-console-running").textContent = String(runs.filter((run) => run.alive).length);
+  if ($("task-console-queued")) $("task-console-queued").textContent = String(runs.filter((run) => run.phase === "queued" || run.status === "QUEUED").length);
   $("active-runs").innerHTML = runs.slice(0, 8).map((r) =>
     `<button type="button" class="run-chip ${r.run_id === state.runId ? "active" : ""}" data-id="${r.run_id}">${r.run_id} · ${r.status}</button>`
   ).join("") || "<span class='meta'>暂无 run</span>";
@@ -1398,13 +1853,19 @@ function invalidateParse() {
 function challengeVisualProfile(type) {
   const key = String(type || "ctf-misc");
   const profiles = {
-    "ctf-web": { accent: "WEB", scene: "目标服务", fields: [["Target", "http://target.local:8080"], ["入口", "/login · /upload · /api"], ["风险点", "SQLi / SSRF / File Upload"], ["执行环境", "统一 SSH 沙箱 + Web 工具"]], process: ["指纹识别", "目录/参数发现", "漏洞验证", "构造利用", "成果审核"] },
-    "ctf-pwn": { accent: "PWN", scene: "二进制靶机", fields: [["Arch", "amd64"], ["保护", "NX on · Canary ? · PIE ?"], ["远程", "nc target.local 31337"], ["执行环境", "统一 SSH 沙箱 + 二进制工具"]], process: ["保护检查", "逆向输入点", "调试验证", "风险复现", "远程打通"] },
-    "ctf-crypto": { accent: "CRY", scene: "密码参数", fields: [["Primitive", "RSA / Lattice / Stream"], ["已知量", "n, e, c / samples"], ["攻击路径", "低指数 / LLL / Oracle"], ["执行环境", "统一 SSH 沙箱 + 密码工具"]], process: ["抽取参数", "识别原语", "推导攻击", "脚本求解", "校验成果"] },
-    "ctf-reverse": { accent: "REV", scene: "逆向样本", fields: [["Format", "ELF / PE / APK"], ["保护", "混淆 / 反调试 / VM"], ["工具", "Ghidra · r2 · Frida"], ["执行环境", "统一 SSH 沙箱 + 逆向工具"]], process: ["文件识别", "静态反编译", "动态跟踪", "算法还原", "生成解密器"] },
-    "ctf-forensics": { accent: "FOR", scene: "证据包", fields: [["Artifacts", "pcap / image / memory / disk"], ["线索", "metadata · strings · timeline"], ["工具", "tshark · volatility · binwalk"], ["执行环境", "统一 SSH 沙箱 + 取证工具"]], process: ["证据登记", "元数据扫描", "时间线还原", "隐藏数据提取", "证据归档"] },
+    "ctf-web": { accent: "WEB", scene: "Web 安全任务" },
+    "ctf-pwn": { accent: "PWN", scene: "二进制攻防任务" },
+    "ctf-crypto": { accent: "CRY", scene: "密码安全任务" },
+    "ctf-reverse": { accent: "REV", scene: "逆向分析任务" },
+    "ctf-forensics": { accent: "FOR", scene: "取证分析任务" },
   };
-  return profiles[key] || { accent: skillGlyph(key), scene: "综合攻防任务", fields: [["类型", categoryLabel(key)], ["线索", "任务情报 / 附件 / 远程"], ["策略", "先识别再派发"], ["执行环境", "统一 SSH 沙箱 + 按需工具"]], process: ["归一化输入", "场景判定", "能力召回", "工具验证", "结果审核"] };
+  return profiles[key] || { accent: skillGlyph(key), scene: categoryLabel(key) };
+}
+
+function displayField(value) {
+  if (value === undefined || value === null || value === "") return "-";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 function renderChallengeDossier(data) {
@@ -1412,20 +1873,38 @@ function renderChallengeDossier(data) {
   const c = data.classification || {};
   const type = task.challenge_type || c.primary || "ctf-misc";
   const profile = challengeVisualProfile(type);
-  const title = task.title || $("task-title").value.trim() || "未命名攻防任务";
+  const title = task.title || task.name || $("task-title").value.trim() || "未命名攻防任务";
   const desc = task.description || $("task-desc").value.trim() || "暂无任务情报描述";
-  const attachments = task.attachments || state.attachments || [];
+  const attachments = task.files || task.attachments || state.attachments || [];
+  const fields = [
+    ["平台任务 ID", task.friendly_id || task.id || task.challenge_id],
+    ["分类", task.category || task.challenge_type_label || categoryLabel(type)],
+    ["难度", task.difficulty],
+    ["分值", task.points],
+    ["本地目录", task.challenge_dir || task.workdir],
+    ["远程目标", task.target_url || task.target || task.access],
+    ["动态靶机", task.has_container === undefined ? null : (task.has_container ? "需要" : "不需要")],
+    ["成果判定", task.flag_format || "由平台 submission 返回值判定"],
+    ["识别置信度", c.confidence ?? task.type_confidence],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== "");
+  const goals = Array.isArray(task.goals) ? task.goals
+    : Array.isArray(task.goal_list) ? task.goal_list
+      : task.task_goal ? [task.task_goal] : [];
   $("challenge-dossier").innerHTML = `<div class="challenge-dossier-hero ${escapeHtml(type)}">
     <div class="dossier-mark">${escapeHtml(profile.accent)}</div>
     <div><span>${escapeHtml(profile.scene)}</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(desc)}</p></div>
   </div>
   <div class="dossier-grid">
-    ${profile.fields.map(([k, v]) => `<div><span>${escapeHtml(k)}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}
-    <div><span>成果口令格式</span><strong>proof{...}</strong></div>
-    <div><span>置信度</span><strong>${escapeHtml(String(c.confidence ?? "-"))}</strong></div>
+    ${fields.map(([k, v]) => `<div><span>${escapeHtml(k)}</span><strong>${escapeHtml(displayField(v))}</strong></div>`).join("")}
   </div>
-  <div class="dossier-process">${profile.process.map((step, i) => `<div><span>${i + 1}</span><strong>${escapeHtml(step)}</strong></div>`).join("")}</div>
-  <div class="dossier-files">${(attachments.length ? attachments : [{ name: "无附件 / 或待上传", size: 0 }]).map((a) => `<div><strong>${escapeHtml(a.name || "attachment")}</strong><span>${escapeHtml(String(a.size || 0))} B</span></div>`).join("")}</div>`;
+  <div class="dossier-process">${goals.length
+    ? goals.map((goal, i) => `<div><span>${i + 1}</span><strong>${escapeHtml(displayField(goal.description || goal.id || goal))}</strong></div>`).join("")
+    : "<div><span>·</span><strong>派发后由真实 Planner 生成 DAG</strong></div>"}</div>
+  <div class="dossier-files">${(attachments.length ? attachments : ["无附件"]).map((a) => {
+    const name = typeof a === "string" ? a : (a.name || a.filename || a.path || "attachment");
+    const size = typeof a === "object" && a.size !== undefined ? `${a.size} B` : "平台任务输入";
+    return `<div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(size)}</span></div>`;
+  }).join("")}</div>`;
 }
 
 function setTaskPage(page, runId = state.runId) {
@@ -1442,11 +1921,170 @@ function setTaskPage(page, runId = state.runId) {
   });
 }
 
-function renderWorkspaceProcess(type) {
-  const profile = challengeVisualProfile(type);
-  $("workspace-process-map").innerHTML = profile.process.map((step, i) =>
-    `<div class="process-node ${i === 0 ? "active" : ""}"><span>${i + 1}</span><strong>${escapeHtml(step)}</strong><small>${escapeHtml(profile.scene)}</small></div>`
-  ).join("");
+function compactText(value, max = 1600) {
+  if (value === undefined || value === null || value === "") return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return text.length > max ? `${text.slice(0, max)}\n…（完整内容见上方 events.jsonl / 命令输出）` : text;
+}
+
+function workspaceDecisionSummary(event) {
+  const detail = event.detail || {};
+  if (event.kind === "replan") return detail.reason || detail.changes || "DAG 已更新";
+  if (event.kind === "plan_note") return detail.opinion || detail.observation || "Planner 已记录计划意见";
+  if (event.kind.startsWith("plan_review")) return detail.reason || detail.opinion || event.kind;
+  if (event.kind === "step_record") return detail.observation || detail.result || `步骤结果 ${event.verdict || "已记录"}`;
+  if (event.kind === "goal_eval") return `${detail.goal_id || "目标"}: ${detail.complete === true ? "完成" : "未完成"}${detail.reasoning ? `\n${detail.reasoning}` : ""}`;
+  if (event.kind === "submission") return `平台提交: ok=${String(detail.ok)} · correct=${String(detail.correct)}${detail.message ? `\n${detail.message}` : ""}`;
+  if (event.kind === "llm_usage") return `${detail.role || event.agent || "LLM"}: ${detail.total_tokens || 0} tokens · ${detail.latency_ms || 0} ms`;
+  return detail.reasoning || detail.reason || detail.opinion || detail.observation || detail.error || detail.message || detail.result || event.kind;
+}
+
+function activeStepFromEvents(snap, events = []) {
+  if (!snap || !snap.alive) return null;
+  const steps = (snap.blueprint && snap.blueprint.steps) || {};
+  const candidate = snap.current_step;
+  const candidateResult = candidate && (snap.steps || {})[candidate];
+  const candidateStatus = String((candidateResult && (candidateResult.verdict || candidateResult.status)) || steps[candidate]?.status || "PENDING").toLowerCase();
+  if (candidate && steps[candidate] && !["pass", "passed", "done", "fail", "failed", "escalate", "skipped"].includes(candidateStatus)) return candidate;
+  const completed = new Set();
+  const activityKinds = new Set(["use_tool", "tool_result", "sandbox.exec", "sandbox.run_python", "sandbox.sync", "step_eval"]);
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event.kind === "step_record" && event.step_id) {
+      completed.add(event.step_id);
+      continue;
+    }
+    if (event.step_id && steps[event.step_id] && activityKinds.has(event.kind) && !completed.has(event.step_id)) {
+      return event.step_id;
+    }
+  }
+  return null;
+}
+
+function renderWorkspaceProcess(snap, events = []) {
+  const steps = (snap && snap.blueprint && snap.blueprint.steps) || {};
+  const results = (snap && snap.steps) || {};
+  const ids = Object.keys(steps);
+  if (!ids.length) {
+    $("workspace-process-map").innerHTML = "<div class='process-node pending'><span>·</span><strong>等待真实 DAG</strong><small>Planner 写入 blueprint 后自动展示。</small></div>";
+    return;
+  }
+  $("workspace-process-map").innerHTML = ids.map((id, i) => {
+    const step = steps[id] || {};
+    const result = results[id] || {};
+    const status = String(result.verdict || step.status || "PENDING").toUpperCase();
+    const normalized = status.toLowerCase();
+    const activeId = activeStepFromEvents(snap, events);
+    const isActive = id === activeId && !["pass", "passed", "done", "fail", "failed", "escalate", "skipped"].includes(normalized);
+    const cls = isActive ? "active"
+      : ["pass", "passed", "done"].includes(normalized) ? "passed"
+        : ["fail", "failed", "escalate", "retry"].includes(normalized) ? "failed" : "pending";
+    const label = isActive ? `${status} · 当前执行` : status;
+    return `<div class="process-node ${cls}"${isActive ? ' aria-current="step"' : ""}><span>${i + 1}</span><strong>${escapeHtml(id)} · ${escapeHtml(label)}</strong><small>${escapeHtml(step.instruction || "未提供步骤说明")}</small></div>`;
+  }).join("");
+}
+
+function renderWorkspaceDecisions(events) {
+  const kinds = new Set([
+    "engine.run_started", "replan", "plan_note", "plan_review", "plan_review_pass", "plan_review_fail",
+    "step_eval", "step_record", "goal_eval", "reflect", "submission", "runtime_failed", "llm_usage",
+  ]);
+  const decisions = events.filter((event) => kinds.has(event.kind)).slice(-80);
+  $("workspace-decisions").innerHTML = decisions.length ? decisions.map((event) => {
+    const verdict = event.verdict ? ` · ${event.verdict}` : "";
+    return `<li class="workspace-decision">
+      <div><span>${escapeHtml(event.ts || "")}</span><code>${escapeHtml(event.agent || "system")} · ${escapeHtml(event.kind)}${escapeHtml(verdict)}</code></div>
+      <strong>${escapeHtml(event.step_id || event.node_id || "run")}</strong>
+      <p>${escapeHtml(compactText(workspaceDecisionSummary(event)))}</p>
+    </li>`;
+  }).join("") : "<li class='workspace-empty'><span>暂无决策事件</span><strong>等待 Planner、Executor 或 Evaluator 写入事件账本。</strong></li>";
+}
+
+function renderWorkspaceTools(events) {
+  const calls = new Map();
+  events.filter((event) => ["use_tool", "tool_result"].includes(event.kind)).forEach((event) => {
+    const detail = event.detail || {};
+    const name = String(detail.tool || detail.tool_id || "unknown_tool");
+    const item = calls.get(name) || { name, callCount: 0, resultCount: 0, failures: 0, latest: "" };
+    if (event.kind === "use_tool") item.callCount += 1;
+    if (event.kind === "tool_result") {
+      item.resultCount += 1;
+      const output = detail.output !== undefined ? detail.output : detail.result;
+      item.latest = compactText(output, 800);
+      if ((output && typeof output === "object" && output.ok === false) || /error|failed|not found/i.test(item.latest)) item.failures += 1;
+    }
+    calls.set(name, item);
+  });
+  const runtimeEvents = events.filter((event) => event.kind.startsWith("sandbox."));
+  const items = Array.from(calls.values());
+  $("workspace-tools-empty").classList.toggle("hidden", Boolean(items.length || runtimeEvents.length));
+  $("workspace-tools").innerHTML = [
+    ...items.map((item) => `<div class="workspace-tool ${item.failures ? "has-failure" : ""}">
+      <strong>${escapeHtml(item.name)}</strong><span class="state-pill ${item.failures ? "neutral" : "pass"}">${item.resultCount}/${item.callCount} results</span>
+      <small>${item.failures} failed · latest output</small><pre>${escapeHtml(item.latest || "工具尚未返回结果")}</pre>
+    </div>`),
+    ...(runtimeEvents.length ? (() => {
+      const latest = runtimeEvents[runtimeEvents.length - 1];
+      return [`<div class="workspace-tool"><strong>SSH / Sandbox</strong><span class="state-pill pass">${runtimeEvents.length} events</span><small>${escapeHtml(latest.kind)}</small><pre>${escapeHtml(compactText(latest.detail, 800))}</pre></div>`];
+    })() : []),
+  ].join("");
+}
+
+function renderWorkspaceOutputs(snap, events) {
+  if (!snap) {
+    $("workspace-outputs").textContent = "正在读取 state.json 与 events.jsonl…";
+    return;
+  }
+  const task = snap.task || {};
+  const blueprintSteps = (snap.blueprint && snap.blueprint.steps) || {};
+  const stepOutputs = Object.fromEntries(Object.entries(blueprintSteps).map(([id, step]) => {
+    const result = (snap.steps || {})[id] || {};
+    return [id, {
+      status: result.verdict || step.status || null,
+      attempts: result.attempts ?? step.attempts ?? 0,
+      instruction: step.instruction || null,
+      criterion: step.criterion || null,
+      observation: result.observation || null,
+      result: result.result ?? step.result ?? null,
+    }];
+  }));
+  const submissionEvent = submissionForEvents(events);
+  const counts = events.reduce((acc, event) => {
+    acc[event.kind] = (acc[event.kind] || 0) + 1;
+    return acc;
+  }, {});
+  $("workspace-outputs").textContent = JSON.stringify({
+    run: {
+      run_id: snap.run_id,
+      status: snap.status,
+      execution_mode: snap.execution_mode,
+      phase: snap.phase,
+      tokens: snap.run_tokens || 0,
+    },
+    task: {
+      id: task.id || task.challenge_id || null,
+      friendly_id: task.friendly_id || null,
+      title: task.title || task.name || null,
+      description: task.description || null,
+      challenge_type: task.challenge_type || null,
+      challenge_dir: task.challenge_dir || null,
+      target: task.target || task.target_url || task.access || null,
+      files: task.files || task.attachments || [],
+      artifacts: task.artifacts || [],
+    },
+    goals: snap.goal_list || [],
+    steps: stepOutputs,
+    submission: submissionEvent ? submissionEvent.detail : null,
+    event_counts: counts,
+    backend_limitations: ["当前接口未提供 VM 工作目录文件枚举或文件下载。", "LLM 隐藏推理不会返回；这里只展示模型显式写入事件账本的计划理由、验收意见和结果。"],
+  }, null, 2);
+}
+
+function renderWorkspace(snap, events) {
+  renderWorkspaceProcess(snap, events || []);
+  renderWorkspaceDecisions(events || []);
+  renderWorkspaceTools(events || []);
+  renderWorkspaceOutputs(snap, events || []);
 }
 
 function openTaskWorkspaceTab(runId, task) {
@@ -1455,9 +2093,9 @@ function openTaskWorkspaceTab(runId, task) {
     $("challenge-browser-tabs").insertAdjacentHTML("beforeend", `<button type="button" class="challenge-tab" id="task-tab-${escapeHtml(runId)}" data-task-page="workspace" data-run-id="${escapeHtml(runId)}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(skillGlyph(task && task.challenge_type))}</strong></button>`);
   }
   $("workspace-title").textContent = label;
-  $("workspace-subtitle").textContent = `${categoryLabel(task && task.challenge_type)} · run_id ${runId} · 实时展示 Agent 思考、工具、证据和状态机`;
+  $("workspace-subtitle").textContent = `${categoryLabel(task && task.challenge_type)} · run_id ${runId} · 正在读取真实运行账本`;
   $("workspace-type-badge").textContent = categoryLabel(task && task.challenge_type);
-  renderWorkspaceProcess(task && task.challenge_type);
+  renderWorkspace(null, []);
   setTaskPage("workspace", runId);
 }
 
@@ -1795,7 +2433,11 @@ function bind() {
     if (!b) return;
     state.dashboardWindow = b.dataset.window;
     document.querySelectorAll("#dashboard-window-tabs button").forEach((x) => x.classList.toggle("active", x === b));
-    renderDashboard();
+    loadDashboard(true);
+  });
+  $("usage-chart-tabs").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-usage-chart]");
+    if (button) setUsageChartView(button.dataset.usageChart);
   });
   $("challenge-browser-tabs").addEventListener("click", (e) => {
     const tab = e.target.closest(".challenge-tab");

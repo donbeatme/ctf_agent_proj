@@ -210,6 +210,25 @@ def _parse_json(raw: str) -> dict:
         return {}
 
 
+def _coerce_bool(value, default: bool = False) -> bool:
+    """将 LLM JSON 中的布尔值安全转换为 bool。
+
+    部分模型会把 schema 中的 true/false 返回成字符串；直接调用
+    ``bool(value)`` 会把 ``"false"`` 错误地解释为 True，可能触发任务提前收口。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "是", "对"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "否", "错", ""}:
+            return False
+    return default
+
+
 def _sum_usage(log: list[dict]) -> dict | None:
     if not log:
         return None
@@ -287,7 +306,7 @@ class StepLLMEvaluator(_LLMEvaluator):
 
     async def step_eval(self, ctx: str) -> EvalResult:
         parsed, raw, usage = await self._call(ctx)
-        is_completed = bool(parsed.get("is_completed"))
+        is_completed = _coerce_bool(parsed.get("is_completed"))
         diagnosis = self._coerce_diagnosis(parsed.get("diagnosis"))
         return self._result(parsed, raw, usage, is_completed=is_completed,
                             diagnosis=diagnosis)
@@ -320,7 +339,7 @@ class StepLLMEvaluator(_LLMEvaluator):
             f"【执行上下文】\n{ctx}\n"
         )
         parsed, raw, _ = await self._call(prompt, system=GOAL_EVAL_SYSTEM, drain_usage=False)
-        complete = bool(parsed.get("complete"))
+        complete = _coerce_bool(parsed.get("complete"))
         evidence = parsed.get("evidence")
         evidence = [str(x) for x in evidence if x] if isinstance(evidence, list) else []
         reasoning = str(parsed.get("reasoning") or "").strip()[:500]

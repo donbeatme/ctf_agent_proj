@@ -163,3 +163,35 @@ def test_frontend_posts_execution_mode_and_renders_execution_stream():
     assert 'id="tool-stream"' in html
     assert "execution_mode: executionMode" in js
     assert '$("tool-stream")' in js
+
+
+def test_frontend_uses_run_ledger_for_dashboard_and_workspace():
+    root = Path(web_server.__file__).resolve().parent
+    html = (root / "web" / "index.html").read_text(encoding="utf-8")
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert "dashboardMockData" not in js
+    assert "seededSeries" not in js
+    assert "target.local" not in js
+    assert "<span>默认成果口令</span>" not in html
+    assert "fetchAllRunEvents" in js
+    assert "renderWorkspaceDecisions" in js
+    assert "renderWorkspaceOutputs" in js
+    assert "activeStepFromEvents" in js
+    assert "当前执行" in js
+    assert "submission && submission.correct === true" in js
+    assert 'GET /api/experience' in js
+
+
+def test_frontend_exposes_duration_handoff_and_usage_views():
+    root = Path(web_server.__file__).resolve().parent
+    html = (root / "web" / "index.html").read_text(encoding="utf-8")
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="run-duration"' in html
+    assert 'id="btn-workspace-human"' in html
+    assert 'data-usage-chart="daily"' in html
+    assert 'data-usage-chart="category"' in html
+    assert "updateRunDuration(snap, state.runEvents)" in js
+    assert "renderUsageDaily(runs)" in js
+    assert "renderUsageCategories(byCategory)" in js

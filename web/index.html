@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>攻防 Agent 指令台</title>
-    <link rel="stylesheet" href="/styles.css?v=20260829-real-vm">
+    <link rel="stylesheet" href="/styles.css?v=20260829-usage-views">
   </head>
   <body>
     <section class="auth-gate" id="auth-gate">
@@ -110,11 +110,11 @@
                 <h2 class="step-title">战情总览</h2>
                 <p class="step-desc">对标攻防智能体参考系统的系统概览：在线任务进度、单任务独立可销毁 SSH 沙箱、统一镜像、模型连接、执行链路和审核状态一屏可见。</p>
                 <div class="mission-grid">
-                  <article class="metric-card hot" data-tip-key="running" data-tip="当前占用的攻防研判槽位 / 最大并发槽位；真实执行需要绑定独立 SSH 沙箱。"><span>运行中任务</span><strong id="dash-running">3 / 5</strong><small>真实执行：单任务独立工作区，结束后可销毁</small></article>
-                  <article class="metric-card" data-tip-key="queued" data-tip="排队任务通常在等待沙箱、模型配额、人工审核或 Worker 空闲。"><span>排队中</span><strong id="dash-queued">4</strong><small>等待 SSH 沙箱、模型配额或 Worker 空闲</small></article>
-                  <article class="metric-card" data-tip-key="done" data-tip="已完成任务会归档事件、证据、产物和 复盘报告，用于赛后复盘。"><span>已完成</span><strong id="dash-done">27</strong><small>成功任务会自动归档证据与 REPORT</small></article>
-                  <article class="metric-card warn" data-tip-key="review" data-tip="Agent 命中疑似口令后不会直接提交，会进入证据审查队列。"><span>成果待审</span><strong id="dash-review">2</strong><small>命中候选成果后进入人工/自动审核</small></article>
-                  <article class="metric-card hot" data-tip-key="accuracy" data-tip="按提交通过数 / 总提交数估算，Mock 数据会随时间窗口动态刷新。"><span>正确率</span><strong id="dash-accuracy">81%</strong><small>近 7 天提交通过率与复盘修正后统计</small></article>
+                  <article class="metric-card hot" data-tip-key="running" data-tip="来自 GET /api/runs 的 alive 任务数。"><span>运行中任务</span><strong id="dash-running">-</strong><small>由真实 run 状态实时聚合</small></article>
+                  <article class="metric-card" data-tip-key="queued" data-tip="来自 run phase/status 的排队任务数。"><span>排队中</span><strong id="dash-queued">-</strong><small>等待启动的真实任务</small></article>
+                  <article class="metric-card" data-tip-key="done" data-tip="当前时间窗口内状态为 DONE 的真实任务。"><span>已完成</span><strong id="dash-done">-</strong><small>来自 runs/ 状态账本</small></article>
+                  <article class="metric-card warn" data-tip-key="review" data-tip="已结束但尚无 correct=true 提交的任务。"><span>成果待审</span><strong id="dash-review">-</strong><small>以平台提交判定为准</small></article>
+                  <article class="metric-card hot" data-tip-key="accuracy" data-tip="按 submission correct=true / submission 总数计算。"><span>正确率</span><strong id="dash-accuracy">-</strong><small>真实平台提交通过率</small></article>
                 </div>
               </div>
               <section class="panel command-screen-panel">
@@ -122,7 +122,7 @@
                   <div>
                     <p class="panel-kicker">Live Competition Screen</p>
                     <h2>赛事态势大屏</h2>
-                    <p class="panel-desc">Mock 数据驱动：按日/周/月统计攻防研判趋势、正确率、场景类型分布、模型 Tokens、沙箱使用和审核压力，后续可替换为真实 runs 聚合接口。</p>
+                    <p class="panel-desc">数据来自 <code>/api/runs</code> 与每个任务的 <code>/events</code>，按日/周/月聚合任务、提交、模型 Tokens 和沙箱事件。</p>
                   </div>
                   <div class="screen-window-tabs" id="dashboard-window-tabs">
                     <button type="button" class="active" data-window="day">今日</button>
@@ -150,10 +150,10 @@
                   <article class="chart-panel" data-tip-key="funnel" data-tip="从候选口令到证据完整、审核通过、重规划的转化漏斗。">
                     <div class="chart-head"><span>审核漏斗</span><strong>Evidence Review</strong></div>
                     <div class="funnel-board">
-                      <div style="--w: 92%" data-tip-key="funnel-candidate" data-tip="Agent 从输出、命令结果、页面响应中提取的疑似口令。"><span>候选成果</span><strong id="funnel-candidate">18</strong></div>
-                      <div style="--w: 72%" data-tip-key="funnel-evidence" data-tip="候选口令已绑定来源步骤、工具命令、证据片段。"><span>证据完整</span><strong id="funnel-evidence">13</strong></div>
-                      <div style="--w: 58%" data-tip-key="funnel-approved" data-tip="审核通过后进入提交与复盘报告归档。"><span>审核通过</span><strong id="funnel-approved">11</strong></div>
-                      <div style="--w: 18%" data-tip-key="funnel-replan" data-tip="证据不足或误判时触发 Planner 重新规划。"><span>重规划</span><strong id="funnel-replan">3</strong></div>
+                      <div style="--w: 0%" data-tip-key="funnel-candidate" data-tip="events.jsonl 中的 submission 事件数。"><span>提交尝试</span><strong id="funnel-candidate">0</strong></div>
+                      <div style="--w: 0%" data-tip-key="funnel-evidence" data-tip="存在工具结果和步骤验收记录的提交任务。"><span>证据完整</span><strong id="funnel-evidence">0</strong></div>
+                      <div style="--w: 0%" data-tip-key="funnel-approved" data-tip="submission 事件中 correct=true 的数量。"><span>平台通过</span><strong id="funnel-approved">0</strong></div>
+                      <div style="--w: 0%" data-tip-key="funnel-replan" data-tip="events.jsonl 中的 replan 事件数。"><span>重规划</span><strong id="funnel-replan">0</strong></div>
                     </div>
                   </article>
                 </div>
@@ -162,17 +162,15 @@
               <section class="panel overview-wide">
                 <h2>在线任务与 SSH 沙箱</h2>
                 <div class="progress-board">
-                  <div class="progress-ring" style="--p: 0%"><strong>0/5</strong><span>运行槽</span></div>
+                  <div class="progress-ring" id="overview-progress" style="--p: 0%"><strong id="overview-active">0</strong><span>活跃任务</span></div>
                   <div class="queue-lanes">
-                    <div><span>RUNNING</span><strong>0</strong><small>正在攻防研判</small></div>
-                    <div><span>QUEUED</span><strong>0</strong><small>等待调度</small></div>
-                    <div><span>DONE</span><strong>0</strong><small>已完成</small></div>
-                    <div><span>PAUSED</span><strong>0</strong><small>人工暂停</small></div>
+                    <div><span>RUNNING</span><strong id="overview-running">0</strong><small>正在攻防研判</small></div>
+                    <div><span>QUEUED</span><strong id="overview-queued">0</strong><small>等待启动</small></div>
+                    <div><span>DONE</span><strong id="overview-done">0</strong><small>已完成</small></div>
+                    <div><span>FAILED/PAUSED</span><strong id="overview-other">0</strong><small>失败或非活动中间态</small></div>
                   </div>
-                  <div class="sandbox-list">
-                    <div><strong>ssh-sandbox-001</strong><span class="state-pill pass">已配置</span><small>统一沙箱镜像 · executor 按任务申请工具</small></div>
-                    <div><strong>tool-catalog</strong><span class="state-pill neutral">固定目录</span><small>Web / 密码 / 二进制 / 逆向 / 取证工具按需调用</small></div>
-                    <div><strong>web-real-run</strong><span class="state-pill pass">Web</span><small>自动启动 VM · RealExecutor + SSH 容器</small></div>
+                  <div class="sandbox-list" id="overview-runtime">
+                    <div><strong>正在读取运行时</strong><span class="state-pill neutral">loading</span><small>数据来自 /api/sandbox/runtime</small></div>
                   </div>
                 </div>
               </section>
@@ -201,9 +199,9 @@
               <section class="panel model-usage-panel">
                 <h2>模型用量速览</h2>
                 <div class="usage-bars">
-                  <div><span>Planner tokens</span><strong>0</strong><i style="--w: 0%"></i></div>
-                  <div><span>Executor tokens</span><strong>0</strong><i style="--w: 0%"></i></div>
-                  <div><span>上下文预算</span><strong>65,536</strong><i style="--w: 32%"></i></div>
+                  <div><span>Planner tokens</span><strong id="quick-planner-tokens">0</strong><i id="quick-planner-bar" style="--w: 0%"></i></div>
+                  <div><span>Executor tokens</span><strong id="quick-executor-tokens">0</strong><i id="quick-executor-bar" style="--w: 0%"></i></div>
+                  <div><span>Evaluator tokens</span><strong id="quick-evaluator-tokens">0</strong><i id="quick-evaluator-bar" style="--w: 0%"></i></div>
                 </div>
               </section>
               <section class="panel execution-pipeline-panel">
@@ -376,10 +374,10 @@
                   <div class="agent-link link-d"></div>
                 </div>
                 <div class="agent-radar-grid">
-                  <div class="radar-card"><span style="--v: 88%"></span><strong>场景类型理解</strong><small>关键词、附件、目标 URL 综合判别</small></div>
-                  <div class="radar-card"><span style="--v: 76%"></span><strong>规划能力</strong><small>LLM 规划 + get_doc 战术召回</small></div>
-                  <div class="radar-card"><span style="--v: 92%"></span><strong>执行接线</strong><small>Web 已接 RealExecutor、SSH 与任务独立容器</small></div>
-                  <div class="radar-card"><span style="--v: 68%"></span><strong>交付链路</strong><small>events、DAG、product、report 汇总</small></div>
+                  <div class="radar-card"><span id="radar-understand" style="--v: 0%"></span><strong>场景类型理解</strong><small id="radar-understand-status">等待能力声明</small></div>
+                  <div class="radar-card"><span id="radar-planner" style="--v: 0%"></span><strong>规划能力</strong><small id="radar-planner-status">等待能力声明</small></div>
+                  <div class="radar-card"><span id="radar-executor" style="--v: 0%"></span><strong>执行接线</strong><small id="radar-executor-status">等待能力声明</small></div>
+                  <div class="radar-card"><span id="radar-evaluator" style="--v: 0%"></span><strong>验收链路</strong><small id="radar-evaluator-status">等待能力声明</small></div>
                 </div>
               </section>
               <section class="panel agent-status-panel">
@@ -490,11 +488,11 @@
                 <h2>投递攻防任务</h2>
                 <p class="panel-desc">支持任务情报文本、平台/通用 JSON、目标 URL、附件（pcap/elf/zip/图/代码等）。先「解析场景类型」，确认后再启动攻防研判。</p>
                 <div class="task-console-strip">
-                  <div><span>任务总数</span><strong>0</strong></div>
-                  <div><span>运行中</span><strong>0/5</strong></div>
-                  <div><span>等待队列</span><strong>0</strong></div>
-                  <div><span>独立沙箱</span><strong>单任务一个</strong></div>
-                  <div><span>默认成果口令</span><strong>proof{...}</strong></div>
+                  <div><span>任务总数</span><strong id="task-console-total">-</strong></div>
+                  <div><span>运行中</span><strong id="task-console-running">-</strong></div>
+                  <div><span>等待队列</span><strong id="task-console-queued">-</strong></div>
+                  <div><span>独立沙箱</span><strong id="task-console-sandbox">由 runtime / events 确认</strong></div>
+                  <div><span>成果判定</span><strong id="task-console-submit">以 submission.correct 为准</strong></div>
                 </div>
                 <div class="source-tabs" role="tablist" aria-label="任务来源">
                   <button type="button" class="source-tab active" data-src="text">任务情报文本</button>
@@ -658,6 +656,7 @@
                   <div><span>VM / SSH</span><strong id="run-runtime">-</strong></div>
                   <div><span>当前步骤</span><strong id="run-step">-</strong></div>
                   <div><span>tokens</span><strong id="run-tokens">0</strong></div>
+                  <div><span>运行时长</span><strong id="run-duration">-</strong></div>
                 </div>
                 <ol id="state-pills" class="state-pills" aria-label="引擎状态机"></ol>
                 <p class="hint" id="run-message">尚未启动。</p>
@@ -689,34 +688,33 @@
                 </div>
               </section>
               <section class="panel workspace-panel challenge-page hidden" data-task-page="workspace">
-                <h2>任务工作区 · 可解释过程</h2>
+                <div class="workspace-section-head">
+                  <div>
+                    <h2>任务工作区 · 可解释过程</h2>
+                    <p class="panel-desc">以下内容直接投影当前 run 的 DAG、state.json 与 events.jsonl；无事件时显示空状态，不使用题型模板补造过程。</p>
+                  </div>
+                  <button type="button" id="btn-workspace-human" class="workspace-human-button" title="人工接入（预留）">
+                    <span class="workspace-human-icon" aria-hidden="true"></span>
+                    <span>人工接入</span>
+                  </button>
+                </div>
                 <div id="workspace-process-map" class="workspace-process-map"></div>
                 <div class="workspace-grid">
                   <div class="thinking-feed">
-                    <h3>Agent 思考与决策</h3>
-                    <ol>
-                      <li><span>理解任务情报</span><strong>抽取目标、成果口令格式、远程地址与附件线索</strong></li>
-                      <li><span>选择战术</span><strong>按场景类型召回 Web 安全、二进制攻防、密码安全、逆向分析、取证分析技能</strong></li>
-                      <li><span>生成计划</span><strong>输出 DAG，标注依赖、验收标准与重试次数</strong></li>
-                      <li><span>工具执行</span><strong>Web 自动启动隔离 VM，经 SSH 在任务容器内执行，命令输出与工具结果写入 Match 事件流</strong></li>
+                    <h3>Agent 决策与验收</h3>
+                    <ol id="workspace-decisions">
+                      <li class="workspace-empty"><span>暂无决策事件</span><strong>等待 Planner、Executor 或 Evaluator 写入事件账本。</strong></li>
                     </ol>
                   </div>
                   <div class="tool-status-board">
-                    <h3>工具状态</h3>
-                    <div><strong>terminal</strong><span class="state-pill neutral">idle</span><small>等待命令</small></div>
-                    <div><strong>python</strong><span class="state-pill neutral">idle</span><small>脚本执行与数据处理</small></div>
-                    <div><strong>files</strong><span class="state-pill neutral">synced</span><small>题目目录上传至 /work；过程证据写入 events / log</small></div>
-                    <div><strong>mcp</strong><span class="state-pill neutral">ready</span><small>可接入外部攻防研判工具</small></div>
+                    <h3>实际工具状态</h3>
+                    <div id="workspace-tools-empty"><strong>暂无工具调用</strong><span class="state-pill neutral">0 calls</span><small>数据来自 use_tool / tool_result / sandbox.* 事件。</small></div>
+                    <div id="workspace-tools" class="workspace-tool-list"></div>
                   </div>
                   <div class="workspace-tabs">
-                    <h3>终端 / 文件 / 复盘报告</h3>
-                    <pre class="doc muted">/workspace/task_xxx
-├── attachments/
-├── artifacts/
-├── .sandbox-sessions/
-└── REPORT.md
-
-等待 Agent 启动后同步终端输出、生成文件和中文可复现报告。</pre>
+                    <h3>任务输入与步骤产出</h3>
+                    <pre id="workspace-outputs" class="doc muted">等待 state.json 与步骤结果…</pre>
+                    <p class="hint" id="workspace-output-note">当前后端未提供 VM 文件枚举接口；这里只展示后端已经返回的输入文件、步骤 result、observation 和 product。</p>
                   </div>
                 </div>
               </section>
@@ -872,12 +870,42 @@
                 </div>
               </section>
               <section class="panel usage-stage-panel">
-                <h2>阶段分布</h2>
-                <div class="usage-bars">
-                  <div><span>理解任务情报</span><strong>0</strong><i style="--w: 0%"></i></div>
-                  <div><span>规划 DAG</span><strong>0</strong><i style="--w: 0%"></i></div>
-                  <div><span>工具解释</span><strong>0</strong><i style="--w: 0%"></i></div>
-                  <div><span>复盘报告</span><strong>0</strong><i style="--w: 0%"></i></div>
+                <div class="usage-chart-head">
+                  <div>
+                    <h2 id="usage-chart-title">阶段分布</h2>
+                    <p id="usage-chart-desc" class="panel-desc">按 Agent 阶段汇总 events.jsonl 中的真实模型 Tokens。</p>
+                  </div>
+                  <div class="usage-chart-tabs" id="usage-chart-tabs" role="tablist" aria-label="模型用量图表维度">
+                    <button type="button" class="usage-chart-tab active" data-usage-chart="stage" role="tab" aria-selected="true" title="按 Agent 阶段查看">
+                      <span class="usage-view-icon stage" aria-hidden="true"></span><span>阶段</span>
+                    </button>
+                    <button type="button" class="usage-chart-tab" data-usage-chart="daily" role="tab" aria-selected="false" title="按每日查看">
+                      <span class="usage-view-icon daily" aria-hidden="true"></span><span>每日</span>
+                    </button>
+                    <button type="button" class="usage-chart-tab" data-usage-chart="category" role="tab" aria-selected="false" title="按任务类型查看">
+                      <span class="usage-view-icon category" aria-hidden="true"></span><span>任务类型</span>
+                    </button>
+                  </div>
+                </div>
+                <div id="usage-stage-view" class="usage-chart-view" role="tabpanel">
+                  <div class="usage-bars">
+                    <div><span class="usage-role-label"><b class="usage-role-icon planner" aria-hidden="true">P</b>Planner</span><strong id="usage-planner-tokens">0</strong><i id="usage-planner-bar" style="--w: 0%"></i></div>
+                    <div><span class="usage-role-label"><b class="usage-role-icon executor" aria-hidden="true">E</b>Executor</span><strong id="usage-executor-tokens">0</strong><i id="usage-executor-bar" style="--w: 0%"></i></div>
+                    <div><span class="usage-role-label"><b class="usage-role-icon evaluator" aria-hidden="true">V</b>Evaluator</span><strong id="usage-evaluator-tokens">0</strong><i id="usage-evaluator-bar" style="--w: 0%"></i></div>
+                    <div><span class="usage-role-label"><b class="usage-role-icon other" aria-hidden="true">+</b>其他角色</span><strong id="usage-other-tokens">0</strong><i id="usage-other-bar" style="--w: 0%"></i></div>
+                  </div>
+                </div>
+                <div id="usage-daily-view" class="usage-chart-view hidden" role="tabpanel">
+                  <div class="usage-daily-summary"><strong id="usage-daily-total">0</strong><span>近 7 日 Tokens</span></div>
+                  <div id="usage-daily-chart" class="usage-daily-chart" aria-label="每日模型用量柱状图"></div>
+                </div>
+                <div id="usage-category-view" class="usage-chart-view hidden" role="tabpanel">
+                  <div class="usage-category-layout">
+                    <div id="usage-category-donut" class="usage-category-donut" aria-label="任务类型模型用量环形图">
+                      <div><strong id="usage-category-total">0</strong><span>Tokens</span></div>
+                    </div>
+                    <div id="usage-category-legend" class="usage-category-legend"></div>
+                  </div>
                 </div>
               </section>
             </div>
@@ -886,14 +914,14 @@
               <div class="step-heading">
                 <p class="section-kicker">MCP Tools</p>
                 <h2 class="step-title">MCP 工具</h2>
-                <p class="step-desc">为 Agent 接入不同攻防研判工具：终端、文件、浏览器、反编译、符号计算、网络扫描等。当前先做前端管理台与能力声明，后续映射到实际 MCP 服务。</p>
+                <p class="step-desc">展示后端当前公开的能力声明。后端尚未提供 MCP 注册表时，本页会明确显示未接入，不再用静态卡片模拟在线服务。</p>
               </div>
               <section class="panel overview-wide">
                 <div class="arsenal-panel-head">
                   <div>
                     <p class="panel-kicker">MCP Registry</p>
                     <h2>工具连接状态</h2>
-                    <p class="panel-desc">按 MCP 工具类型组织：核心工作区、Web 交互、密码安全、二进制攻防、逆向分析、取证和待接入能力。</p>
+                    <p class="panel-desc">数据来自 <code>/api/capabilities</code>；实际工具目录请在“战术与工具库”查看。</p>
                   </div>
                 </div>
                 <div class="skill-filter-bar arsenal-filter-bar">
@@ -915,15 +943,15 @@
               <div class="step-heading">
                 <p class="section-kicker">User & Team</p>
                 <h2 class="step-title">用户管理</h2>
-                <p class="step-desc">登录后的队伍身份、成员角色、权限、审计和个人偏好设置都在这里管理。外观设置属于用户偏好，不再作为独立业务目录。</p>
+                <p class="step-desc">当前只有浏览器内的本地界面门禁与外观偏好，后端没有用户、成员、权限或登录审计接口。</p>
               </div>
               <section class="panel">
                 <h2>队伍资料</h2>
                 <div class="user-grid">
                   <div><span>当前队伍</span><strong id="profile-team">demo-team</strong><small>比赛队伍</small></div>
-                  <div><span>角色</span><strong>管理员</strong><small>可管理模型、MCP、成员和审核</small></div>
-                  <div><span>成员</span><strong>1</strong><small>后续接入真实用户系统</small></div>
-                  <div><span>审计</span><strong>本地演示</strong><small>登录、提交、审核动作预留记录</small></div>
+                  <div><span>身份来源</span><strong id="profile-auth-source">浏览器本地</strong><small>未经过服务端身份验证</small></div>
+                  <div><span>成员与权限</span><strong>后端未提供</strong><small>不展示模拟成员数或管理员角色</small></div>
+                  <div><span>登录审计</span><strong>未接入</strong><small>当前没有服务端审计记录</small></div>
                 </div>
               </section>
               <section class="panel">
@@ -946,6 +974,6 @@
         </div>
       </div>
     </main>
-    <script src="/app.js?v=20260829-real-vm"></script>
+    <script src="/app.js?v=20260829-usage-views"></script>
   </body>
 </html>

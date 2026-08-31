@@ -116,6 +116,14 @@ async def test_step_llm_parses_is_completed(stub_llm):
     assert r.is_completed is True
 
 
+async def test_step_llm_string_false_does_not_complete_run(stub_llm):
+    """模型把 JSON 布尔值写成字符串时，\"false\" 不能触发提前收口。"""
+    stub_llm(json.dumps({"verdict": "pass", "is_completed": "false", "opinion": "前置步骤通过"}))
+    r = await StepLLMEvaluator().step_eval("ctx")
+    assert r.verdict == Verdict.PASS
+    assert r.is_completed is False
+
+
 async def test_step_llm_invalid_verdict_defaults_retry(stub_llm):
     stub_llm(json.dumps({"verdict": "nope"}))
     r = await StepLLMEvaluator().step_eval("ctx")
